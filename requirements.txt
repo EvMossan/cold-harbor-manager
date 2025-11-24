@@ -1,0 +1,11 @@
+Flask
+pandas
+numpy
+SQLAlchemy
+psycopg2-binary
+pandas_market_calendars
+requests
+
+gunicorn
+gevent
+alpaca-trade-api==3.2.0

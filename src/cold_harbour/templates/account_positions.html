@@ -1,0 +1,2298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Account Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <!-- ── libraries ───────────────────────────────────────────────────────-->
+  <link
+    href="https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css"
+    rel="stylesheet"
+  >
+  <script defer src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+  <script defer src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <script>
+    window.HEARTBEAT_MS = Number('{{ heartbeat_ms|int }}') || 30000;
+  </script>
+
+  <!-- ── theme & core palette ────────────────────────────────────────────-->
+  <style>
+    /* compact row height */
+    :root { --row-h: .5em; }
+
+    table.dataTable tbody td {
+      height: var(--row-h);
+      padding: 8px 10px !important;
+      line-height: calc(var(--row-h) - 2px);
+    }
+    table.dataTable thead th {
+      height: auto !important;
+      padding: 8px 10px !important;
+      line-height: 1.25em;
+    }
+
+    /* colour palette (light & dark) */
+    :root {
+      /* light */
+      --bg:#fff;            --text:#000;          --thead-bg:#eee;
+      --row-odd:#f9f9f9;    --row-even:#fff;      --row-hover:#ddd;
+      --pl-pos:#008800;     --pl-neg:#c40000;     --ok:#00804d;
+      --tp-bar-pos:#c5e5c5; --tp-bar-neg:#f6c4c4;
+
+      /* chart palette (independent from table/text colours) */
+      --chart-pos:#035800;         /* base GREEN */
+      --chart-neg:#790000;         /* base RED   */
+      --chart-dd:#4da3ff;          /* base BLUE (DD) */
+      --chart-zero:#ffd700;        /* zero reference line (yellow) */
+      --chart-dd-zero:#ffd700;     /* drawdown zero line */
+      --chart-line-width-equity: 1.5;
+      --chart-line-width-drawdown: 1.5;
+      --chart-line-width-zero: 1;
+      --chart-line-dash-zero: 6 4;
+
+      /* chart: separate line/fill colours (light) */
+      --chart-pos-line:#035800;
+      --chart-pos-fill:#035800;
+      --chart-neg-line:#790000;
+      --chart-neg-fill:#790000;
+      --chart-dd-line:#4da3ff;
+      --chart-dd-fill:#4da3ff;
+      /* fill alpha controls (0..1); 0 = fully transparent */
+      --chart-pos-fill-alpha: 0;
+      --chart-neg-fill-alpha: 0;
+      --chart-dd-fill-alpha:  0;
+
+      /* chart scaffolding */
+      --chart-line: gray;                /* main line colour */
+      --grid-col: rgba(0,0,0,0.05);      /* light-mode grid */
+
+      --flash-pos-s:rgba(0,170,0,.40);
+      --flash-pos-m:rgba(0,170,0,.25);
+      --flash-pos-l:rgba(0,170,0,.15);
+
+      --flash-neg-s:rgba(255,120,0,.40);
+      --flash-neg-m:rgba(255,70,0,.25);
+      --flash-neg-l:rgba(200,0,0,.15);
+
+      --hold-new:#555;
+      --hold-old:#a77700;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        /* dark overrides */
+        --bg:#121415;    --text:#c1c1c1;  --thead-bg:#111;
+        --row-odd:#1e1e1e; --row-even:#181818; --row-hover:#333;
+        --pl-pos:#33d17a;  --pl-neg:#ff5757;
+        --tp-bar-pos:#009844; --tp-bar-neg:#4d0000;
+
+        /* keep chart palette explicit for dark theme */
+        --chart-pos:#009844;
+        --chart-neg:#960101;
+        --chart-dd:#2736fa;
+        --chart-zero:gray;
+        --chart-dd-zero:gray;
+        --chart-line-width-equity: 1.5;
+        --chart-line-width-drawdown: 1.5;
+        --chart-line-width-zero: 1;
+        --chart-line-dash-zero: 6 4;
+
+        /* chart: separate line/fill colours (dark) */
+        --chart-pos-line:#e9e9e9;
+        --chart-pos-fill:#434343;
+        --chart-neg-line:#e9e9e9;
+        --chart-neg-fill:#434343;
+        --chart-dd-line:#e9e9e9;
+        --chart-dd-fill:#ff2a00;
+        /* fill alpha controls (0..1) for dark */
+        --chart-pos-fill-alpha: 0.15;
+        --chart-neg-fill-alpha: 0.15;
+        --chart-dd-fill-alpha:  0.1;
+
+        /* grid in dark mode */
+        --chart-line: gray;
+        --grid-col: rgba(255,255,255,0.05);
+      }
+    }
+
+
+    /* generic table skin */
+    body {
+      font-family: sans-serif;
+      margin: 2rem;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+    }
+    table.dataTable { width: 100%; }
+    table.dataTable thead th {
+      position: sticky;
+      top: 0;
+      background: var(--thead-bg);
+    }
+    table.dataTable tbody tr:nth-child(odd)  { background: var(--row-odd); }
+    table.dataTable tbody tr:nth-child(even) { background: var(--row-even); }
+    table.dataTable tbody tr:hover           { background: var(--row-hover); }
+
+    /* cell helpers */
+    td.be-flag            { text-align: center; font-weight: bold; }
+    td.be-flag span.ok    { color: var(--ok); font-size: .7em; }
+    td.pl-pos, span.pl-pos { color: var(--pl-pos); }
+    td.pl-neg, span.pl-neg { color: var(--pl-neg); }
+    /* prevent wrapping for timestamp columns */
+    td.no-wrap, th.no-wrap { white-space: nowrap !important; }
+
+    td.tp-reach {
+      position: relative;
+      color: var(--pl-pos);
+    }
+    td.tp-reach::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 100%;
+      width: var(--reach, 0);
+      opacity: .35;
+      background: var(--tp-bar-pos);
+    }
+    td.tp-reach.tp-neg       { color: var(--pl-neg); }
+    td.tp-reach.tp-neg::before { background: var(--tp-bar-neg); }
+
+    /* flash animation for P/L changes */
+    @keyframes flashFade {
+      from { background: var(--flash-fill); }
+      to   { background: transparent; }
+    }
+    .flash-pos-s { --flash-fill: var(--flash-pos-s); animation: flashFade 1s; }
+    .flash-pos-m { --flash-fill: var(--flash-pos-m); animation: flashFade 1s; }
+    .flash-pos-l { --flash-fill: var(--flash-pos-l); animation: flashFade 1s; }
+
+    .flash-neg-s { --flash-fill: var(--flash-neg-s); animation: flashFade 1s; }
+    .flash-neg-m { --flash-fill: var(--flash-neg-m); animation: flashFade 1s; }
+    .flash-neg-l { --flash-fill: var(--flash-neg-l); animation: flashFade 1s; }
+
+    span.hold-new { color: var(--hold-new); }
+    span.hold-old { color: var(--hold-old); }
+  </style>
+
+  <!-- ── desktop layout ──────────────────────────────────────────────────-->
+  <style>
+    /* dashboard grid : KPI (⅓) | charts (⅔) */
+    .kpi-charts {
+      display: grid;
+      grid-template-columns: 1fr 2fr;
+      grid-template-areas: 'kpi charts';
+      gap: 2rem;
+      align-items: stretch;
+      min-height: 0;
+    }
+
+    /* chart sizing */
+    #depositChart, #depositChartIntraday {
+      height: 320px !important;
+      max-height: 320px !important;
+      display: block;
+    }
+    /* drawdown charts (shorter) */
+    #depositDrawdown, #depositDrawdownIntraday {
+      height: 100px !important;   /* slimmer DD pane for intraday */
+      max-height: 100px !important;
+      display: block;
+      margin-top: .125rem;        /* extra-tight vertical gap */
+    }
+
+    /* left-hand KPI column */
+    .kpi-panel {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 0;
+    }
+    .kpi-panel   { grid-area: kpi; }
+    .charts-panel{ grid-area: charts; }
+    #kpi_wrapper.dataTables_wrapper {
+      flex: 1 1 0;
+      overflow: auto;
+      width: auto !important;
+    }
+    #kpi {
+      width: 100% !important;
+      table-layout: fixed;
+    }
+    #kpi th:first-child,
+    #kpi td:first-child {
+      width: 1px;
+      white-space: nowrap;
+    }
+  </style>
+
+  <!-- ── hide scrollbar tracks (desktop) ─────────────────────────────────-->
+  <style>
+    #kpi_wrapper.dataTables_wrapper,
+    #kpi_wrapper .dataTables_scrollBody,
+    #pos_wrapper.dataTables_wrapper,
+    #pos_wrapper .dataTables_scrollBody,
+    #closed_wrapper.dataTables_wrapper,
+    #closed_wrapper .dataTables_scrollBody {
+      scrollbar-width: none;            /* Firefox */
+    }
+    #kpi_wrapper.dataTables_wrapper::-webkit-scrollbar,
+    #kpi_wrapper .dataTables_scrollBody::-webkit-scrollbar,
+    #pos_wrapper.dataTables_wrapper::-webkit-scrollbar,
+    #pos_wrapper .dataTables_scrollBody::-webkit-scrollbar,
+    #closed_wrapper.dataTables_wrapper::-webkit-scrollbar,
+    #closed_wrapper .dataTables_scrollBody::-webkit-scrollbar {
+      display: none;                    /* Chrome / Safari / Edge */
+    }
+  </style>
+
+  <!-- responsive / mobile overrides -->
+  <style>
+  @media (max-width: 768px) {
+    /* stack KPI and chart vertically on phones */
+    .kpi-charts {
+      grid-template-columns: 1fr;   /* one column grid */
+      grid-template-areas:
+        'charts'
+        'kpi';                      /* chart before KPI on mobile */
+      gap: 1.5rem;
+    }
+
+    /* trim page margins and text size */
+    body {
+      margin: 1rem;
+      font-size: 12px;
+    }
+
+    /* shorter chart height */
+    #depositChart, #depositChartIntraday {
+      height: 260px !important;
+      max-height: 260px !important;
+    }
+    #depositDrawdown, #depositDrawdownIntraday {
+      height: 90px !important;
+      max-height: 90px !important;
+    }
+
+    /* make every table horizontally scrollable */
+    .dataTables_wrapper { overflow-x:auto; }
+    table.dataTable     { width:100% !important; }
+
+    /* -------- ADD THESE TWO LINES ↓ -------- */
+    .kpi-panel, .charts-panel { min-width:0 !important; }
+    .charts-panel             { overflow-x:hidden; }  /* keep, or add if missing */
+
+    /* Unify backgrounds with desktop palette to avoid dark frames */
+    .charts-panel,
+    #kpi_wrapper.dataTables_wrapper,
+    #pos_wrapper.dataTables_wrapper,
+    #closed_wrapper.dataTables_wrapper,
+    #kpi_wrapper .dataTables_scrollHead,
+    #pos_wrapper .dataTables_scrollHead,
+    #closed_wrapper .dataTables_scrollHead,
+    #kpi_wrapper .dataTables_scrollBody,
+    #pos_wrapper .dataTables_scrollBody,
+    #closed_wrapper .dataTables_scrollBody {
+      background: var(--bg) !important;
+    }
+    #depositChart,
+    #depositChartIntraday,
+    #depositDrawdown,
+    #depositDrawdownIntraday {
+      background-color: var(--bg) !important;
+    }
+  }
+  </style>
+
+  <!-- ① RESPONSIVE CSS FIXES -------------------------------------------------->
+  <style>
+    /* --- small-screen overrides ------------------------------------------- */
+    @media (max-width: 768px) {
+
+      /* 1-a  KPI table vanished ➜ let it breathe + recalc width  */
+      #kpi_wrapper.dataTables_wrapper{
+        overflow-x:auto;              /* allow sideways scroll if needed      */
+        min-width:320px;              /* never collapse to zero width         */
+      }
+      /* Data-Tables gives every <td> a fixed height; remove that on phones   */
+      table.dataTable tbody td{
+        height:auto;                  /* row can now grow for multi-line text */
+        line-height:1.25em;
+      }
+
+      /* mobile chart behaviour */
+      .charts-panel   { overflow-x:hidden; }        /* no sideways scroll */
+      #depositChart   {                             /* stretch / shrink  */
+        width:100% !important;
+        max-width:100% !important;
+        min-width:0   !important;
+      } 
+
+      /* 1-c  Column header must scroll with body (we’ll sync in JS)          */
+      /* DataTables creates .dataTables_scrollHead and .dataTables_scrollBody */
+      /* Make BOTH scrollable so they can be linked in JS (see below)         */
+      .dataTables_scrollHead,
+      .dataTables_scrollBody{overflow-x:auto!important;}
+
+      /* let the KPI wrapper size itself to its rows instead of shrinking to 0 */
+      #kpi_wrapper.dataTables_wrapper { flex:0 0 auto !important; }
+    }
+  </style>
+
+</head>
+
+<body>
+
+  <!-- ───────────── account tabs (one per destination) ───────────── -->
+  {% if tabs %}
+  <nav class="acct-tabs" style="margin-bottom:1rem">
+    <style>
+      .acct-tabs { display:flex; gap:.5rem; flex-wrap:wrap; }
+      .acct-tabs a {
+        text-decoration:none; color:var(--text);
+        padding:.35rem .75rem; border-radius:6px;
+        border:1px solid var(--thead-bg); background:var(--row-even);
+        font-weight:600; font-size: .95em;
+      }
+      .acct-tabs a:hover { background:var(--row-odd); }
+      .acct-tabs a.active {
+        background: var(--thead-bg);
+        border-color: var(--row-hover);
+      }
+      @media (max-width:768px){ .acct-tabs { justify-content:center; } }
+    </style>
+    {% for t in tabs %}
+      <a href="/{{ t.slug }}/" class="{{ 'active' if t.slug == current_slug else '' }}"
+         title="Switch to {{ t.name }}">
+        {{ t.name }}
+      </a>
+    {% endfor %}
+  </nav>
+  {% endif %}
+
+  <!-- ──────────────────── KPI + CHARTS ───────────────────────────-->
+  <div class="kpi-charts">
+
+    <!-- left : KPI table -->
+    <div class="kpi-panel">
+      <h2>Performance Metrics</h2>
+      <table id="kpi" class="display compact"></table>
+    </div>
+
+    <!-- right : equity-curve chart -->
+    <div class="charts-panel">
+      <style>
+        /* Header: Portfolio summary + date + tabs */
+        .chart-header{ display:flex; flex-direction:column; align-items:flex-start; gap:.35rem; margin:0 0 .25rem 0; width:100%; }
+        .portfolio-summary{ display:flex; flex-direction:column; gap:.2rem; width:100%; }
+        .pf-title{ font-weight:600; opacity:.9; }
+        .pf-value{ font-weight:700; font-size:1.35rem; display:flex; align-items:center; gap:0.6rem; }
+        .pf-value span{ display:inline-block; }
+        .pf-change{ font-weight:600; }
+        .pf-change.is-hidden{ display:none; }
+        .pf-date{ font-size:.9rem; opacity:.85; }
+        .pf-date-row{ display:flex; align-items:center; gap:.8rem; flex-wrap:wrap; }
+        .pf-date-label{ font-size:.9rem; opacity:.85; }
+        @media (max-width:768px){
+          .pf-value{ font-size:1.2rem; }
+          .pf-date{ font-size:.85rem; }
+          .pf-date-row{ gap:.6rem; }
+        }
+        /* Make chart tabs visually identical to account tabs */
+        .chart-tabs { display:flex; gap:.5rem; flex-wrap:wrap; margin:0; }
+        .chart-tabs .tab {
+          -webkit-appearance: none; appearance: none;
+          text-decoration:none; color:var(--text);
+          padding:.35rem .75rem; border-radius:6px;
+          border:1px solid var(--thead-bg); background:var(--row-even);
+          font-weight:600; font-size: .95em; line-height:1; cursor:pointer;
+        }
+        .chart-tabs .tab:hover { background: var(--row-odd); }
+        .chart-tabs .tab.active { background: var(--thead-bg); border-color: var(--row-hover); }
+
+        /* Stronger mobile override placed AFTER the base rule so it wins */
+        @media (max-width:768px){ .chart-tabs{ margin-top:.15rem; } }
+      </style>
+      <div class="chart-header">
+        <div class="portfolio-summary">
+          <div class="pf-title">Portfolio</div>
+          <div class="pf-value">
+            <span id="pf-value">—</span>
+            <span id="pf-change" class="pf-change is-hidden">—</span>
+          </div>
+          <div class="pf-date-row">
+            <div id="pf-date" class="pf-date">—</div>
+            <div class="chart-tabs">
+              <button id="tab-daily"   class="tab active">Daily</button>
+              <button id="tab-intra"   class="tab">Intraday</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <canvas id="depositChart" style="display:block"></canvas>
+      <canvas id="depositChartIntraday" style="display:none"></canvas>
+      <!-- drawdown charts under the main charts; share X-range but show
+           X-axis only on the lower chart to avoid duplicate labels -->
+      <canvas id="depositDrawdown" style="display:block"></canvas>
+      <canvas id="depositDrawdownIntraday" style="display:none"></canvas>
+
+      <!-- enable if you also want cumulative-return plot
+      <h2 style="margin-top:3rem">Cumulative returns</h2>
+      <canvas id="cumReturnChart"></canvas> -->
+    </div>
+
+  </div>
+
+  <!-- ───────────────────── POSITIONS & TRADES ─────────────────────-->
+  <h2 style="margin-top:3rem">Open Positions</h2>
+  <table id="pos" class="display compact">
+    <tfoot>
+      <tr>
+        <th style="text-align:left">TOTAL</th>
+        <th></th><th></th><th></th><th></th><th></th><th></th>
+        <th></th><th></th><th></th><th></th><th></th><th></th><th></th>
+      </tr>
+    </tfoot>
+  </table>
+
+  <h2 style="margin-top:3rem">Closed Trades&nbsp;(latest&nbsp;300)</h2>
+  <table id="closed" class="display compact">
+    <tfoot>
+      <tr>
+        <th style="text-align:left">TOTAL</th>
+        <th></th><th></th><th></th><th></th>
+        <th></th><th></th><th></th><th></th>
+      </tr>
+    </tfoot>
+  </table>
+
+    <!-- ───────────────────────── SCRIPTS ─────────────────────────────-->
+  <script>
+    window.addEventListener('DOMContentLoaded', () => {
+    /* ---------- render helpers ---------- */
+    const num0 = $.fn.dataTable.render.number(',', '.', 0);
+    const num2 = $.fn.dataTable.render.number(',', '.', 2);
+    const num4 = $.fn.dataTable.render.number(',', '.', 4);
+    const pct1 = $.fn.dataTable.render.number(',', '.', 1, '%');
+    const isMobile = window.matchMedia('(max-width: 768px)').matches;
+    const heartbeatMs = Math.max(1, Number(window.HEARTBEAT_MS) || 30_000);
+
+    function scheduleAligned(fn, intervalMs = heartbeatMs, offsetMs = 0) {
+      const interval = Math.max(1, Math.floor(intervalMs));
+      const normalizedOffset =
+        ((offsetMs % interval) + interval) % interval;
+
+      function execute() {
+        try {
+          const out = fn();
+          if (out && typeof out.then === 'function') {
+            out.catch(() => {});
+          }
+        } catch (_) { /* ignore */ }
+      }
+
+      function scheduleNext() {
+        const now = Date.now();
+        const next =
+          Math.ceil((now - normalizedOffset) / interval) * interval +
+          normalizedOffset;
+        const wait = Math.max(1, next - now);
+        setTimeout(() => {
+          execute();
+          scheduleNext();
+        }, wait);
+      }
+
+      execute();
+      scheduleNext();
+    }
+
+    window.scheduleAligned = scheduleAligned;
+
+    /** wrap a numeric value with P/L colour */
+    const wrapPnL = (v, html) =>
+      `<span class="${(+v) >= 0 ? 'pl-pos' : 'pl-neg'}">${html}</span>`;
+
+    /* ---------- KPI TABLE ------------------------------------------------ */
+    let kpiTbl = null;
+
+    /* shared portfolio header state for all scripts */
+    const pfHeader = window.pfHeader || {};
+    window.pfHeader = pfHeader;
+    pfHeader.valueEl = document.getElementById('pf-value');
+    pfHeader.changeEl = document.getElementById('pf-change');
+    pfHeader.dateEl = document.getElementById('pf-date');
+    pfHeader.usdFmt = pfHeader.usdFmt ||
+      new Intl.NumberFormat(
+        'en-US',
+        { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }
+      );
+    const PF_TIME_ZONE = 'America/New_York';
+    if (!('baseDeposit' in pfHeader)) pfHeader.baseDeposit = null;
+    if (!('dailyDeposit' in pfHeader)) pfHeader.dailyDeposit = null;
+    if (!('dailyTimestamp' in pfHeader)) pfHeader.dailyTimestamp = null;
+    if (!('intradayDeposit' in pfHeader)) pfHeader.intradayDeposit = null;
+    if (!('intradayTimestamp' in pfHeader)) pfHeader.intradayTimestamp = null;
+    if (!('source' in pfHeader)) pfHeader.source = 'daily';
+    if (!('sessionBaseline' in pfHeader)) pfHeader.sessionBaseline = null;
+    if (!('sessionBaselineTs' in pfHeader)) pfHeader.sessionBaselineTs = null;
+    if (!('sessionPercent' in pfHeader)) pfHeader.sessionPercent = null;
+    if (!('sessionDelta' in pfHeader)) pfHeader.sessionDelta = null;
+    if (!('sessionFlows' in pfHeader)) pfHeader.sessionFlows = null;
+    if (!('sessionRealised' in pfHeader)) pfHeader.sessionRealised = null;
+    if (!('latestLiveDeposit' in pfHeader)) pfHeader.latestLiveDeposit = null;
+    if (!('latestLiveTimestamp' in pfHeader)) pfHeader.latestLiveTimestamp = null;
+
+    /* human-readable → short label */
+    const labelMap = {
+      'P/L'                     : 'Total Profit/Loss (WAC)',
+      'P/L (per Lot)'           : 'Total Profit/Loss',
+      'Total Return'            : 'Total Return %',
+      'Total Profit/Loss'       : 'Realised Profit/Loss',
+      'Unrealised P/L'          : 'Unrealised Profit/Loss (WAC)',
+      'Unrealised P/L (per Lot)': 'Unrealised Profit/Loss (per Lot)',
+      'Fees + Interest'         : 'Fees + Interest',
+
+      /* ratios */
+      'R/R Ratio'               : 'Risk-Reward Ratio',
+      'Breakeven %'             : 'Breakeven %',
+      'P/L Ratio %'             : 'Profit/Loss Ratio %',
+
+      /* counts */
+      'Open Positions'          : 'Open Trades (n)',
+      'Closed Trades'           : 'Closed Trades (n)',
+
+      /* cash aggregates */
+      'Total Buy'               : 'Total Buy',
+      'Total Sells'             : 'Total Sell',
+
+      /* risk / holding */
+      'Mean Stop'               : 'Avg Stop ($)',
+      'Mean Take'               : 'Avg Take ($)',
+      'Mean Holding Period Stop': 'Hold Stop (d)',
+      'Mean Holding Period Take': 'Hold Take (d)',
+
+      /* Sharpe ratios */
+      'Sharpe 10d'              : 'Sharpe 10 days',
+      'Sharpe 21d'              : 'Sharpe 21 days',
+      'Sharpe 63d'              : 'Sharpe 63 days',
+      'Sharpe 126d'             : 'Sharpe 126 days',
+      'Sharpe 252d'             : 'Sharpe 252 days'
+    };
+
+    /* display order */
+    const metricOrder = [
+      'P/L (per Lot)', 'P/L', 'Total Return',
+      'Total Profit/Loss', 'Unrealised P/L', 'Unrealised P/L (per Lot)',
+      'Fees + Interest',
+      'R/R Ratio', 'Breakeven %', 'P/L Ratio %',
+      'Open Positions', 'Closed Trades',
+      'Total Buy', 'Total Sells',
+      'Mean Stop', 'Mean Take',
+      'Mean Holding Period Stop', 'Mean Holding Period Take',
+      'Sharpe 10d', 'Sharpe 21d', 'Sharpe 63d', 'Sharpe 126d', 'Sharpe 252d'
+    ];
+
+    /** fetch KPI JSON + (re)draw table */
+    function loadKpi () {
+      $.getJSON('api/metrics', data => {
+        const src = data[0] || {};
+
+        /* derive total P/Ls on the fly */
+        src['P/L'] =
+          (+src['Total Profit/Loss'] || 0) + (+src['Unrealised P/L'] || 0);
+        src['P/L (per Lot)'] =
+          (+src['Total Profit/Loss'] || 0) + (+src['Unrealised P/L (per Lot)'] || 0);
+
+        /* turn object → ordered row-array */
+        const rows = metricOrder.map(key => ({
+          metric : labelMap[key] || key,
+          rawKey : key,
+          value  : src[key] ?? 0
+        }));
+
+        const cols = [
+          { data:'metric', title:'Metric', className:'dt-left' },
+          {
+            data:'value',  title:'Value',  className:'dt-right',
+            render: (d, t, r) => {
+              if (t !== 'display') return +d || 0;
+
+              /* pretty-print with correct formatter */
+              if (r.rawKey === 'Total Return')
+                return wrapPnL(d, pct1.display(+d));
+
+              if (r.rawKey.includes('%'))
+                return pct1.display(+d);
+
+              if (['Open Positions','Closed Trades'].includes(r.rawKey))
+                return num0.display(+d);
+
+              if (['Total Profit/Loss','Unrealised P/L','Unrealised P/L (per Lot)','P/L','P/L (per Lot)'].includes(r.rawKey))
+                return wrapPnL(d, num2.display(+d));
+
+              if (r.rawKey === 'Fees + Interest')
+                return num2.display(+d);
+
+              return num2.display(+d);
+            }
+          }
+        ];
+
+        /* draw or refresh */
+        if (!kpiTbl) {
+          kpiTbl = $('#kpi').DataTable({
+            data: rows,
+            columns: cols,
+            dom:'t',
+            paging:false,
+            searching:false,
+            info:false,
+            ordering:false,
+            scrollX:false,
+            scrollY:false
+          }).on('draw.dt', () =>
+            $('#kpi, #kpi_wrapper').css('width','auto')
+          );
+        } else {
+          kpiTbl.clear().rows.add(rows).draw(false);
+        }
+
+        refreshLiveKpis();      /* sync with open-positions P/L */
+        kpiTbl.columns.adjust();
+
+        /* capture base deposit for header; header follows KPI events */
+        try {
+          fetch('api/equity')
+            .then(r => (r && r.ok ? r.json() : []))
+            .then(rows => {
+              try {
+                const last = rows && rows.length ? rows[rows.length - 1] : null;
+                pfHeader.dailyDeposit =
+                  last && last.deposit != null ? +last.deposit : null;
+                pfHeader.dailyTimestamp =
+                  last && last.date ? last.date : null;
+                if (pfHeader.source === 'daily' ||
+                    pfHeader.intradayDeposit == null) {
+                  if (pfHeader.dailyDeposit != null) {
+                    renderPortfolioHeaderValue(
+                      pfHeader.dailyDeposit,
+                      pfHeader.dailyTimestamp
+                    );
+                  }
+                }
+              } catch (_) { /* ignore */ }
+            })
+            .catch(() => {});
+        } catch (_) { /* ignore */ }
+      });
+    }
+    scheduleAligned(loadKpi);
+
+    /** patch KPI rows that depend on live open-positions */
+    function refreshLiveKpis () {
+      if (!kpiTbl) return;
+
+      const posTbl   = $('#pos').DataTable();
+      const unreal   = posTbl
+        .column('profit_loss:name')
+        .data().toArray().reduce((a,b)=> a + (+b||0), 0);
+      const unrealPL = posTbl
+        .column('profit_loss_lot:name')
+        .data().toArray().reduce((a,b)=> a + (+b||0), 0);
+      const openCnt = posTbl.data().length;
+
+      kpiTbl.rows().every(function () {
+        const r = this.data();
+
+        if (r.rawKey === 'Unrealised P/L')
+          r.value = unreal;                 // WAC-based
+
+        if (r.rawKey === 'Unrealised P/L (per Lot)')
+          r.value = unrealPL;               // per-lot
+
+        if (r.rawKey === 'P/L') {
+          const realised =
+            +kpiTbl.row(idxOf('Total Profit/Loss')).data().value || 0;
+          r.value = realised + unreal;
+        }
+        if (r.rawKey === 'P/L (per Lot)') {
+          const realised =
+            +kpiTbl.row(idxOf('Total Profit/Loss')).data().value || 0;
+          r.value = realised + unrealPL;      // per-lot aggregate
+        }
+
+        if (r.rawKey === 'Open Positions')
+          r.value = openCnt;
+
+        this.invalidate();
+      });
+      kpiTbl.draw(false);
+
+      try {
+        syncPortfolioHeaderState();
+      } catch (_) { /* ignore */ }
+
+      /* helper to find KPI row index by raw key */
+      function idxOf (key) {
+        return kpiTbl.rows().indexes()
+          .filter(i => kpiTbl.row(i).data().rawKey === key)[0];
+      }
+    }
+
+    /* ---------- VIRTUAL VIEWPORT constants ----------------------------- */
+    const ROW_H     = 24;                 /* ≈px for one row incl. padding  */
+    const TEN_ROWS  = (ROW_H * 10) + 'px';
+
+    /* ---------- OPEN POSITIONS TABLE ----------------------------------- */
+    const prevPL  = {};                   /* store previous P/L per row key */
+
+    // Helper: format ISO timestamp to UTC 'YYYY-MM-DD HH:mm:ss'
+    const fmtUtcMin = (iso) => {
+      if (!iso) return '';
+      const d = new Date(iso);
+      const pad = n => String(n).padStart(2, '0');
+      return (
+        d.getUTCFullYear() + '-' +
+        pad(d.getUTCMonth() + 1) + '-' +
+        pad(d.getUTCDate()) + ' ' +
+        pad(d.getUTCHours()) + ':' +
+        pad(d.getUTCMinutes()) + ':' +
+        pad(d.getUTCSeconds())
+      );
+    };
+
+    /* Build columns for Open Positions, mobile vs desktop */
+    const posColsMobile = [
+      { data:'moved_flag', name:'moved_flag', title:'BE&nbsp;?',
+        className:'be-flag col-be-flag', defaultContent:'—',
+        render: d => d === 'OK' ? '<span class="ok">✔︎</span>' : '—' },
+
+      { data:'tp_sl_reach_pct', name:'tp_sl_reach_pct', title:'TP/SL&nbsp;%',
+        defaultContent:0, className:'tp-reach col-tp-sl-pct', type:'num',
+        render:(d,t)=> t==='display' ? num2.display(+d||0) : +d||0 },
+
+      { data:'symbol', name:'symbol', title:'Symbol', defaultContent:'' },
+
+      { data:'filled_at', name:'filled_at', title:'Buy&nbsp;TS', className:'no-wrap',
+        defaultContent:'',
+        render:(d,t)=> t==='display' ? fmtUtcMin(d)
+                                     : (d ? Date.parse(d) : 0) },
+
+      { data:'holding_days', name:'holding_days', title:'Days',
+        defaultContent:0,
+        render:(d,t)=> t==='display' ? num0.display(+d||0) : +d||0 },
+
+      { data:'qty', name:'qty', title:'Qty', defaultContent:0, render:num0 },
+      { data:'avg_fill', name:'avg_fill', title:'Avg&nbsp;Fill',
+        defaultContent:0, render:num2 },
+      { data:'sl_px', name:'sl_px', title:'Stop', defaultContent:0, render:num2 },
+      { data:'tp_px', name:'tp_px', title:'TP', defaultContent:0, render:num2 },
+      { data:'mkt_px', name:'mkt_px', title:'Mkt', defaultContent:0, render:num2 },
+      { data:'buy_value', name:'buy_value', title:'Buy&nbsp;Value',
+        defaultContent:0, render:num2 },
+      { data:'mkt_value', name:'mkt_value', title:'Mkt&nbsp;Value',
+        defaultContent:0, render:num2 },
+
+      { data:'profit_loss', name:'profit_loss', title:'P/L&nbsp;(WAC)',
+        className:'col-pl-wac dt-right', defaultContent:0,
+        render:(d,t)=> t==='display' ? num2.display(+d||0) : +d||0 },
+
+      { data:'profit_loss_lot', name:'profit_loss_lot', title:'P/L',
+        className:'col-pl-lot dt-right', defaultContent:0,
+        render:(d,t)=> t==='display' ? num2.display(+d||0) : +d||0 }
+    ];
+
+    /* Desktop: keep TP/SL % right after BE? (same as mobile) */
+    const posColsDesktop = posColsMobile;
+
+    const pos = $('#pos').DataTable({
+      data: [],
+      autoWidth: false,
+      paging: false,
+      searching: false,
+      scrollY: TEN_ROWS,
+      scrollCollapse: true,
+      scrollX:true,
+      responsive:true,
+      deferRender:true,
+      rowId: 'parent_id',
+      columns: isMobile ? posColsMobile : posColsDesktop,
+
+      /* per-row colour-coding & flash logic */
+      rowCallback: (row, data) => {
+        /* colour P/L cells (robust to column order) */
+        $(row).find('td.col-pl-wac')
+          .toggleClass('pl-pos', data.profit_loss > 0)
+          .toggleClass('pl-neg', data.profit_loss < 0);
+        $(row).find('td.col-pl-lot')
+          .toggleClass('pl-pos', data.profit_loss_lot > 0)
+          .toggleClass('pl-neg', data.profit_loss_lot < 0);
+
+        /* TP/SL reach bar */
+        const reach = Math.abs(+data.tp_sl_reach_pct || 0);
+        const tpCell = $(row).find('td.col-tp-sl-pct');
+        if (tpCell && tpCell[0]) {
+          tpCell
+            .toggleClass('tp-neg', data.profit_loss_lot < 0)[0]
+            .style.setProperty('--reach', Math.min(reach, 100) + '%');
+        }
+
+        /* flash if P/L changed (based on WAC) */
+        const key   = data.parent_id ?? data.symbol;
+        const newPL = +data.profit_loss;
+        const oldPL = prevPL[key];
+
+        if (oldPL !== undefined && oldPL !== newPL) {
+          const pct = oldPL === 0 ? 100
+            : (newPL - oldPL) / Math.abs(oldPL) * 100;
+          let cls = '';
+          if      (pct >=  1)  cls = 'flash-pos-l';
+          else if (pct >= .3)  cls = 'flash-pos-m';
+          else if (pct >= .1)  cls = 'flash-pos-s';
+          else if (pct <= -1)  cls = 'flash-neg-l';
+          else if (pct <= -.3) cls = 'flash-neg-m';
+          else if (pct <= -.1) cls = 'flash-neg-s';
+
+          if (cls) {
+            const cell = $(row).find('td.col-pl-wac');
+            cell.removeClass(
+              'flash-pos-s flash-pos-m flash-pos-l flash-neg-s flash-neg-m flash-neg-l'
+            ).addClass(cls);
+            setTimeout(() => cell.removeClass(cls), 1000);
+          }
+        }
+        prevPL[key] = newPL;
+      },
+
+      /* footer aggregation */
+      footerCallback () {
+        const api = this.api(),
+              n   = d => +d || 0;
+
+        const buy = api.column('buy_value:name').data().reduce((a,b)=>a+n(b),0);
+        const mkt = api.column('mkt_value:name').data().reduce((a,b)=>a+n(b),0);
+        const plW = api.column('profit_loss:name').data().reduce((a,b)=>a+n(b),0);
+        const plL = api.column('profit_loss_lot:name').data().reduce((a,b)=>a+n(b),0);
+
+        $(api.column('buy_value:name').footer()).html(num2.display(buy));
+        $(api.column('mkt_value:name').footer()).html(num2.display(mkt));
+        $(api.column('profit_loss:name').footer())
+          .html(num2.display(plW))
+          .toggleClass('pl-pos', plW > 0)
+          .toggleClass('pl-neg', plW < 0);
+        $(api.column('profit_loss_lot:name').footer())
+          .html(num2.display(plL))
+          .toggleClass('pl-pos', plL > 0)
+          .toggleClass('pl-neg', plL < 0);
+        $(api.column('tp_sl_reach_pct:name').footer()).html('');
+      }
+    });
+
+    /* ensure default sort by per-lot P/L, robust to order */
+    pos.order([[ pos.column('profit_loss_lot:name').index(), 'desc' ]])
+       .draw();
+
+    /* ---------- helpers to upsert / delete rows ------------------------ */
+    function upsertPos (row) {
+      const key = row.parent_id ?? row.symbol;
+
+      /* 1 — update-or-add the row whose key matches this update */
+      const idx = pos.rows((i,d) =>
+                  (d.parent_id ?? d.symbol) === key).indexes()[0];
+
+      if (idx !== undefined)
+        pos.row(idx).data(row).invalidate();   // overwrite
+      else
+        pos.row.add(row);                      // brand-new
+
+      /* 2 — if this update has parent_id we must remove any **symbol-only**
+            placeholder that was created earlier, otherwise you’ll see a
+            duplicate "Qty 0" line. */
+      if (row.parent_id) {
+        pos.rows((i,d) => !d.parent_id && d.symbol === row.symbol)
+          .remove();
+      }
+
+      pos.draw(false);
+      refreshLiveKpis();     // keep the KPI panel in sync
+    }
+
+    function delPos (key) {
+      const idx = pos.rows((i,d)=>(d.parent_id??d.symbol) === key).indexes()[0];
+      if (idx !== undefined) {
+        pos.row(idx).remove().draw(false);
+        refreshLiveKpis();
+        loadKpi();
+      }
+    }
+
+    /* initial bulk load */
+    let esPos = null;
+    let esClosed = null;
+    let posEtag = null;
+
+    function updatePortfolioChange() {
+      if (!pfHeader.changeEl) return;
+      const baseline = Number(pfHeader.sessionBaseline);
+      const current = Number.isFinite(Number(pfHeader.baseDeposit))
+        ? Number(pfHeader.baseDeposit)
+        : Number(pfHeader.latestLiveDeposit);
+      if (
+        Number.isFinite(baseline) &&
+        baseline > 0 &&
+        Number.isFinite(current)
+      ) {
+        const delta = current - baseline;
+        const pct = (delta / baseline) * 100;
+        pfHeader.sessionDelta = delta;
+        pfHeader.sessionPercent = pct;
+        const pctText = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+        let deltaText;
+        try {
+          if (pfHeader.usdFmt) {
+            deltaText = pfHeader.usdFmt.format(delta);
+          }
+        } catch (_) {
+          deltaText = null;
+        }
+        if (typeof deltaText !== 'string') {
+          const absVal = Math.abs(Number.isFinite(delta) ? delta : 0);
+          const base = `$${absVal.toFixed(2)}`;
+          deltaText = delta < 0 ? `-${base}` : `${base}`;
+        }
+        if (delta > 0 && !deltaText.startsWith('+')) deltaText = `+${deltaText}`;
+        const text = `${deltaText} (${pctText})`;
+        pfHeader.changeEl.textContent = text;
+        pfHeader.changeEl.classList.remove('is-hidden', 'pl-pos', 'pl-neg');
+        pfHeader.changeEl.classList.add(pct >= 0 ? 'pl-pos' : 'pl-neg');
+      } else {
+        pfHeader.sessionDelta = null;
+        pfHeader.sessionPercent = null;
+        pfHeader.changeEl.textContent = '—';
+        pfHeader.changeEl.classList.add('is-hidden');
+        pfHeader.changeEl.classList.remove('pl-pos', 'pl-neg');
+      }
+    }
+    window.updatePortfolioChange = updatePortfolioChange;
+
+    function applySessionMeta(meta = {}) {
+      if (!meta || typeof meta !== 'object') return;
+
+      const prev = Number(meta.prev_deposit);
+      const flows = Number(meta.session_flows);
+      const baselineDirect = Number(meta.baseline_deposit);
+      let baselineCandidate = null;
+      if (Number.isFinite(prev)) {
+        baselineCandidate = prev + (Number.isFinite(flows) ? flows : 0);
+      }
+      if (!Number.isFinite(baselineCandidate) || baselineCandidate <= 0) {
+        if (Number.isFinite(baselineDirect) && baselineDirect > 0) {
+          baselineCandidate = baselineDirect;
+        } else {
+          const currentBaseline = Number(pfHeader.sessionBaseline);
+          if (Number.isFinite(currentBaseline) && currentBaseline > 0) {
+            baselineCandidate = currentBaseline;
+          }
+        }
+      }
+      if (Number.isFinite(baselineCandidate) && baselineCandidate > 0) {
+        pfHeader.sessionBaseline = baselineCandidate;
+      }
+
+      if (meta.baseline_ts) pfHeader.sessionBaselineTs = meta.baseline_ts;
+
+      if (Number.isFinite(flows)) pfHeader.sessionFlows = flows;
+      if (meta.session_realised != null) {
+        const realised = Number(meta.session_realised);
+        if (Number.isFinite(realised)) pfHeader.sessionRealised = realised;
+      }
+      if (meta.live_deposit != null) {
+        const live = Number(meta.live_deposit);
+        if (Number.isFinite(live)) pfHeader.latestLiveDeposit = live;
+      }
+      if (meta.live_ts) pfHeader.latestLiveTimestamp = meta.live_ts;
+
+      updatePortfolioChange();
+    }
+    window.applySessionMeta = applySessionMeta;
+
+    function renderPortfolioHeaderValue(dep, ts) {
+      if (!pfHeader.valueEl || !pfHeader.dateEl || !pfHeader.usdFmt) return;
+      const numericDep = Number(dep);
+      if (!Number.isFinite(numericDep)) return;
+      pfHeader.valueEl.textContent = pfHeader.usdFmt.format(numericDep);
+      let when = ts ? new Date(ts) : new Date();
+      if (!Number.isFinite(when.getTime())) when = new Date();
+      pfHeader.dateEl.textContent = when.toLocaleString(
+        'en-US',
+        {
+          dateStyle: 'long',
+          timeStyle: 'short',
+          timeZone: PF_TIME_ZONE
+        }
+      );
+      pfHeader.baseDeposit = numericDep;
+      updatePortfolioChange();
+    }
+    window.renderPortfolioHeaderValue = renderPortfolioHeaderValue;
+
+    function _tsMillis(ts) {
+      if (!ts) return Number.NEGATIVE_INFINITY;
+      const d = ts instanceof Date ? ts : new Date(ts);
+      const ms = d.getTime();
+      return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
+    }
+
+    function syncPortfolioHeaderState() {
+      const dailyMs = _tsMillis(pfHeader.dailyTimestamp);
+      const intraMs = _tsMillis(pfHeader.intradayTimestamp);
+
+      if (pfHeader.source === 'intraday') {
+        if (pfHeader.intradayDeposit != null) {
+          renderPortfolioHeaderValue(
+            pfHeader.intradayDeposit,
+            pfHeader.intradayTimestamp
+          );
+          return;
+        }
+        if (pfHeader.dailyDeposit != null) {
+          renderPortfolioHeaderValue(
+            pfHeader.dailyDeposit,
+            pfHeader.dailyTimestamp
+          );
+          return;
+        }
+      } else {
+        if (
+          pfHeader.dailyDeposit != null &&
+          dailyMs >= intraMs
+        ) {
+          renderPortfolioHeaderValue(
+            pfHeader.dailyDeposit,
+            pfHeader.dailyTimestamp
+          );
+          return;
+        }
+        if (pfHeader.intradayDeposit != null) {
+          renderPortfolioHeaderValue(
+            pfHeader.intradayDeposit,
+            pfHeader.intradayTimestamp
+          );
+          return;
+        }
+        if (pfHeader.dailyDeposit != null) {
+          renderPortfolioHeaderValue(
+            pfHeader.dailyDeposit,
+            pfHeader.dailyTimestamp
+          );
+          return;
+        }
+      }
+    }
+    window.syncPortfolioHeaderState = syncPortfolioHeaderState;
+    async function fetchPositionsCached () {
+      try {
+        const headers = posEtag ? { 'If-None-Match': posEtag } : {};
+        const r = await fetch('api/positions_cached', { headers });
+        if (r.status === 304) return;   // unchanged
+        if (!r.ok) return;
+        posEtag = r.headers.get('ETag') || posEtag;
+        const rows = await r.json();
+        const keys = new Set();
+        rows.forEach(r => { upsertPos(r); keys.add(r.parent_id ?? r.symbol); });
+        pos.rows().every(function () {
+          if (!keys.has(this.data().parent_id ?? this.data().symbol))
+            this.remove();
+        });
+        pos.draw(false);
+        refreshLiveKpis();
+      } catch (_) { /* ignore */ }
+    }
+
+    function loadPos () {
+      fetchPositionsCached();
+    }
+    loadPos();
+
+    /* listen to streaming updates (batched apply) */
+    const queue = [];
+    let hidden = document.hidden;
+    document.addEventListener('visibilitychange', () => hidden = document.hidden);
+
+    function flush () {
+      if (!queue.length) return;
+      const batch = queue.splice(0, queue.length);
+      const dels = new Set();
+      const ups  = [];
+      for (const m of batch) {
+        try {
+          if (!m) continue;
+          if (m.op === 'delete') {
+            const k = m.parent_id ?? m.key ?? m.id;
+            if (k) dels.add(k);
+            continue;
+          }
+          if (m.op === 'batch') {
+            (m.deletes || []).forEach(id => id && dels.add(id));
+            (m.rows || []).forEach(r => r && ups.push(r));
+            continue;
+          }
+          if (m.row) ups.push(m.row);
+          // ignore any other message types to avoid malformed rows
+        } catch (_) {}
+      }
+      if (dels.size) {
+        pos.rows((i,d)=> d && dels.has(d.parent_id ?? d.symbol)).remove();
+      }
+      ups.forEach(upsertPos);
+      pos.draw(false);
+      refreshLiveKpis();
+    }
+
+    setInterval(() => {
+      // throttle harder when tab is hidden
+      if (hidden) return flush();
+      flush();
+    }, 250);
+
+    esPos = new EventSource('stream/positions')
+      .addEventListener('message', e => {
+        try {
+          const m = JSON.parse(e.data);
+          if (m && m.op === 'heartbeat') {
+            // pull cached snapshot with ETag to keep consistent fast
+            fetchPositionsCached();
+            return;
+          }
+          queue.push(m);
+        } catch (_) {}
+      });
+
+    /* -------------------------------------------------------------------
+       CLOSED TRADES TABLE
+    --------------------------------------------------------------------*/
+    /* Build Closed Trades columns. Mobile: move PnL after Symbol */
+    const closedColsBase = [
+      { data:'side',        name:'side',        title:'Side' },
+      { data:'symbol',      name:'symbol',      title:'Symbol' },
+      { data:'qty',         name:'qty',         title:'Qty',        render:num4 },
+      { data:'entry_time',  name:'entry_time',  title:'Buy&nbsp;TS',  type:'datetime', className:'no-wrap' },
+      { data:'exit_time',   name:'exit_time',   title:'Sell&nbsp;TS', type:'datetime' },
+      { data:'entry_price', name:'entry_price', title:'Entry&nbsp;Px',  render:num2 },
+      { data:'exit_price',  name:'exit_price',  title:'Exit&nbsp;Px',   render:num2 },
+      { data:'pnl_cash',    name:'pnl_cash',    title:'PnL&nbsp;Cash',
+        render:(d,t)=> t==='display' ? wrapPnL(d,num2.display(+d)) : +d },
+      { data:'return_pct',  name:'return_pct',  title:'PnL&nbsp;%',
+        render:(d,t)=> t==='display' ? wrapPnL(d,pct1.display(+d)) : +d }
+    ];
+
+    const closedColsMobile = [
+      closedColsBase[0],           // side
+      closedColsBase[1],           // symbol
+      closedColsBase[7],           // pnl_cash
+      closedColsBase[8],           // return_pct
+      closedColsBase[2],           // qty
+      closedColsBase[3],           // entry_time
+      closedColsBase[4],           // exit_time
+      closedColsBase[5],           // entry_price
+      closedColsBase[6]            // exit_price
+    ];
+    const closedColsDesktop = closedColsBase; /* unchanged */
+
+    const closed = $('#closed').DataTable({
+      data: [],
+      autoWidth: false,
+      paging: false,
+      searching: false,
+      /* sort will be set after init using column name */
+      columns: isMobile ? closedColsMobile : closedColsDesktop,
+
+      /* 10-row viewport */
+      scrollY: 240,
+      scrollCollapse: true,
+      scrollX:true,
+      responsive:true,
+
+      footerCallback () {
+        const api = this.api(),
+              n   = d => +d || 0;
+
+        const cash = api.column('pnl_cash:name').data().reduce((a,b)=>a+n(b),0);
+        const pct  = api.data().length
+          ? api.column('return_pct:name').data().reduce((a,b)=>a+n(b),0) / api.data().length
+          : 0;
+
+        $(api.column('pnl_cash:name').footer())
+          .html(num2.display(cash))
+          .toggleClass('pl-pos', cash > 0)
+          .toggleClass('pl-neg', cash < 0);
+
+        $(api.column('return_pct:name').footer())
+          .html(pct1.display(pct))
+          .toggleClass('pl-pos', pct > 0)
+          .toggleClass('pl-neg', pct < 0);
+      }
+    });
+
+    /* keep sorting by Sell TS regardless of column order */
+    closed.order([[ closed.column('exit_time:name').index(), 'desc' ]])
+          .draw();
+
+    ['pos','closed'].forEach(id => {
+      const wrap = $('#'+id+'_wrapper');
+      wrap.find('.dataTables_scrollBody').on('scroll', function () {
+        wrap.find('.dataTables_scrollHead').scrollLeft(this.scrollLeft);
+      });
+    });
+
+    window.addEventListener('resize', () => kpiTbl?.columns.adjust());
+
+    /* bulk load + periodic refresh */
+    function loadClosed () {
+      $.getJSON('api/closed', rows => {
+        closed.clear().rows.add(rows).draw(false);
+
+        /* keep KPI “Closed Trades” count in sync */
+        if (kpiTbl) {
+          const first = { ...kpiTbl.row(0).data() };
+          first['Closed Trades'] = rows.length;
+          kpiTbl.row(0).data(first).invalidate().draw(false);
+        }
+      });
+    }
+    scheduleAligned(loadClosed);
+
+    /* streaming updates */
+    esClosed = new EventSource('stream/closed')
+      .addEventListener('message', () => {
+        loadClosed();
+        loadKpi();
+      });
+
+    /* proactively close SSE on page unload */
+    window.addEventListener('beforeunload', () => {
+      try { esPos && esPos.close && esPos.close(); } catch (_) {}
+      try { esClosed && esClosed.close && esClosed.close(); } catch (_) {}
+    });
+
+    });
+  </script>
+
+  <!-- ─────────────────── EQUITY CURVE CHART ───────────────────────-->
+  <script>
+    window.addEventListener('DOMContentLoaded', () => {
+    (function () {
+      /* context + chart handles */
+      const ctxDaily   = document.getElementById('depositChart').getContext('2d');
+      const ctxIntra   = document.getElementById('depositChartIntraday').getContext('2d');
+      const ctxDD      = document.getElementById('depositDrawdown').getContext('2d');
+      const ctxDDIntra = document.getElementById('depositDrawdownIntraday').getContext('2d');
+      let   chartDaily = null;
+      let   chartIntra = null;
+      let   chartDD    = null;
+      let   chartDDIntra = null;
+
+      /* css var helper */
+      const css = v =>
+        getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+      const alphaVar = (name, def) => {
+        const s = css(name);
+        const n = parseFloat(s);
+        return Number.isFinite(n) ? n : def;
+      };
+      const numVar = (name, def) => {
+        const s = css(name);
+        const n = parseFloat(s);
+        return Number.isFinite(n) ? n : def;
+      };
+      const dashVar = (name, def) => {
+        const s = css(name);
+        if (!s) return def.slice();
+        const parts = s.trim().split(/[\s,]+/)
+          .map(v => parseFloat(v))
+          .filter(n => Number.isFinite(n) && n >= 0);
+        return parts.length ? parts : def.slice();
+      };
+
+      /* add alpha channel to any colour string */
+      function withAlpha (col, a) {
+        if (col.startsWith('#')) {
+          const h   = col.slice(1);
+          const rgb = h.length === 3
+            ? [...h].map(c => parseInt(c+c, 16))
+            : [h.substr(0,2), h.substr(2,2), h.substr(4,2)]
+                .map(x => parseInt(x, 16));
+          return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
+        }
+        if (col.startsWith('rgba'))
+          return col.replace(/rgba\(([^)]+),[^)]+\)/, `rgba($1,${a})`);
+        if (col.startsWith('rgb('))
+          return col.replace('rgb(', 'rgba(').replace(')', `,${a})`);
+        return col;
+      }
+
+      function alignHourRange (startLabel, endLabel) {
+        try {
+          const start = new Date(startLabel);
+          const end = new Date(endLabel);
+          if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) {
+            return [startLabel, endLabel];
+          }
+          return [start, end];
+        } catch (_) {
+          return [startLabel, endLabel];
+        }
+      }
+
+      // Slightly brighten color (mix with white)
+      function lighten(col, amt = 0.15) {
+        function clamp(x){ return Math.max(0, Math.min(255, Math.round(x))); }
+        let r=0,g=0,b=0,a=1;
+        if (!col) return '#ffffff';
+        if (col.startsWith('#')){
+          const h=col.slice(1);
+          const v=(h.length===3)?[...h].map(c=>parseInt(c+c,16)):[h.substr(0,2),h.substr(2,2),h.substr(4,2)].map(x=>parseInt(x,16));
+          [r,g,b]=v;
+        } else if (col.startsWith('rgba')){
+          const m=col.match(/rgba\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([0-9.]+)\)/); if(m){r=+m[1];g=+m[2];b=+m[3];a=+m[4];}
+        } else if (col.startsWith('rgb(')){
+          const m=col.match(/rgb\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\)/); if(m){r=+m[1];g=+m[2];b=+m[3];}
+        }
+        r=clamp(r+(255-r)*amt); g=clamp(g+(255-g)*amt); b=clamp(b+(255-b)*amt);
+        return a!==1?`rgba(${r},${g},${b},${a})`:`rgb(${r},${g},${b})`;
+      }
+
+      // Build a vertical gradient for Chart.js scriptable colour hooks.
+      function gradientBetween(stops, startFn, endFn) {
+        return function (ctx) {
+          const chart = ctx && ctx.chart;
+          const area  = chart && chart.chartArea;
+          if (!chart || !area) return null;
+          const meta = {
+            chart,
+            area,
+            scale: chart.scales?.y
+          };
+          const y0 = startFn(meta);
+          const y1 = endFn(meta);
+          if (!Number.isFinite(y0) || !Number.isFinite(y1) || y0 === y1) {
+            return null;
+          }
+          const g = chart.ctx.createLinearGradient(0, y0, 0, y1);
+          stops.forEach(stop => g.addColorStop(stop.offset, stop.color));
+          return g;
+        };
+      }
+
+      function clampToArea(y, area) {
+        return Math.min(area.bottom, Math.max(area.top, y));
+      }
+
+      function seriesExtent(values, opts = {}) {
+        const include = Array.isArray(opts.include)
+          ? opts.include
+          : (opts.include === undefined || opts.include === null
+              ? []
+              : [opts.include]);
+        let minVal = Infinity;
+        let maxVal = -Infinity;
+
+        const consider = (v) => {
+          if (typeof v === 'number' && Number.isFinite(v)) {
+            if (v < minVal) minVal = v;
+            if (v > maxVal) maxVal = v;
+          }
+        };
+
+        values.forEach(consider);
+        include.forEach(consider);
+
+        if (minVal === Infinity) {
+          return [0, 0];
+        }
+        return [minVal, maxVal];
+      }
+
+      function gradientForRange(stops, minVal, maxVal) {
+        if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) {
+          const fallback =
+            (stops && stops[stops.length - 1] && stops[stops.length - 1].color) ||
+            (stops && stops[0] && stops[0].color) ||
+            'rgba(0,0,0,0)';
+          return () => fallback;
+        }
+        if (minVal === maxVal) {
+          const fallback =
+            (stops && stops[0] && stops[0].color) || 'rgba(0,0,0,0)';
+          return () => fallback;
+        }
+
+        const topVal = Math.max(minVal, maxVal);
+        const bottomVal = Math.min(minVal, maxVal);
+
+        return gradientBetween(
+          stops,
+          ({ area, scale }) => {
+            if (scale && typeof scale.getPixelForValue === 'function') {
+              const y = scale.getPixelForValue(topVal);
+              if (Number.isFinite(y)) return clampToArea(y, area);
+            }
+            return area.top;
+          },
+          ({ area, scale }) => {
+            if (scale && typeof scale.getPixelForValue === 'function') {
+              const y = scale.getPixelForValue(bottomVal);
+              if (Number.isFinite(y)) return clampToArea(y, area);
+            }
+            return area.bottom;
+          }
+        );
+      }
+
+      function gradientForValues(stops, values, opts = {}) {
+        const [minVal, maxVal] = seriesExtent(values, opts);
+        return gradientForRange(stops, minVal, maxVal);
+      }
+
+      const crosshairPlugin = {
+        id: 'pfCrosshair',
+        afterDatasetsDraw(chart, _args, opts = {}) {
+          const tooltip = chart.tooltip;
+          if (!tooltip) return;
+          const active = tooltip.getActiveElements() || [];
+          if (!active.length) return;
+          const area = chart.chartArea;
+          const ctx = chart.ctx;
+
+          const primary = active.find(({ datasetIndex, index, element }) => {
+            if (!element || element.skip) return false;
+            if (!Number.isFinite(element.x) ||
+                !Number.isFinite(element.y)) return false;
+            const ds = chart.data.datasets?.[datasetIndex];
+            if (!ds) return false;
+            const raw = Array.isArray(ds.data) ? ds.data[index] : undefined;
+            if (raw == null || Number.isNaN(raw)) return false;
+            const label = String(ds.label || '').toLowerCase();
+            return !label.includes('zero line');
+          }) || active[0];
+
+          if (!primary || !primary.element) return;
+          const elem = primary.element;
+          if (!Number.isFinite(elem.x)) return;
+          const ds = chart.data.datasets?.[primary.datasetIndex] || {};
+          const fallback = opts.fallbackColor || '#888';
+          const datasetColor =
+            elem.options?.borderColor ||
+            (Array.isArray(ds.borderColor)
+              ? ds.borderColor[primary.index]
+              : ds.borderColor) ||
+            (Array.isArray(ds.backgroundColor)
+              ? ds.backgroundColor[primary.index]
+              : ds.backgroundColor) ||
+            fallback;
+          const lineDash = Array.isArray(opts.lineDash)
+            ? opts.lineDash : [4, 4];
+          const lineWidth = Number.isFinite(opts.lineWidth)
+            ? opts.lineWidth : 1;
+          const radius = Number.isFinite(opts.radius) ? opts.radius : 4;
+          ctx.save();
+          ctx.setLineDash(lineDash);
+          ctx.lineWidth = lineWidth;
+          ctx.strokeStyle = datasetColor;
+          ctx.beginPath();
+          ctx.moveTo(elem.x, area.top);
+          ctx.lineTo(elem.x, area.bottom);
+          ctx.stroke();
+          ctx.restore();
+
+          const fillAlpha = Number.isFinite(opts.pointFillAlpha)
+            ? opts.pointFillAlpha : 0.35;
+          const borderWidth = Number.isFinite(opts.pointBorderWidth)
+            ? opts.pointBorderWidth : 1;
+
+          active.forEach(({ datasetIndex, index, element }) => {
+            if (!element || element.skip) return;
+            if (!Number.isFinite(element.x) ||
+                !Number.isFinite(element.y)) return;
+            const dsLocal = chart.data.datasets?.[datasetIndex] || {};
+            const raw = Array.isArray(dsLocal.data)
+              ? dsLocal.data[index] : undefined;
+            if (raw == null || Number.isNaN(raw)) return;
+            const label = String(dsLocal.label || '').toLowerCase();
+            if (label.includes('zero line')) return;
+            const pointColor =
+              element.options?.borderColor ||
+              (Array.isArray(dsLocal.borderColor)
+                ? dsLocal.borderColor[index]
+                : dsLocal.borderColor) ||
+              datasetColor;
+            ctx.save();
+            ctx.setLineDash([]);
+            ctx.lineWidth = borderWidth;
+            ctx.strokeStyle = withAlpha(pointColor, 0.8);
+            ctx.fillStyle = withAlpha(pointColor, fillAlpha);
+            ctx.beginPath();
+            ctx.arc(element.x, element.y, radius, 0, Math.PI * 2);
+            ctx.fill();
+            if (borderWidth > 0) ctx.stroke();
+            ctx.restore();
+          });
+        }
+      };
+      if (window.Chart) Chart.register(crosshairPlugin);
+
+
+      /*
+       * Split a numeric time series into two arrays (positive/negative)
+       * while inserting an explicit zero-crossing point whenever the sign
+       * changes between consecutive finite values. This removes visual
+       * gaps when the line color switches at zero in Chart.js.
+       *
+       * - labels: array of timestamps (Date or parseable string)
+       * - values: array of numbers (nullable for gaps)
+       *
+       * Returns: { labels, pos, neg } where each array has equal length.
+       * Both pos and neg contain a 0 at the crossing X in order to let
+       * Chart.js draw continuous segments on each side of zero without
+       * leaving holes in the path or area fill.
+       */
+      function splitSeriesWithZero(labels, values) {
+        const outLabels = [];
+        const pos = [];
+        const neg = [];
+
+        const sgn = (y) => (y > 0 ? 1 : (y < 0 ? -1 : 0));
+        const toMs = (x) => {
+          if (x instanceof Date) return x.getTime();
+          const d = new Date(x);
+          return Number.isFinite(d.getTime()) ? d.getTime() : NaN;
+        };
+
+        let px = null, py = null, ps = 0, havePrev = false;
+
+        for (let i = 0; i < values.length; i++) {
+          const y = values[i];
+          const x = labels[i];
+
+          if (!Number.isFinite(y)) {
+            // Preserve true gaps in the source series
+            outLabels.push(x); pos.push(null); neg.push(null);
+            havePrev = false;
+            continue;
+          }
+
+          const s = sgn(y);
+
+          // Insert a zero point between prev and current when sign flips
+          if (havePrev && ps !== 0 && s !== 0 && ps !== s) {
+            const t0 = toMs(px);
+            const t1 = toMs(x);
+            if (Number.isFinite(t0) && Number.isFinite(t1) && t1 !== t0) {
+              const frac = py / (py - y); // portion from prev to current
+              const tCross = new Date(t0 + frac * (t1 - t0));
+              outLabels.push(tCross); pos.push(0); neg.push(0);
+            } else {
+              // Fallback: at least add a zero at the current label
+              outLabels.push(x); pos.push(0); neg.push(0);
+            }
+          }
+
+          outLabels.push(x);
+          pos.push(s >= 0 ? y : null);
+          neg.push(s <= 0 ? y : null);
+
+          px = x; py = y; ps = s; havePrev = true;
+        }
+        return { labels: outLabels, pos, neg };
+      }
+
+      const pfHeader = window.pfHeader = window.pfHeader || {};
+
+      /* fetch equity rows */
+      async function fetchRows () {
+        const r = await fetch('api/equity');
+        return r.ok ? await r.json() : [];
+      }
+
+      async function fetchRowsIntra () {
+        try {
+          const r = await fetch('api/equity_intraday');
+          if (!r.ok) return { series: [], meta: {} };
+          const data = await r.json();
+          if (data && typeof data === 'object' && !Array.isArray(data)) {
+            if (!Array.isArray(data.series)) data.series = [];
+            if (!data.meta || typeof data.meta !== 'object') data.meta = {};
+            return data;
+          }
+          return { series: Array.isArray(data) ? data : [], meta: {} };
+        } catch (_) {
+          return { series: [], meta: {} };
+        }
+      }
+
+      /* build Chart.js config */
+      function cfgDaily (rows) {
+        const labels = rows.map(r => r.date);
+        /* Use cumulative_return (%) and preserve real gaps as null */
+        const values = rows.map(r => {
+          const v = +r.cumulative_return;
+          return Number.isFinite(v) ? v * 100 : null;
+        });
+
+        const blue    = css('--chart-line') || '#29b3ff';
+        const posLine = css('--chart-pos-line') || css('--chart-pos') || '#035800';
+        const posFill = css('--chart-pos-fill') || css('--chart-pos') || '#035800';
+        const negLine = css('--chart-neg-line') || css('--chart-neg') || '#790000';
+        const negFill = css('--chart-neg-fill') || css('--chart-neg') || '#790000';
+        const grid  = css('--grid-col')   || 'rgba(0,0,0,0.15)';
+        const posFA = alphaVar('--chart-pos-fill-alpha', .25);
+        const negFA = alphaVar('--chart-neg-fill-alpha', .25);
+        const posTopAlpha = Math.min(1, posFA + 0.45);
+        const posMidAlpha = posFA * 0.6;
+        const negTopAlpha = Math.min(1, negFA + 0.45);
+        const negMidAlpha = negFA * 0.6;
+        const lineWEquity = numVar('--chart-line-width-equity', 1.5);
+        const zeroLineWidth = numVar('--chart-line-width-zero', 1);
+        const zeroLineDash = dashVar('--chart-line-dash-zero', [6, 4]);
+        const split = splitSeriesWithZero(labels, values);
+        const L = split.labels;
+        const posDaily = split.pos;
+        const negDaily = split.neg;
+        const gradPosDaily = gradientForValues(
+          [
+            { offset: 0, color: withAlpha(lighten(posFill, 0.2), posTopAlpha) },
+            { offset: 0.5, color: withAlpha(posFill, posMidAlpha) },
+            { offset: 1, color: withAlpha(posFill, 0) }
+          ],
+          posDaily,
+          { include: 0 }
+        );
+        const gradNegDaily = gradientForValues(
+          [
+            { offset: 0, color: withAlpha(lighten(negFill, 0.2), negTopAlpha) },
+            { offset: 0.5, color: withAlpha(negFill, negMidAlpha) },
+            { offset: 1, color: withAlpha(negFill, 0) }
+          ],
+          negDaily,
+          { include: 0 }
+        );
+        return {
+          data: {
+            labels: L,
+            datasets: [{
+              label: 'Equity Curve +',
+              data: posDaily,
+              /* Softer line: same hue as fill, lower alpha */
+              borderColor: withAlpha(posLine, .70),
+              borderWidth: lineWEquity,
+              pointRadius: 0,
+              pointHoverRadius: 0,
+              tension: .2,
+              fill: {
+                target:{ value:0 },
+                above: gradPosDaily,
+                below:'rgba(0,0,0,0)'
+              }
+            }, {
+              label: 'Equity Curve -',
+              data: negDaily,
+              borderColor: withAlpha(negLine, .70),
+              borderWidth: lineWEquity,
+              pointRadius: 0,
+              pointHoverRadius: 0,
+              tension: .2,
+              fill: {
+                target:{ value:0 },
+                above:'rgba(0,0,0,0)',
+                below: gradNegDaily
+              }
+            }, {
+              type: 'line',
+              label: 'Zero line',
+              data: L.map(() => 0),
+              borderColor: css('--chart-zero') || 'yellow',
+              borderDash: zeroLineDash,
+              borderWidth: zeroLineWidth,
+              pointRadius: 0,
+              pointHoverRadius: 0,
+              fill: false
+            }]
+          },
+          /* chart display options */
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            animation: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                displayColors: false,
+                callbacks: {
+                  /* format tooltip values to two decimals with % */
+                  label: (ctx) => {
+                    const lbl = String(ctx.dataset.label || '');
+                    if (lbl.toLowerCase().includes('zero line')) return '';
+                    const v = ctx.parsed.y;
+                    const formatted = `${Number(v).toFixed(2)}%`;
+                    if (!lbl || lbl.toLowerCase().includes('drawdown')) {
+                      return formatted;
+                    }
+                    return `${ctx.dataset.label}: ${formatted}`;
+                  }
+                }
+              },
+              pfCrosshair: {
+                lineDash: [4, 4],
+                lineWidth: 1,
+                radius: 4,
+                pointFillAlpha: 0.3
+              }
+            },
+            scales: {
+              x: {
+                type: 'time',
+                /* show fewer X ticks: one per week */
+                time: {
+                  unit: 'week',
+                  stepSize: 1,
+                  displayFormats: { week: 'MMM dd' },
+                  tooltipFormat: 'PP'
+                },
+                display: true,         /* keep axis for grid */
+                ticks: {
+                  display: true,
+                  maxRotation: 0,
+                  minRotation: 0,
+                  autoSkip: true,
+                  callback: (value) => {
+                    try {
+                      return new Date(value).toLocaleDateString(
+                        undefined,
+                        { month: 'short', day: '2-digit' }
+                      );
+                    } catch (_) {
+                      return '';
+                    }
+                  }
+                },
+                grid: { color: grid, borderDash: [3, 3] }
+              },
+              y: {
+                position: 'right',
+                title: { display: true, text: 'Cumulative Return' },
+                ticks: {
+                  callback: v => Number(v).toFixed(0) + '%',
+                  maxTicksLimit: 6
+                },
+                grid: { color: grid, borderDash: [3, 3] }
+              }
+            },
+            spanGaps: false
+          }
+        };            /* ← end cfg(...) */
+      }
+
+      /* daily drawdown (%) computed from cumulative return (flow‑neutral)
+         DD(t) = ( (1 + cumret_t) / max_{<=t}(1 + cumret) ) - 1
+         This keeps the top (cumret) and bottom (DD) panels mathematically
+         consistent and avoids cash‑flow distortions. */
+      function cfgDailyDD (rows) {
+        const labels = rows.map(r => r.date);
+        // Build return index 1 + cumulative_return
+        const idx = rows.map(r => {
+          const cr = +r.cumulative_return;
+          return Number.isFinite(cr) ? (1 + cr) : 1;
+        });
+        const dd = [];
+        let peak = -Infinity;
+        for (let i = 0; i < idx.length; i++) {
+          const v = idx[i];
+          if (!Number.isFinite(v)) { dd.push(null); continue; }
+          peak = Math.max(peak, v);
+          dd.push(((v / peak) - 1) * 100);
+        }
+        const blue   = css('--chart-line') || '#29b3ff';
+        const grid   = css('--grid-col')   || 'rgba(0,0,0,0.15)';
+        const ddLine = css('--chart-dd-line') || css('--chart-dd') || '#4da3ff';
+        const ddFill = css('--chart-dd-fill') || css('--chart-dd') || '#4da3ff';
+        const ddFA   = alphaVar('--chart-dd-fill-alpha', .20);
+        const ddTopAlpha = Math.min(1, ddFA + 0.35);
+        const ddMidAlpha = ddFA * 0.6;
+        const lineWDD = numVar('--chart-line-width-drawdown', 1.5);
+        const zeroLineWidth = numVar('--chart-line-width-zero', 1);
+        const zeroLineDash = dashVar('--chart-line-dash-zero', [6, 4]);
+        const gradDD = gradientForValues(
+          [
+            { offset: 0, color: withAlpha(ddFill, 0) },
+            { offset: 0.55, color: withAlpha(ddFill, ddMidAlpha) },
+            {
+              offset: 1,
+              color: withAlpha(lighten(ddFill, 0.15), ddTopAlpha)
+            }
+          ],
+          dd,
+          { include: 0 }
+        );
+        return {
+          data: {
+            labels,
+            datasets: [{
+              label: 'Drawdown',
+              data: dd,
+              /* Line slightly brighter than the fill, same hue */
+              borderColor: withAlpha(ddLine, .60),
+              borderWidth: lineWDD,
+              pointRadius: 0,
+              pointHoverRadius: 0,
+              tension: .06,
+              fill: { target: { value: 0 }, above: 'rgba(0,0,0,0)', below: gradDD }
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                displayColors: false,
+                callbacks: {
+                  label: (ctx) => {
+                    const v = Number(ctx.parsed.y);
+                    if (!Number.isFinite(v)) return '';
+                    return `${v.toFixed(2)}%`;
+                  }
+                }
+              },
+              pfCrosshair: {
+                lineDash: [4, 4],
+                lineWidth: 1,
+                radius: 4,
+                pointFillAlpha: 0.3
+              }
+            },
+            scales: {
+              x: {
+                type: 'time', time: { unit: 'week', stepSize: 1, displayFormats: { week: 'MMM dd' }, tooltipFormat: 'PP' },
+                ticks: { maxRotation: 0, minRotation: 0, autoSkip: true },
+                grid: { color: grid, borderDash: [3, 3] }
+              },
+              y: {
+                position: 'right', suggestedMax: 0,
+                title: { display: true, text: 'Drawdown' },
+                ticks: { callback: v => Number(v).toFixed(0) + '%' },
+                grid: { color: grid, borderDash: [3, 3] }
+              }
+            },
+            spanGaps: true
+          }
+        };
+      }
+
+      /* draw or update daily pair */
+      function renderDaily (rows) {
+        if (!rows.length) return;
+        const c = cfgDaily(rows);
+        const ddc = cfgDailyDD(rows);
+
+        if (!chartDaily) {
+          chartDaily = new Chart(ctxDaily, { type: 'line', ...c });
+        } else {
+          chartDaily.data    = c.data;
+          chartDaily.options = c.options;
+          chartDaily.update('none');
+        }
+        if (!chartDD) {
+          chartDD = new Chart(ctxDD, { type:'line', ...ddc });
+        } else {
+          chartDD.data = ddc.data;
+          chartDD.options = ddc.options;
+          chartDD.update('none');
+        }
+        try { syncRightPaddingBetween(chartDaily, chartDD); } catch(_) {}
+      }
+
+      function cfgIntraCfg (rows) {
+        if (!rows.length) {
+          return {
+            data: { labels: [], datasets: [] },
+            options: { responsive: true, maintainAspectRatio: false }
+          };
+        }
+
+        const labels = rows.map(r => r.ts);
+        const deposits = rows.map(r => (
+          r.deposit === null || r.deposit === undefined ? null : +r.deposit
+        ));
+        const finiteDeposits = deposits.filter(v => Number.isFinite(v));
+        const baseDeposit = finiteDeposits.length ? finiteDeposits[0] : 0;
+        const sessBaselineRaw = Number(pfHeader.sessionBaseline);
+        const sessionBaseline = Number.isFinite(sessBaselineRaw)
+          ? sessBaselineRaw
+          : baseDeposit;
+        const minDep = finiteDeposits.length ? Math.min(...finiteDeposits) : 0;
+        const maxDep = finiteDeposits.length ? Math.max(...finiteDeposits) : 0;
+        const span = Math.max(1, maxDep - minDep);
+        const pad = Math.max(span * 0.05, Math.max(baseDeposit * 0.001, 1));
+        const axisMin = minDep - pad;
+        const axisMax = maxDep + pad;
+
+        const posLine = css('--chart-pos-line') || css('--chart-pos') || '#035800';
+        const posFill = css('--chart-pos-fill') || css('--chart-pos') || '#035800';
+        const grid  = css('--grid-col')   || 'rgba(0,0,0,0.15)';
+        const posFA = alphaVar('--chart-pos-fill-alpha', .25);
+        const posTopAlpha = Math.min(1, posFA + 0.45);
+        const posMidAlpha = posFA * 0.6;
+        const lineWEquity = numVar('--chart-line-width-equity', 1.5);
+        const gradEquity = gradientForValues(
+          [
+            { offset: 0, color: withAlpha(lighten(posFill, 0.2), posTopAlpha) },
+            { offset: 0.55, color: withAlpha(posFill, posMidAlpha) },
+            { offset: 1, color: withAlpha(posFill, 0) }
+          ],
+          deposits,
+          { include: axisMin }
+        );
+
+        const [xMin, xMax] = alignHourRange(labels[0], labels[labels.length - 1]);
+
+        return {
+          data: {
+            labels,
+            datasets: [{
+              label: 'Equity',
+              data: deposits,
+              borderColor: withAlpha(posLine, 0.75),
+              borderWidth: lineWEquity,
+              pointRadius: 0,
+              pointHoverRadius: 0,
+              tension: .25,
+              fill: {
+                target: { value: axisMin },
+                above: gradEquity,
+                below: withAlpha(posFill, 0)
+              }
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            animation: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                displayColors: false,
+                callbacks: {
+                  label: (ctx) => {
+                    const dep = Number(ctx.parsed.y);
+                    if (!Number.isFinite(dep)) return '';
+                    const delta = dep - sessionBaseline;
+                    const prefix = delta >= 0 ? '+' : '';
+                    return `$${dep.toFixed(2)} (${prefix}$${delta.toFixed(2)})`;
+                  }
+                }
+              },
+              pfCrosshair: {
+                lineDash: [4, 4],
+                lineWidth: 1,
+                radius: 4,
+                pointFillAlpha: 0.3
+              },
+              decimation: { enabled: true, algorithm: 'lttb', samples: 600 }
+            },
+            scales: {
+              x: {
+                type: 'time',
+                time: { unit: 'hour', stepSize: 1, displayFormats: { hour: 'h a' }, tooltipFormat: 'PPpp' },
+                bounds: 'data', offset: false,
+                display: true,
+                ticks: {
+                  maxRotation: 0,
+                  minRotation: 0,
+                  autoSkip: true,
+                  callback: (value) => {
+                    try {
+                      const label = new Date(value).toLocaleTimeString(
+                        undefined,
+                        { hour: 'numeric', hour12: true }
+                      );
+                      return label
+                        .replace(/\s*AM/i, ' am')
+                        .replace(/\s*PM/i, ' pm');
+                    } catch (_) {
+                      return '';
+                    }
+                  }
+                },
+                min: xMin,
+                max: xMax,
+                grid: { color: grid, borderDash: [3, 3] }
+              },
+              y: {
+                position: 'right',
+                title: { display: true, text: 'Equity ($)' },
+                ticks: {
+                  callback: (v) => '$' + Number(v).toFixed(0),
+                  maxTicksLimit: 6
+                },
+                grid: { color: grid, borderDash: [3, 3] },
+                min: axisMin,
+                max: axisMax
+              }
+            },
+            spanGaps: false
+          }
+        };
+      }
+
+      function cfgIntraDD (rows) {
+        const labels = rows.map(r => r.ts);
+        const dd = rows.map(r => (
+          r.drawdown_cash === null || r.drawdown_cash === undefined ? null : +r.drawdown_cash
+        ));
+        const blue   = css('--chart-line') || '#29b3ff';
+        const grid   = css('--grid-col')   || 'rgba(0,0,0,0.15)';
+        const ddLine = css('--chart-dd-line') || css('--chart-dd') || '#4da3ff';
+        const ddFill = css('--chart-dd-fill') || css('--chart-dd') || '#4da3ff';
+        const ddFA   = alphaVar('--chart-dd-fill-alpha', .20);
+        const ddTopAlpha = Math.min(1, ddFA + 0.35);
+        const ddMidAlpha = ddFA * 0.6;
+        const lineWDD = numVar('--chart-line-width-drawdown', 1.5);
+        const zeroLineWidth = numVar('--chart-line-width-zero', 1);
+        const zeroLineDash = dashVar('--chart-line-dash-zero', [6, 4]);
+        const gradDD = gradientForValues(
+          [
+            { offset: 0, color: withAlpha(ddFill, 0) },
+            { offset: 0.55, color: withAlpha(ddFill, ddMidAlpha) },
+            {
+              offset: 1,
+              color: withAlpha(lighten(ddFill, 0.15), ddTopAlpha)
+            }
+          ],
+          dd,
+          { include: 0 }
+        );
+          return {
+            data: { labels, datasets: [{
+                      label:'Drawdown', data: dd,
+                      // Use the same hue as the fill, slightly brighter
+                      borderColor: withAlpha(ddLine, .60),
+                      borderWidth: lineWDD, pointRadius:0,
+                      pointHoverRadius:0, tension:.06,
+                      fill:{ target:{ value:0 }, above:'rgba(0,0,0,0)',
+                             below: gradDD }
+                    }] },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                displayColors: false,
+                callbacks: {
+                  label: (ctx) => {
+                    const v = Number(ctx.parsed.y);
+                    if (!Number.isFinite(v)) return '';
+                    return `$${v.toFixed(2)}`;
+                  }
+                }
+              },
+              pfCrosshair: {
+                lineDash: [4, 4],
+                lineWidth: 1,
+                radius: 4,
+                pointFillAlpha: 0.3
+              }
+            },
+            scales:{
+              x:{ type:'time', time:{ unit:'hour', stepSize:1, displayFormats:{ hour:'h a' }, tooltipFormat:'PPpp' },
+                  bounds:'data', offset:false,
+                  ticks:{ maxRotation:0, minRotation:0, autoSkip:true,
+                          callback:(value)=> {
+                            try {
+                              const label = new Date(value).toLocaleTimeString(
+                                undefined,
+                                { hour: 'numeric', hour12: true }
+                              );
+                              return label
+                                .replace(/\s*AM/i, ' am')
+                                .replace(/\s*PM/i, ' pm');
+                            } catch (_) { return ''; }
+                          } },
+                  grid:{ color:grid, borderDash:[3,3] } },
+              y:{ position:'right', suggestedMax:0, title:{ display:true, text:'Drawdown ($)' }, ticks:{ callback:v=> '$'+Number(v).toFixed(0) }, grid:{ color:grid, borderDash:[3,3] } }
+            }, spanGaps:true }
+        };
+      }
+
+      function renderIntra (payload) {
+        const meta =
+          payload && !Array.isArray(payload) && typeof payload === 'object'
+            ? (payload.meta || {})
+            : {};
+        if (meta && Object.keys(meta).length) applySessionMeta(meta);
+        const rows = Array.isArray(payload)
+          ? payload
+          : (payload && Array.isArray(payload.series) ? payload.series : []);
+        if (!rows.length) {
+          const live = Number(meta && meta.live_deposit);
+          if (Number.isFinite(live)) {
+            pfHeader.intradayDeposit = live;
+            pfHeader.intradayTimestamp = meta && meta.live_ts ? meta.live_ts : null;
+            if (pfHeader.source === 'intraday') {
+              renderPortfolioHeaderValue(
+                pfHeader.intradayDeposit,
+                pfHeader.intradayTimestamp
+              );
+            } else {
+              updatePortfolioChange();
+            }
+          }
+          return;
+        }
+        const c = cfgIntraCfg(rows);
+        const ddc = cfgIntraDD(rows);
+        if (!chartIntra) {
+          chartIntra = new Chart(ctxIntra, { type:'line', ...c });
+        } else {
+          chartIntra.data = c.data;
+          chartIntra.options = c.options;
+          chartIntra.update('none');
+        }
+        if (!chartDDIntra) {
+          chartDDIntra = new Chart(ctxDDIntra, { type:'line', ...ddc });
+        } else {
+          chartDDIntra.data = ddc.data;
+          chartDDIntra.options = ddc.options;
+          chartDDIntra.update('none');
+        }
+        try {
+          const last = rows[rows.length - 1];
+          if (last && last.deposit != null) {
+            pfHeader.intradayDeposit = +last.deposit;
+            pfHeader.intradayTimestamp = last.ts || null;
+            if (pfHeader.source === 'intraday') {
+              renderPortfolioHeaderValue(
+                pfHeader.intradayDeposit,
+                pfHeader.intradayTimestamp
+              );
+            }
+          }
+        } catch (_) { /* ignore */ }
+        // ensure areas line up horizontally
+        try { syncRightPaddingBetween(chartIntra, chartDDIntra); } catch(_) {}
+      }
+
+      async function refreshDaily () {
+        const rows = await fetchRows();
+        /* header is updated on KPI cadence now */
+        renderDaily(rows);
+      }
+      async function refreshIntra () { renderIntra(await fetchRowsIntra()); }
+      window.scheduleAligned(refreshDaily);
+      window.scheduleAligned(refreshIntra);
+
+      // Tabs
+      const btnDaily = document.getElementById('tab-daily');
+      const btnIntra = document.getElementById('tab-intra');
+      const cvDaily  = document.getElementById('depositChart');
+      const cvIntra  = document.getElementById('depositChartIntraday');
+      const cvDD     = document.getElementById('depositDrawdown');
+      const cvDDIntra= document.getElementById('depositDrawdownIntraday');
+      const TAB_KEY = 'equityTab';
+      function setTab(which, save=true) {
+        if (which === 'daily') {
+          pfHeader.source = 'daily';
+          btnDaily.classList.add('active');
+          btnIntra.classList.remove('active');
+          cvDaily.style.display = 'block';
+          cvIntra.style.display = 'none';
+          cvDD.style.display = 'block';
+          cvDDIntra.style.display = 'none';
+          refreshDaily();
+        } else {
+          pfHeader.source = 'intraday';
+          btnIntra.classList.add('active');
+          btnDaily.classList.remove('active');
+          cvIntra.style.display = 'block';
+          cvDaily.style.display = 'none';
+          cvDDIntra.style.display = 'block';
+          cvDD.style.display = 'none';
+          refreshIntra();
+        }
+        if (typeof syncPortfolioHeaderState === 'function') {
+          syncPortfolioHeaderState();
+        }
+        if (save) try { localStorage.setItem(TAB_KEY, which); } catch(_) {}
+      }
+      btnDaily.addEventListener('click', ()=> setTab('daily'));
+      btnIntra.addEventListener('click', ()=> setTab('intra'));
+      // Restore previously selected tab on reload
+      try {
+        const initial = localStorage.getItem(TAB_KEY) || 'daily';
+        setTab(initial, false);
+      } catch(_) { setTab('daily', false); }
+
+      /* redraw if system theme flips */
+      matchMedia('(prefers-color-scheme: dark)')
+        .addEventListener('change', () => {
+          // Explicitly refresh both charts on theme change
+          try { refreshDaily(); } catch (_) {}
+          try { refreshIntra(); } catch (_) {}
+        });
+
+      /* --- sync left/right padding between paired charts --------------- */
+      function syncRightPaddingBetween(a, b) {
+        if (!a || !b || !a.chartArea || !b.chartArea) return;
+
+        // Right side (axis + any padding)
+        const rmA = a.width - a.chartArea.right;
+        const rmB = b.width - b.chartArea.right;
+        const rTarget = Math.max(rmA, rmB);
+
+        // Left side (may differ if bottom chart shows X labels)
+        const lmA = a.chartArea.left;
+        const lmB = b.chartArea.left;
+        const lTarget = Math.max(lmA, lmB);
+
+        const getPad = (c, side) => ((c.options?.layout?.padding?.[side]) || 0);
+        const setPad = (c, side, add) => {
+          c.options.layout = c.options.layout || {};
+          c.options.layout.padding = c.options.layout.padding || {};
+          const cur = getPad(c, side);
+          const next = Math.max(0, cur + add);
+          if (Math.abs(next - cur) > 0.5) {
+            c.options.layout.padding[side] = next;
+            c.update('none');
+          }
+        };
+
+        if (rmA < rTarget) setPad(a, 'right', rTarget - rmA);
+        if (rmB < rTarget) setPad(b, 'right', rTarget - rmB);
+        if (lmA < lTarget) setPad(a, 'left',  lTarget - lmA);
+        if (lmB < lTarget) setPad(b, 'left',  lTarget - lmB);
+      }
+
+      // keep intraday/daily pairs aligned after each render and on resize
+      const syncAll = () => {
+        if (chartIntra && chartDDIntra) syncRightPaddingBetween(chartIntra, chartDDIntra);
+        if (chartDaily && chartDD)     syncRightPaddingBetween(chartDaily, chartDD);
+      };
+      window.addEventListener('resize', syncAll);
+
+
+    })();   /* IIFE end */
+    });
+  </script>
+
+</body>
+</html>
