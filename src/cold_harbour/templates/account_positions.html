@@ -1301,6 +1301,8 @@
       currentSlug = slug;
       basePath = `/${slug}`;
       setActiveTab(slug);
+      /* keep browser URL in sync so refresh/bookmark stays on this account */
+      try { history.pushState(null, '', `/${slug}/`); } catch (_) {}
       posEtag = null;
       queue.length = 0;
       try { pos.clear().draw(false); } catch (_) {}
