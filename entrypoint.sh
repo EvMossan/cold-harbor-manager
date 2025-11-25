@@ -1,4 +1,10 @@
 #!/bin/sh
+#!/bin/sh
+# Wrapper entrypoint that starts Cloudflare Access TCP tunnels for Postgres/Timescale
+# and then launches the web app. It expects Cloudflare service token credentials
+# in CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET and optional hostnames in
+# CF_PG_HOSTNAME / CF_TS_HOSTNAME. Used both locally and in Cloud Run to avoid
+# exposing the databases.
 set -e
 
 # Defaults for tunnel hostnames (override via env if needed)
