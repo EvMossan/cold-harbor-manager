@@ -16,9 +16,12 @@ destination name via a safe slug and do not require extra configuration.
 """
 
 import os
+import sys
 import json
 import math
+import uuid
 import time  # used for SSE keep-alive comments
+import logging
 import psycopg2
 import select
 import pandas as pd
@@ -32,6 +35,7 @@ from flask import (
     Blueprint,
     request,
     current_app,
+    g,
 )
 from sqlalchemy import create_engine, URL, text
 
@@ -157,10 +161,115 @@ def _make_ts_engine():
 
 ts_engine = _make_ts_engine()
 
+log = logging.getLogger("AccountWeb")
+if not log.handlers:
+    handler = logging.StreamHandler(stream=sys.stdout)
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+    handler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+    log.addHandler(handler)
+    lvl_raw = (
+        os.getenv("ACCOUNT_WEB_LOG_LEVEL")
+        or os.getenv("LOG_LEVEL")
+        or "INFO"
+    )
+    try:
+        lvl = getattr(logging, lvl_raw.strip().upper())
+    except Exception:
+        lvl = logging.INFO
+    log.setLevel(lvl)
+    handler.setLevel(logging.NOTSET)
+    log.propagate = False
+
+BARS_TABLE = "public.alpaca_bars_1min"
+
+# Toggle SSE streams without env wiring; set to False to re-enable later.
+DISABLE_SSE = True
+
+
+def _now() -> float:
+    return time.perf_counter()
+
+
+def _req_id() -> str:
+    try:
+        return str(getattr(g, "req_id"))
+    except Exception:
+        return "-"
+
+
+def _req_account() -> str:
+    try:
+        return str(getattr(g, "req_account"))
+    except Exception:
+        return "-"
+
+
+def _log_timing(
+    label: str,
+    start_ts: float,
+    rows: int | None = None,
+    cache: str | None = None,
+) -> None:
+    try:
+        dur_ms = (_now() - start_ts) * 1000.0
+        log.debug(
+            "timing req_id=%s account=%s op=%s duration_ms=%.1f%s%s",
+            _req_id(),
+            _req_account(),
+            label,
+            dur_ms,
+            f" rows={rows}" if rows is not None else "",
+            f" cache={cache}" if cache else "",
+        )
+    except Exception:
+        pass
+
+
 # Hardcoded bars table per requirement
 BARS_TABLE = "public.alpaca_bars_1min"
 
+# Toggle SSE streams; set to False to enable live updates.
+DISABLE_SSE = False
+
 app = Flask(__name__)
+
+
+@app.before_request
+def _start_request_timer() -> None:
+    try:
+        g.req_start = _now()
+        g.req_id = uuid.uuid4().hex[:8]
+        bp = request.blueprint or ""
+        g.req_account = bp.replace("acct_", "", 1) if bp else "-"
+        log.debug(
+            "http start req_id=%s account=%s path=%s",
+            g.req_id,
+            g.req_account,
+            request.path,
+        )
+    except Exception:
+        pass
+
+
+@app.after_request
+def _end_request_timer(resp: Response) -> Response:
+    try:
+        start_ts = getattr(g, "req_start", None)
+        if start_ts is not None:
+            dur_ms = (_now() - start_ts) * 1000.0
+            log.debug(
+                "http done req_id=%s account=%s path=%s status=%s "
+                "duration_ms=%.1f",
+                _req_id(),
+                _req_account(),
+                request.path,
+                resp.status_code,
+                dur_ms,
+            )
+    except Exception:
+        pass
+    return resp
 
 
 def _make_blueprint_for_dest(dest: dict) -> Blueprint:
@@ -203,25 +312,31 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
     }
 
     def _fetch_open_df() -> pd.DataFrame:
+        start_ts = _now()
         with engine.begin() as conn:
             sql = text(
                 f"SELECT * FROM {tables['open']} ORDER BY symbol"
             )
-            return pd.read_sql(sql, conn)
+            df = pd.read_sql(sql, conn)
+        _log_timing("positions_sql", start_ts, len(df.index))
+        return df
 
     def _open_version() -> str:
+        start_ts = _now()
         with engine.begin() as conn:
             row = conn.execute(
                 text(
                     f"SELECT COALESCE(MAX(updated_at), NOW()) AS max_upd, COUNT(*) AS cnt FROM {tables['open']}"
                 )
             ).mappings().first()
+        _log_timing("open_version", start_ts, int(row["cnt"] or 0))
         max_upd = row["max_upd"]
         cnt = int(row["cnt"] or 0)
         # ETag must be a string; include count to detect row adds/removes
         return f"{pd.to_datetime(max_upd, utc=True).isoformat()}-{cnt}"
 
     def _fetch_closed_df() -> pd.DataFrame:
+        start_ts = _now()
         with engine.begin() as conn:
             sql = text(
                 f"""
@@ -235,7 +350,9 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                  ORDER BY exit_time DESC
                 """
             )
-            return pd.read_sql(sql, conn)
+            df = pd.read_sql(sql, conn)
+        _log_timing("closed_sql_full", start_ts, len(df.index))
+        return df
 
     @bp.route("/")
     def home() -> str:
@@ -257,14 +374,17 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     @bp.route("/api/positions")
     def api_positions() -> Response:  # type: ignore[override]
+        start_ts = _now()
         df = _fetch_open_df()
         safe = json.loads(
             df.to_json(orient="records", date_format="iso")
         )
+        _log_timing("positions", start_ts, len(df.index))
         return jsonify(safe)
 
     @bp.route("/api/closed")
     def api_closed() -> Response:  # type: ignore[override]
+        start_ts = _now()
         # Return only the most recent 300 rows for UI speed.
         with engine.begin() as conn:
             sql = text(
@@ -281,6 +401,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 """
             )
             df = pd.read_sql(sql, conn)
+        _log_timing("closed", start_ts, len(df.index))
         return jsonify(
             json.loads(df.to_json(orient="records", date_format="iso"))
         )
@@ -291,12 +412,15 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         etag = _open_version()
         inm = request.headers.get("If-None-Match")
         if inm == etag:
+            _log_timing("positions_cached", _now(), cache="hit")
             return Response(status=304)
+        hit_start = _now()
         df = _fetch_open_df()
         payload = json.loads(df.to_json(orient="records", date_format="iso"))
         resp = jsonify(payload)
         resp.headers["ETag"] = etag
         resp.headers["Cache-Control"] = "public, max-age=30, must-revalidate"
+        _log_timing("positions_cached", hit_start, len(df.index), "miss")
         return resp
 
     @bp.route("/api/closed_cached")
@@ -311,7 +435,9 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         etag = pd.to_datetime(ver_row["max_exit"], utc=True).isoformat()
         inm = request.headers.get("If-None-Match")
         if inm == etag:
+            _log_timing("closed_cached", _now(), cache="hit")
             return Response(status=304)
+        hit_start = _now()
         with engine.begin() as conn:
             sql = text(
                 f"""
@@ -331,10 +457,15 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         resp = jsonify(payload)
         resp.headers["ETag"] = etag
         resp.headers["Cache-Control"] = "public, max-age=30, must-revalidate"
+        _log_timing("closed_cached", hit_start, len(df.index), "miss")
         return resp
 
     @bp.route("/stream/closed")
     def stream_closed() -> Response:  # type: ignore[override]
+        if DISABLE_SSE:
+            log.debug("SSE closed disabled; returning 204")
+            return Response(status=204)
+
         def event_stream():
             conn = psycopg2.connect(PG_DSN)
             conn.set_isolation_level(
@@ -345,7 +476,6 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             try:
                 yield ": connected\n\n"
                 while True:
-                    # shorter timeout for quicker disconnect detection
                     if select.select([conn], [], [], 5) == ([], [], []):
                         yield ": ping\n\n"
                         continue
@@ -354,10 +484,8 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                         conn.notifies.pop(0)
                         yield "data: refresh\n\n"
             except GeneratorExit:
-                # client disconnected; fall through to cleanup
                 pass
             except Exception:
-                # swallow to ensure cleanup runs
                 pass
             finally:
                 try:
@@ -380,12 +508,14 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     @bp.route("/api/metrics")
     def api_metrics() -> Response:  # type: ignore[override]
+        start_ts = _now()
         # Serve from short TTL cache if fresh
         try:
             now = pd.Timestamp.utcnow()
             ent = _cache.get("metrics", {})
             ts = ent.get("ts")
             if ts is not None and (now - ts).total_seconds() < ent.get("ttl", 30):
+                _log_timing("metrics", start_ts, cache="hit")
                 return jsonify(ent.get("data") or [{}])
         except Exception:
             pass
@@ -499,10 +629,15 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             _cache["metrics"] = {"ts": pd.Timestamp.utcnow(), "data": payload, "ttl": _cache["metrics"]["ttl"]}
         except Exception:
             pass
+        _log_timing("metrics", start_ts, metrics.shape[0], "miss")
         return jsonify(payload)
 
     @bp.route("/stream/positions")
     def stream_positions() -> Response:  # type: ignore[override]
+        if DISABLE_SSE:
+            log.debug("SSE positions disabled; returning 204")
+            return Response(status=204)
+
         def event_stream():
             conn = psycopg2.connect(PG_DSN)
             conn.set_isolation_level(
@@ -545,8 +680,67 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             },
         )
 
+    @bp.route("/stream/events")
+    def stream_events() -> Response:  # type: ignore[override]
+        if DISABLE_SSE:
+            log.debug("SSE events disabled; returning 204")
+            return Response(status=204)
+
+        def event_stream():
+            conn = psycopg2.connect(PG_DSN)
+            conn.set_isolation_level(
+                psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT
+            )
+            cur = conn.cursor()
+            cur.execute(f"LISTEN {chans['pos']};")
+            cur.execute(f"LISTEN {chans['closed']};")
+            try:
+                yield ": connected\n\n"
+                while True:
+                    if select.select([conn], [], [], 5) == ([], [], []):
+                        yield ": ping\n\n"
+                        continue
+                    conn.poll()
+                    while conn.notifies:
+                        note = conn.notifies.pop(0)
+                        channel = (
+                            "pos"
+                            if note.channel == chans["pos"]
+                            else "closed"
+                        )
+                        try:
+                            payload = json.dumps(
+                                {"channel": channel, "payload": note.payload}
+                            )
+                            yield f"data: {payload}\n\n"
+                        except Exception:
+                            pass
+            except GeneratorExit:
+                pass
+            except Exception:
+                pass
+            finally:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        return Response(
+            event_stream(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @bp.route("/api/equity")
     def api_equity() -> Response:  # type: ignore[override]
+        start_ts = _now()
         # Optional window parameter.
         # Defaults to 'first_trade' to avoid long flat periods before trading
         # actually started. Other accepted values: 'all', '<Nd>' (e.g. 365d).
@@ -559,6 +753,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             ent = _cache.get(cache_key, {})
             ts = ent.get("ts")
             if ts is not None and (now - ts).total_seconds() < ent.get("ttl", 45):
+                _log_timing("equity", start_ts, cache="hit")
                 return jsonify(ent.get("data") or [])
         except Exception:
             pass
@@ -612,6 +807,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             _cache[cache_key] = {"ts": pd.Timestamp.utcnow(), "data": payload, "ttl": ttl}
         except Exception:
             pass
+        _log_timing("equity", start_ts, len(df.index), "miss")
         return jsonify(payload)
 
     @bp.route("/api/equity_intraday")
@@ -624,6 +820,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         aligned with the daily series. Falls back to a zero series when
         the table is empty.
         """
+        start_ts = _now()
         # TTL cache ~30s
         def _to_float(value, default=None):
             try:
@@ -654,6 +851,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 (now - ts).total_seconds() < ent.get("ttl", ttl_seconds)
             )
             if fresh:
+                _log_timing("equity_intraday", start_ts, cache="hit")
                 return jsonify(ent.get("data") or {"series": [], "meta": {}})
         except Exception:
             pass
@@ -925,6 +1123,12 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             }
         except Exception:
             pass
+        _log_timing(
+            "equity_intraday",
+            start_ts,
+            len(series.get("ts", [])),
+            "miss",
+        )
         return jsonify(payload)
 
     return bp

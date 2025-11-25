@@ -479,6 +479,14 @@
     const pct1 = $.fn.dataTable.render.number(',', '.', 1, '%');
     const isMobile = window.matchMedia('(max-width: 768px)').matches;
     const heartbeatMs = Math.max(1, Number(window.HEARTBEAT_MS) || 30_000);
+    let currentSlug = "{{ current_slug }}";
+    let basePath = `/${currentSlug}`;
+    function apiUrl(p) {
+      const clean = p.startsWith('/') ? p : `/${p}`;
+      return `${basePath}${clean}`;
+    }
+    window.apiUrl = apiUrl;
+    window.getCurrentSlug = () => currentSlug;
 
     function scheduleAligned(fn, intervalMs = heartbeatMs, offsetMs = 0) {
       const interval = Math.max(1, Math.floor(intervalMs));
@@ -598,7 +606,7 @@
 
     /** fetch KPI JSON + (re)draw table */
     function loadKpi () {
-      $.getJSON('api/metrics', data => {
+      $.getJSON(apiUrl('api/metrics'), data => {
         const src = data[0] || {};
 
         /* derive total P/Ls on the fly */
@@ -931,8 +939,7 @@
     }
 
     /* initial bulk load */
-    let esPos = null;
-    let esClosed = null;
+    let esEvents = null;
     let posEtag = null;
 
     function updatePortfolioChange() {
@@ -1097,7 +1104,7 @@
     async function fetchPositionsCached () {
       try {
         const headers = posEtag ? { 'If-None-Match': posEtag } : {};
-        const r = await fetch('api/positions_cached', { headers });
+        const r = await fetch(apiUrl('api/positions_cached'), { headers });
         if (r.status === 304) return;   // unchanged
         if (!r.ok) return;
         posEtag = r.headers.get('ETag') || posEtag;
@@ -1159,18 +1166,33 @@
       flush();
     }, 250);
 
-    esPos = new EventSource('stream/positions')
-      .addEventListener('message', e => {
+    function openStream () {
+      try { esEvents && esEvents.close && esEvents.close(); } catch (_) {}
+      esEvents = new EventSource(apiUrl('stream/events'));
+      esEvents.addEventListener('message', e => {
         try {
-          const m = JSON.parse(e.data);
-          if (m && m.op === 'heartbeat') {
-            // pull cached snapshot with ETag to keep consistent fast
-            fetchPositionsCached();
+          const evt = JSON.parse(e.data);
+          if (!evt || !evt.channel) return;
+          if (evt.channel === 'pos') {
+            let m = evt.payload;
+            if (typeof m === 'string') {
+              try { m = JSON.parse(m); } catch (_) {}
+            }
+            if (m && m.op === 'heartbeat') {
+              fetchPositionsCached();
+              return;
+            }
+            if (m) queue.push(m);
             return;
           }
-          queue.push(m);
+          if (evt.channel === 'closed') {
+            loadClosed();
+            loadKpi();
+          }
         } catch (_) {}
       });
+    }
+    openStream();
 
     /* -------------------------------------------------------------------
        CLOSED TRADES TABLE
@@ -1253,7 +1275,7 @@
 
     /* bulk load + periodic refresh */
     function loadClosed () {
-      $.getJSON('api/closed', rows => {
+      $.getJSON(apiUrl('api/closed'), rows => {
         closed.clear().rows.add(rows).draw(false);
 
         /* keep KPI “Closed Trades” count in sync */
@@ -1266,17 +1288,45 @@
     }
     scheduleAligned(loadClosed);
 
-    /* streaming updates */
-    esClosed = new EventSource('stream/closed')
-      .addEventListener('message', () => {
-        loadClosed();
-        loadKpi();
+    function setActiveTab(slug) {
+      document.querySelectorAll('.acct-tabs a').forEach(a => {
+        const s = (a.dataset.slug || '').trim();
+        if (s === slug) a.classList.add('active');
+        else a.classList.remove('active');
       });
+    }
+
+    function switchAccount(slug) {
+      if (!slug || slug === currentSlug) return;
+      currentSlug = slug;
+      basePath = `/${slug}`;
+      setActiveTab(slug);
+      posEtag = null;
+      queue.length = 0;
+      try { pos.clear().draw(false); } catch (_) {}
+      try { closed.clear().draw(false); } catch (_) {}
+      fetchPositionsCached();
+      loadClosed();
+      loadKpi();
+      if (typeof window.refreshDaily === 'function') window.refreshDaily();
+      if (typeof window.refreshIntra === 'function') window.refreshIntra();
+      openStream();
+    }
+
+    document.querySelectorAll('.acct-tabs a').forEach(a => {
+      const slug = (a.getAttribute('href') || '').replace(/\//g, '').trim() ||
+        (a.dataset.slug || '').trim();
+      a.dataset.slug = slug;
+      a.addEventListener('click', evt => {
+        evt.preventDefault();
+        switchAccount(slug);
+      });
+    });
+    setActiveTab(currentSlug);
 
     /* proactively close SSE on page unload */
     window.addEventListener('beforeunload', () => {
-      try { esPos && esPos.close && esPos.close(); } catch (_) {}
-      try { esClosed && esClosed.close && esClosed.close(); } catch (_) {}
+      try { esEvents && esEvents.close && esEvents.close(); } catch (_) {}
     });
 
     });
@@ -1286,6 +1336,7 @@
   <script>
     window.addEventListener('DOMContentLoaded', () => {
     (function () {
+      const apiUrl = window.apiUrl;
       /* context + chart handles */
       const ctxDaily   = document.getElementById('depositChart').getContext('2d');
       const ctxIntra   = document.getElementById('depositChartIntraday').getContext('2d');
@@ -1614,13 +1665,13 @@
 
       /* fetch equity rows */
       async function fetchRows () {
-        const r = await fetch('api/equity');
+        const r = await fetch(apiUrl('api/equity'));
         return r.ok ? await r.json() : [];
       }
 
       async function fetchRowsIntra () {
         try {
-          const r = await fetch('api/equity_intraday');
+          const r = await fetch(apiUrl('api/equity_intraday'));
           if (!r.ok) return { series: [], meta: {} };
           const data = await r.json();
           if (data && typeof data === 'object' && !Array.isArray(data)) {
@@ -2198,6 +2249,8 @@
         renderDaily(rows);
       }
       async function refreshIntra () { renderIntra(await fetchRowsIntra()); }
+      window.refreshDaily = refreshDaily;
+      window.refreshIntra = refreshIntra;
       window.scheduleAligned(refreshDaily);
       window.scheduleAligned(refreshIntra);
 
