@@ -176,6 +176,49 @@
 
     span.hold-new { color: var(--hold-new); }
     span.hold-old { color: var(--hold-old); }
+
+    /* account tabs */
+    .acct-tabs { display:flex; gap:.5rem; flex-wrap:wrap; margin-bottom:1rem; }
+    .acct-tabs a {
+      text-decoration:none; color:var(--text);
+      padding:.35rem .75rem; border-radius:6px;
+      border:1px solid var(--thead-bg); background:var(--row-even);
+      font-weight:600; font-size:.95em;
+    }
+    .acct-tabs a:hover { background:var(--row-odd); }
+    .acct-tabs a.active {
+      background: var(--thead-bg);
+      border-color: var(--row-hover);
+    }
+    @media (max-width:768px){ .acct-tabs { justify-content:center; } }
+
+    /* chart header + tabs */
+    .chart-header{ display:flex; flex-direction:column; align-items:flex-start; gap:.35rem; margin:0 0 .25rem 0; width:100%; }
+    .portfolio-summary{ display:flex; flex-direction:column; gap:.2rem; width:100%; }
+    .pf-title{ font-weight:600; opacity:.9; }
+    .pf-value{ font-weight:700; font-size:1.35rem; display:flex; align-items:center; gap:0.6rem; }
+    .pf-value span{ display:inline-block; }
+    .pf-change{ font-weight:600; }
+    .pf-change.is-hidden{ display:none; }
+    .pf-date{ font-size:.9rem; opacity:.85; }
+    .pf-date-row{ display:flex; align-items:center; gap:.8rem; flex-wrap:wrap; }
+    .pf-date-label{ font-size:.9rem; opacity:.85; }
+    .chart-tabs { display:flex; gap:.5rem; flex-wrap:wrap; margin:0; }
+    .chart-tabs .tab {
+      -webkit-appearance: none; appearance: none;
+      text-decoration:none; color:var(--text);
+      padding:.35rem .75rem; border-radius:6px;
+      border:1px solid var(--thead-bg); background:var(--row-even);
+      font-weight:600; font-size:.95em; line-height:1; cursor:pointer;
+    }
+    .chart-tabs .tab:hover { background: var(--row-odd); }
+    .chart-tabs .tab.active { background: var(--thead-bg); border-color: var(--row-hover); }
+    @media (max-width:768px){
+      .chart-tabs{ margin-top:.15rem; }
+      .pf-value{ font-size:1.2rem; }
+      .pf-date{ font-size:.85rem; }
+      .pf-date-row{ gap:.6rem; }
+    }
   </style>
 
   <!-- ── desktop layout ──────────────────────────────────────────────────-->
@@ -285,6 +328,30 @@
     .kpi-panel, .charts-panel { min-width:0 !important; }
     .charts-panel             { overflow-x:hidden; }  /* keep, or add if missing */
 
+    /* KPI wrapper must not collapse on mobile */
+    #kpi_wrapper.dataTables_wrapper{
+      overflow-x:auto;
+      min-width:320px;
+      flex:0 0 auto !important;
+    }
+
+    /* allow multi-line cells on small screens */
+    table.dataTable tbody td{
+      height:auto;
+      line-height:1.25em;
+    }
+
+    /* stretch charts to container width */
+    #depositChart {
+      width:100% !important;
+      max-width:100% !important;
+      min-width:0   !important;
+    }
+
+    /* sync scroll of header/body (paired in JS) */
+    .dataTables_scrollHead,
+    .dataTables_scrollBody{overflow-x:auto!important;}
+
     /* Unify backgrounds with desktop palette to avoid dark frames */
     .charts-panel,
     #kpi_wrapper.dataTables_wrapper,
@@ -307,63 +374,13 @@
   }
   </style>
 
-  <!-- ① RESPONSIVE CSS FIXES -------------------------------------------------->
-  <style>
-    /* --- small-screen overrides ------------------------------------------- */
-    @media (max-width: 768px) {
-
-      /* 1-a  KPI table vanished ➜ let it breathe + recalc width  */
-      #kpi_wrapper.dataTables_wrapper{
-        overflow-x:auto;              /* allow sideways scroll if needed      */
-        min-width:320px;              /* never collapse to zero width         */
-      }
-      /* Data-Tables gives every <td> a fixed height; remove that on phones   */
-      table.dataTable tbody td{
-        height:auto;                  /* row can now grow for multi-line text */
-        line-height:1.25em;
-      }
-
-      /* mobile chart behaviour */
-      .charts-panel   { overflow-x:hidden; }        /* no sideways scroll */
-      #depositChart   {                             /* stretch / shrink  */
-        width:100% !important;
-        max-width:100% !important;
-        min-width:0   !important;
-      } 
-
-      /* 1-c  Column header must scroll with body (we’ll sync in JS)          */
-      /* DataTables creates .dataTables_scrollHead and .dataTables_scrollBody */
-      /* Make BOTH scrollable so they can be linked in JS (see below)         */
-      .dataTables_scrollHead,
-      .dataTables_scrollBody{overflow-x:auto!important;}
-
-      /* let the KPI wrapper size itself to its rows instead of shrinking to 0 */
-      #kpi_wrapper.dataTables_wrapper { flex:0 0 auto !important; }
-    }
-  </style>
-
 </head>
 
 <body>
 
   <!-- ───────────── account tabs (one per destination) ───────────── -->
   {% if tabs %}
-  <nav class="acct-tabs" style="margin-bottom:1rem">
-    <style>
-      .acct-tabs { display:flex; gap:.5rem; flex-wrap:wrap; }
-      .acct-tabs a {
-        text-decoration:none; color:var(--text);
-        padding:.35rem .75rem; border-radius:6px;
-        border:1px solid var(--thead-bg); background:var(--row-even);
-        font-weight:600; font-size: .95em;
-      }
-      .acct-tabs a:hover { background:var(--row-odd); }
-      .acct-tabs a.active {
-        background: var(--thead-bg);
-        border-color: var(--row-hover);
-      }
-      @media (max-width:768px){ .acct-tabs { justify-content:center; } }
-    </style>
+  <nav class="acct-tabs">
     {% for t in tabs %}
       <a href="/{{ t.slug }}/" class="{{ 'active' if t.slug == current_slug else '' }}"
          title="Switch to {{ t.name }}">
@@ -384,38 +401,6 @@
 
     <!-- right : equity-curve chart -->
     <div class="charts-panel">
-      <style>
-        /* Header: Portfolio summary + date + tabs */
-        .chart-header{ display:flex; flex-direction:column; align-items:flex-start; gap:.35rem; margin:0 0 .25rem 0; width:100%; }
-        .portfolio-summary{ display:flex; flex-direction:column; gap:.2rem; width:100%; }
-        .pf-title{ font-weight:600; opacity:.9; }
-        .pf-value{ font-weight:700; font-size:1.35rem; display:flex; align-items:center; gap:0.6rem; }
-        .pf-value span{ display:inline-block; }
-        .pf-change{ font-weight:600; }
-        .pf-change.is-hidden{ display:none; }
-        .pf-date{ font-size:.9rem; opacity:.85; }
-        .pf-date-row{ display:flex; align-items:center; gap:.8rem; flex-wrap:wrap; }
-        .pf-date-label{ font-size:.9rem; opacity:.85; }
-        @media (max-width:768px){
-          .pf-value{ font-size:1.2rem; }
-          .pf-date{ font-size:.85rem; }
-          .pf-date-row{ gap:.6rem; }
-        }
-        /* Make chart tabs visually identical to account tabs */
-        .chart-tabs { display:flex; gap:.5rem; flex-wrap:wrap; margin:0; }
-        .chart-tabs .tab {
-          -webkit-appearance: none; appearance: none;
-          text-decoration:none; color:var(--text);
-          padding:.35rem .75rem; border-radius:6px;
-          border:1px solid var(--thead-bg); background:var(--row-even);
-          font-weight:600; font-size: .95em; line-height:1; cursor:pointer;
-        }
-        .chart-tabs .tab:hover { background: var(--row-odd); }
-        .chart-tabs .tab.active { background: var(--thead-bg); border-color: var(--row-hover); }
-
-        /* Stronger mobile override placed AFTER the base rule so it wins */
-        @media (max-width:768px){ .chart-tabs{ margin-top:.15rem; } }
-      </style>
       <div class="chart-header">
         <div class="portfolio-summary">
           <div class="pf-title">Portfolio</div>
@@ -473,20 +458,45 @@
   <script>
     window.addEventListener('DOMContentLoaded', () => {
     /* ---------- render helpers ---------- */
-    const num0 = $.fn.dataTable.render.number(',', '.', 0);
-    const num2 = $.fn.dataTable.render.number(',', '.', 2);
-    const num4 = $.fn.dataTable.render.number(',', '.', 4);
-    const pct1 = $.fn.dataTable.render.number(',', '.', 1, '%');
+    const fmt = {
+      num0: $.fn.dataTable.render.number(',', '.', 0),
+      num2: $.fn.dataTable.render.number(',', '.', 2),
+      num4: $.fn.dataTable.render.number(',', '.', 4),
+      pct1: $.fn.dataTable.render.number(',', '.', 1, '%')
+    };
+    const { num0, num2, num4, pct1 } = fmt;
     const isMobile = window.matchMedia('(max-width: 768px)').matches;
     const heartbeatMs = Math.max(1, Number(window.HEARTBEAT_MS) || 30_000);
     let currentSlug = "{{ current_slug }}";
     let basePath = `/${currentSlug}`;
-    function apiUrl(p) {
+    const state = {
+      prevPL: {},
+      queue: [],
+      posEtag: null,
+      esEvents: null,
+      hidden: document.hidden
+    };
+    const apiUrl = (p) => {
       const clean = p.startsWith('/') ? p : `/${p}`;
       return `${basePath}${clean}`;
-    }
+    };
     window.apiUrl = apiUrl;
     window.getCurrentSlug = () => currentSlug;
+
+    const toNumber = (v, fallback = 0) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
+    };
+
+    const fetchJson = async (url, opts = {}) => {
+      try {
+        const res = await fetch(url, opts);
+        if (!res || !res.ok) return null;
+        return await res.json();
+      } catch (_) {
+        return null;
+      }
+    };
 
     function scheduleAligned(fn, intervalMs = heartbeatMs, offsetMs = 0) {
       const interval = Math.max(1, Math.floor(intervalMs));
@@ -526,6 +536,18 @@
 
     /* ---------- KPI TABLE ------------------------------------------------ */
     let kpiTbl = null;
+
+    function updateKpiValue(rawKey, value) {
+      if (!kpiTbl) return;
+      kpiTbl.rows().every(function () {
+        const row = this.data();
+        if (row.rawKey === rawKey) {
+          row.value = value;
+          this.invalidate();
+        }
+      });
+      kpiTbl.draw(false);
+    }
 
     /* shared portfolio header state for all scripts */
     const pfHeader = window.pfHeader || {};
@@ -605,106 +627,100 @@
     ];
 
     /** fetch KPI JSON + (re)draw table */
-    function loadKpi () {
-      $.getJSON(apiUrl('api/metrics'), data => {
-        const src = data[0] || {};
+    async function loadKpi () {
+      const data = await fetchJson(apiUrl('api/metrics')) || [];
+      const src = (Array.isArray(data) ? data[0] : {}) || {};
 
-        /* derive total P/Ls on the fly */
-        src['P/L'] =
-          (+src['Total Profit/Loss'] || 0) + (+src['Unrealised P/L'] || 0);
-        src['P/L (per Lot)'] =
-          (+src['Total Profit/Loss'] || 0) + (+src['Unrealised P/L (per Lot)'] || 0);
+      /* derive total P/Ls on the fly */
+      src['P/L'] =
+        (+src['Total Profit/Loss'] || 0) + (+src['Unrealised P/L'] || 0);
+      src['P/L (per Lot)'] =
+        (+src['Total Profit/Loss'] || 0) + (+src['Unrealised P/L (per Lot)'] || 0);
 
-        /* turn object → ordered row-array */
-        const rows = metricOrder.map(key => ({
-          metric : labelMap[key] || key,
-          rawKey : key,
-          value  : src[key] ?? 0
-        }));
+      /* turn object → ordered row-array */
+      const rows = metricOrder.map(key => ({
+        metric : labelMap[key] || key,
+        rawKey : key,
+        value  : src[key] ?? 0
+      }));
 
-        const cols = [
-          { data:'metric', title:'Metric', className:'dt-left' },
-          {
-            data:'value',  title:'Value',  className:'dt-right',
-            render: (d, t, r) => {
-              if (t !== 'display') return +d || 0;
+      const cols = [
+        { data:'metric', title:'Metric', className:'dt-left' },
+        {
+          data:'value',  title:'Value',  className:'dt-right',
+          render: (d, t, r) => {
+            if (t !== 'display') return +d || 0;
 
-              /* pretty-print with correct formatter */
-              if (r.rawKey === 'Total Return')
-                return wrapPnL(d, pct1.display(+d));
+            /* pretty-print with correct formatter */
+            if (r.rawKey === 'Total Return')
+              return wrapPnL(d, pct1.display(+d));
 
-              if (r.rawKey.includes('%'))
-                return pct1.display(+d);
+            if (r.rawKey.includes('%'))
+              return pct1.display(+d);
 
-              if (['Open Positions','Closed Trades'].includes(r.rawKey))
-                return num0.display(+d);
+            if (['Open Positions','Closed Trades'].includes(r.rawKey))
+              return num0.display(+d);
 
-              if (['Total Profit/Loss','Unrealised P/L','Unrealised P/L (per Lot)','P/L','P/L (per Lot)'].includes(r.rawKey))
-                return wrapPnL(d, num2.display(+d));
+            if (['Total Profit/Loss','Unrealised P/L','Unrealised P/L (per Lot)','P/L','P/L (per Lot)'].includes(r.rawKey))
+              return wrapPnL(d, num2.display(+d));
 
-              if (r.rawKey === 'Fees + Interest')
-                return num2.display(+d);
-
+            if (r.rawKey === 'Fees + Interest')
               return num2.display(+d);
-            }
+
+            return num2.display(+d);
           }
-        ];
-
-        /* draw or refresh */
-        if (!kpiTbl) {
-          kpiTbl = $('#kpi').DataTable({
-            data: rows,
-            columns: cols,
-            dom:'t',
-            paging:false,
-            searching:false,
-            info:false,
-            ordering:false,
-            scrollX:false,
-            scrollY:false
-          }).on('draw.dt', () =>
-            $('#kpi, #kpi_wrapper').css('width','auto')
-          );
-        } else {
-          kpiTbl.clear().rows.add(rows).draw(false);
         }
+      ];
 
-        refreshLiveKpis();      /* sync with open-positions P/L */
-        kpiTbl.columns.adjust();
+      /* draw or refresh */
+      if (!kpiTbl) {
+        kpiTbl = $('#kpi').DataTable({
+          data: rows,
+          columns: cols,
+          dom:'t',
+          paging:false,
+          searching:false,
+          info:false,
+          ordering:false,
+          scrollX:false,
+          scrollY:false
+        }).on('draw.dt', () =>
+          $('#kpi, #kpi_wrapper').css('width','auto')
+        );
+        state.kpi = kpiTbl;
+      } else {
+        kpiTbl.clear().rows.add(rows).draw(false);
+      }
 
-        /* capture base deposit for header; header follows KPI events */
-        try {
-          fetch('api/equity')
-            .then(r => (r && r.ok ? r.json() : []))
-            .then(rows => {
-              try {
-                const last = rows && rows.length ? rows[rows.length - 1] : null;
-                pfHeader.dailyDeposit =
-                  last && last.deposit != null ? +last.deposit : null;
-                pfHeader.dailyTimestamp =
-                  last && last.date ? last.date : null;
-                if (pfHeader.source === 'daily' ||
-                    pfHeader.intradayDeposit == null) {
-                  if (pfHeader.dailyDeposit != null) {
-                    renderPortfolioHeaderValue(
-                      pfHeader.dailyDeposit,
-                      pfHeader.dailyTimestamp
-                    );
-                  }
-                }
-              } catch (_) { /* ignore */ }
-            })
-            .catch(() => {});
-        } catch (_) { /* ignore */ }
-      });
+      refreshLiveKpis();      /* sync with open-positions P/L */
+      kpiTbl.columns.adjust();
+
+      /* capture base deposit for header; header follows KPI events */
+      const equityRows = await fetchJson(apiUrl('api/equity')) || [];
+      try {
+        const last = equityRows.length ? equityRows[equityRows.length - 1] : null;
+        pfHeader.dailyDeposit =
+          last && last.deposit != null ? +last.deposit : null;
+        pfHeader.dailyTimestamp =
+          last && last.date ? last.date : null;
+        if (pfHeader.source === 'daily' ||
+            pfHeader.intradayDeposit == null) {
+          if (pfHeader.dailyDeposit != null) {
+            renderPortfolioHeaderValue(
+              pfHeader.dailyDeposit,
+              pfHeader.dailyTimestamp
+            );
+          }
+        }
+      } catch (_) { /* ignore */ }
     }
     scheduleAligned(loadKpi);
 
     /** patch KPI rows that depend on live open-positions */
     function refreshLiveKpis () {
-      if (!kpiTbl) return;
+      if (!kpiTbl || !state.pos) return;
 
-      const posTbl   = $('#pos').DataTable();
+      const posTbl   = state.pos;
       const unreal   = posTbl
         .column('profit_loss:name')
         .data().toArray().reduce((a,b)=> a + (+b||0), 0);
@@ -756,7 +772,7 @@
     const TEN_ROWS  = (ROW_H * 10) + 'px';
 
     /* ---------- OPEN POSITIONS TABLE ----------------------------------- */
-    const prevPL  = {};                   /* store previous P/L per row key */
+    const prevPL  = state.prevPL;         /* store previous P/L per row key */
 
     // Helper: format ISO timestamp to UTC 'YYYY-MM-DD HH:mm:ss'
     const fmtUtcMin = (iso) => {
@@ -773,8 +789,8 @@
       );
     };
 
-    /* Build columns for Open Positions, mobile vs desktop */
-    const posColsMobile = [
+    /* Build columns for Open Positions */
+    const posColumns = [
       { data:'moved_flag', name:'moved_flag', title:'BE&nbsp;?',
         className:'be-flag col-be-flag', defaultContent:'—',
         render: d => d === 'OK' ? '<span class="ok">✔︎</span>' : '—' },
@@ -814,9 +830,6 @@
         render:(d,t)=> t==='display' ? num2.display(+d||0) : +d||0 }
     ];
 
-    /* Desktop: keep TP/SL % right after BE? (same as mobile) */
-    const posColsDesktop = posColsMobile;
-
     const pos = $('#pos').DataTable({
       data: [],
       autoWidth: false,
@@ -828,7 +841,7 @@
       responsive:true,
       deferRender:true,
       rowId: 'parent_id',
-      columns: isMobile ? posColsMobile : posColsDesktop,
+      columns: posColumns,
 
       /* per-row colour-coding & flash logic */
       rowCallback: (row, data) => {
@@ -879,7 +892,7 @@
       /* footer aggregation */
       footerCallback () {
         const api = this.api(),
-              n   = d => +d || 0;
+              n   = d => toNumber(d);
 
         const buy = api.column('buy_value:name').data().reduce((a,b)=>a+n(b),0);
         const mkt = api.column('mkt_value:name').data().reduce((a,b)=>a+n(b),0);
@@ -899,6 +912,7 @@
         $(api.column('tp_sl_reach_pct:name').footer()).html('');
       }
     });
+    state.pos = pos;
 
     /* ensure default sort by per-lot P/L, robust to order */
     pos.order([[ pos.column('profit_loss_lot:name').index(), 'desc' ]])
@@ -939,8 +953,8 @@
     }
 
     /* initial bulk load */
-    let esEvents = null;
-    let posEtag = null;
+    state.esEvents = null;
+    state.posEtag = null;
 
     function updatePortfolioChange() {
       if (!pfHeader.changeEl) return;
@@ -1103,11 +1117,11 @@
     window.syncPortfolioHeaderState = syncPortfolioHeaderState;
     async function fetchPositionsCached () {
       try {
-        const headers = posEtag ? { 'If-None-Match': posEtag } : {};
+        const headers = state.posEtag ? { 'If-None-Match': state.posEtag } : {};
         const r = await fetch(apiUrl('api/positions_cached'), { headers });
         if (r.status === 304) return;   // unchanged
         if (!r.ok) return;
-        posEtag = r.headers.get('ETag') || posEtag;
+        state.posEtag = r.headers.get('ETag') || state.posEtag;
         const rows = await r.json();
         const keys = new Set();
         rows.forEach(r => { upsertPos(r); keys.add(r.parent_id ?? r.symbol); });
@@ -1126,9 +1140,11 @@
     loadPos();
 
     /* listen to streaming updates (batched apply) */
-    const queue = [];
-    let hidden = document.hidden;
-    document.addEventListener('visibilitychange', () => hidden = document.hidden);
+    const queue = state.queue;
+    document.addEventListener(
+      'visibilitychange',
+      () => { state.hidden = document.hidden; }
+    );
 
     function flush () {
       if (!queue.length) return;
@@ -1162,35 +1178,47 @@
 
     setInterval(() => {
       // throttle harder when tab is hidden
-      if (hidden) return flush();
+      if (state.hidden) return flush();
       flush();
     }, 250);
 
-    function openStream () {
-      try { esEvents && esEvents.close && esEvents.close(); } catch (_) {}
-      esEvents = new EventSource(apiUrl('stream/events'));
-      esEvents.addEventListener('message', e => {
-        try {
-          const evt = JSON.parse(e.data);
-          if (!evt || !evt.channel) return;
-          if (evt.channel === 'pos') {
-            let m = evt.payload;
-            if (typeof m === 'string') {
-              try { m = JSON.parse(m); } catch (_) {}
-            }
-            if (m && m.op === 'heartbeat') {
-              fetchPositionsCached();
-              return;
-            }
-            if (m) queue.push(m);
+    function handleStreamEvent(e) {
+      try {
+        const evt = JSON.parse(e.data);
+        if (!evt || !evt.channel) return;
+        if (evt.channel === 'pos') {
+          let m = evt.payload;
+          if (typeof m === 'string') {
+            try { m = JSON.parse(m); } catch (_) {}
+          }
+          if (m && m.op === 'heartbeat') {
+            fetchPositionsCached();
             return;
           }
-          if (evt.channel === 'closed') {
-            loadClosed();
-            loadKpi();
-          }
-        } catch (_) {}
-      });
+          if (m) queue.push(m);
+          return;
+        }
+        if (evt.channel === 'closed') {
+          loadClosed();
+          loadKpi();
+        }
+      } catch (_) { /* ignore */ }
+    }
+
+    function closeStream () {
+      try { state.esEvents && state.esEvents.close(); } catch (_) {}
+      state.esEvents = null;
+    }
+
+    function openStream () {
+      closeStream();
+      const es = new EventSource(apiUrl('stream/events'));
+      state.esEvents = es;
+      es.addEventListener('message', handleStreamEvent);
+      es.onerror = () => {
+        closeStream();
+        setTimeout(openStream, 2000);
+      };
     }
     openStream();
 
@@ -1241,7 +1269,7 @@
 
       footerCallback () {
         const api = this.api(),
-              n   = d => +d || 0;
+              n   = d => toNumber(d);
 
         const cash = api.column('pnl_cash:name').data().reduce((a,b)=>a+n(b),0);
         const pct  = api.data().length
@@ -1259,6 +1287,7 @@
           .toggleClass('pl-neg', pct < 0);
       }
     });
+    state.closed = closed;
 
     /* keep sorting by Sell TS regardless of column order */
     closed.order([[ closed.column('exit_time:name').index(), 'desc' ]])
@@ -1274,17 +1303,12 @@
     window.addEventListener('resize', () => kpiTbl?.columns.adjust());
 
     /* bulk load + periodic refresh */
-    function loadClosed () {
-      $.getJSON(apiUrl('api/closed'), rows => {
-        closed.clear().rows.add(rows).draw(false);
+    async function loadClosed () {
+      const rows = await fetchJson(apiUrl('api/closed')) || [];
+      closed.clear().rows.add(rows).draw(false);
 
-        /* keep KPI “Closed Trades” count in sync */
-        if (kpiTbl) {
-          const first = { ...kpiTbl.row(0).data() };
-          first['Closed Trades'] = rows.length;
-          kpiTbl.row(0).data(first).invalidate().draw(false);
-        }
-      });
+      /* keep KPI “Closed Trades” count in sync */
+      updateKpiValue('Closed Trades', rows.length);
     }
     scheduleAligned(loadClosed);
 
@@ -1303,7 +1327,7 @@
       setActiveTab(slug);
       /* keep browser URL in sync so refresh/bookmark stays on this account */
       try { history.pushState(null, '', `/${slug}/`); } catch (_) {}
-      posEtag = null;
+      state.posEtag = null;
       queue.length = 0;
       try { pos.clear().draw(false); } catch (_) {}
       try { closed.clear().draw(false); } catch (_) {}
@@ -1327,9 +1351,7 @@
     setActiveTab(currentSlug);
 
     /* proactively close SSE on page unload */
-    window.addEventListener('beforeunload', () => {
-      try { esEvents && esEvents.close && esEvents.close(); } catch (_) {}
-    });
+    window.addEventListener('beforeunload', () => closeStream());
 
     });
   </script>
@@ -1350,8 +1372,15 @@
       let   chartDDIntra = null;
 
       /* css var helper */
-      const css = v =>
-        getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+      const cssCache = {};
+      const css = (v) => {
+        if (cssCache[v] !== undefined) return cssCache[v];
+        cssCache[v] =
+          getComputedStyle(document.documentElement)
+            .getPropertyValue(v)
+            .trim();
+        return cssCache[v];
+      };
       const alphaVar = (name, def) => {
         const s = css(name);
         const n = parseFloat(s);
@@ -1696,7 +1725,6 @@
           return Number.isFinite(v) ? v * 100 : null;
         });
 
-        const blue    = css('--chart-line') || '#29b3ff';
         const posLine = css('--chart-pos-line') || css('--chart-pos') || '#035800';
         const posFill = css('--chart-pos-fill') || css('--chart-pos') || '#035800';
         const negLine = css('--chart-neg-line') || css('--chart-neg') || '#790000';
@@ -1869,7 +1897,6 @@
           peak = Math.max(peak, v);
           dd.push(((v / peak) - 1) * 100);
         }
-        const blue   = css('--chart-line') || '#29b3ff';
         const grid   = css('--grid-col')   || 'rgba(0,0,0,0.15)';
         const ddLine = css('--chart-dd-line') || css('--chart-dd') || '#4da3ff';
         const ddFill = css('--chart-dd-fill') || css('--chart-dd') || '#4da3ff';
@@ -2110,7 +2137,6 @@
         const dd = rows.map(r => (
           r.drawdown_cash === null || r.drawdown_cash === undefined ? null : +r.drawdown_cash
         ));
-        const blue   = css('--chart-line') || '#29b3ff';
         const grid   = css('--grid-col')   || 'rgba(0,0,0,0.15)';
         const ddLine = css('--chart-dd-line') || css('--chart-dd') || '#4da3ff';
         const ddFill = css('--chart-dd-fill') || css('--chart-dd') || '#4da3ff';
@@ -2306,36 +2332,8 @@
         });
 
       /* --- sync left/right padding between paired charts --------------- */
-      function syncRightPaddingBetween(a, b) {
-        if (!a || !b || !a.chartArea || !b.chartArea) return;
-
-        // Right side (axis + any padding)
-        const rmA = a.width - a.chartArea.right;
-        const rmB = b.width - b.chartArea.right;
-        const rTarget = Math.max(rmA, rmB);
-
-        // Left side (may differ if bottom chart shows X labels)
-        const lmA = a.chartArea.left;
-        const lmB = b.chartArea.left;
-        const lTarget = Math.max(lmA, lmB);
-
-        const getPad = (c, side) => ((c.options?.layout?.padding?.[side]) || 0);
-        const setPad = (c, side, add) => {
-          c.options.layout = c.options.layout || {};
-          c.options.layout.padding = c.options.layout.padding || {};
-          const cur = getPad(c, side);
-          const next = Math.max(0, cur + add);
-          if (Math.abs(next - cur) > 0.5) {
-            c.options.layout.padding[side] = next;
-            c.update('none');
-          }
-        };
-
-        if (rmA < rTarget) setPad(a, 'right', rTarget - rmA);
-        if (rmB < rTarget) setPad(b, 'right', rTarget - rmB);
-        if (lmA < lTarget) setPad(a, 'left',  lTarget - lmA);
-        if (lmB < lTarget) setPad(b, 'left',  lTarget - lmB);
-      }
+      /* padding sync temporarily disabled to avoid Chart.js recursion */
+      function syncRightPaddingBetween(_a, _b) { return; }
 
       // keep intraday/daily pairs aligned after each render and on resize
       const syncAll = () => {
