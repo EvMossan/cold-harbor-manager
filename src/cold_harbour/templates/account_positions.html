@@ -1866,11 +1866,9 @@
                 grid: { color: grid, borderDash: [3, 3] }
               },
               y: {
-                position: 'right',
+                position: 'left',
                 title: { display: !isMobileChart, text: 'Cumulative Return' },
                 ticks: {
-                  mirror: true,
-                  labelOffset: -8,
                   padding: 6,
                   font: { size: 11 },
                   callback: v => Number(v).toFixed(0) + '%',
@@ -1970,11 +1968,9 @@
                 grid: { color: grid, borderDash: [3, 3] }
               },
               y: {
-                position: 'right', suggestedMax: 0,
+                position: 'left', suggestedMax: 0,
                 title: { display: !isMobileChart, text: 'Drawdown' },
                 ticks: {
-                  mirror: true,
-                  labelOffset: -8,
                   padding: 6,
                   font: { size: 11 },
                   callback: v => Math.round(Math.abs(Number(v)))
@@ -2128,11 +2124,9 @@
                 grid: { color: grid, borderDash: [3, 3] }
               },
               y: {
-                position: 'right',
+                position: 'left',
                 title: { display: !isMobileChart, text: 'Equity ($)' },
                 ticks: {
-                  mirror: true,
-                  labelOffset: -8,
                   padding: 6,
                   font: { size: 11 },
                   callback: (value) => new Intl.NumberFormat('en-US', {
@@ -2230,12 +2224,10 @@
                           } },
                   grid:{ color:grid, borderDash:[3,3] } },
               y:{
-                position:'right',
+                position:'left',
                 suggestedMax:0,
                 title:{ display:!isMobileChart, text:'Drawdown ($)' },
                 ticks:{
-                  mirror:true,
-                  labelOffset:-8,
                   padding:6,
                   font:{ size:11 },
                   callback:(value)=> Math.round(Math.abs(Number(value)))
