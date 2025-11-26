@@ -1361,6 +1361,8 @@
     window.addEventListener('DOMContentLoaded', () => {
     (function () {
       const apiUrl = window.apiUrl;
+      const isMobileChart =
+        window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
       /* context + chart handles */
       const ctxDaily   = document.getElementById('depositChart').getContext('2d');
       const ctxIntra   = document.getElementById('depositChartIntraday').getContext('2d');
@@ -1865,8 +1867,12 @@
               },
               y: {
                 position: 'right',
-                title: { display: true, text: 'Cumulative Return' },
+                title: { display: !isMobileChart, text: 'Cumulative Return' },
                 ticks: {
+                  mirror: true,
+                  labelOffset: -8,
+                  padding: 6,
+                  font: { size: 11 },
                   callback: v => Number(v).toFixed(0) + '%',
                   maxTicksLimit: 6
                 },
@@ -1965,8 +1971,14 @@
               },
               y: {
                 position: 'right', suggestedMax: 0,
-                title: { display: true, text: 'Drawdown' },
-                ticks: { callback: v => Number(v).toFixed(0) + '%' },
+                title: { display: !isMobileChart, text: 'Drawdown' },
+                ticks: {
+                  mirror: true,
+                  labelOffset: -8,
+                  padding: 6,
+                  font: { size: 11 },
+                  callback: v => Math.round(Math.abs(Number(v)))
+                },
                 grid: { color: grid, borderDash: [3, 3] }
               }
             },
@@ -2117,9 +2129,18 @@
               },
               y: {
                 position: 'right',
-                title: { display: true, text: 'Equity ($)' },
+                title: { display: !isMobileChart, text: 'Equity ($)' },
                 ticks: {
-                  callback: (v) => '$' + Number(v).toFixed(0),
+                  mirror: true,
+                  labelOffset: -8,
+                  padding: 6,
+                  font: { size: 11 },
+                  callback: (value) => new Intl.NumberFormat('en-US', {
+                    style: 'currency',
+                    currency: 'USD',
+                    notation: 'compact',
+                    maximumFractionDigits: 1
+                  }).format(value),
                   maxTicksLimit: 6
                 },
                 grid: { color: grid, borderDash: [3, 3] },
@@ -2208,7 +2229,19 @@
                             } catch (_) { return ''; }
                           } },
                   grid:{ color:grid, borderDash:[3,3] } },
-              y:{ position:'right', suggestedMax:0, title:{ display:true, text:'Drawdown ($)' }, ticks:{ callback:v=> '$'+Number(v).toFixed(0) }, grid:{ color:grid, borderDash:[3,3] } }
+              y:{
+                position:'right',
+                suggestedMax:0,
+                title:{ display:!isMobileChart, text:'Drawdown ($)' },
+                ticks:{
+                  mirror:true,
+                  labelOffset:-8,
+                  padding:6,
+                  font:{ size:11 },
+                  callback:(value)=> Math.round(Math.abs(Number(value)))
+                },
+                grid:{ color:grid, borderDash:[3,3] }
+              }
             }, spanGaps:true }
         };
       }
