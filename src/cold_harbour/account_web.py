@@ -171,7 +171,7 @@ if not log.handlers:
     lvl_raw = (
         os.getenv("ACCOUNT_WEB_LOG_LEVEL")
         or os.getenv("LOG_LEVEL")
-        or "INFO"
+        or "DEBUG"
     )
     try:
         lvl = getattr(logging, lvl_raw.strip().upper())
@@ -842,7 +842,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 except Exception:
                     return None
 
-        ttl_seconds = HEARTBEAT_SEC
+        ttl_seconds = min(HEARTBEAT_SEC, 10)
         try:
             now = pd.Timestamp.utcnow()
             ent = _cache.get("equity_intraday", {})
@@ -928,8 +928,15 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 start_utc = pre_open_ts
             if start_utc > post_close_ts:
                 start_utc = pre_open_ts
+            last_complete = (
+                (now_utc.floor("min") - pd.Timedelta(seconds=5)).floor("min")
+            )
+            if last_complete < start_utc:
+                last_complete = start_utc
             end_utc = (
-                post_close_ts if now_utc >= post_close_ts else now_utc
+                post_close_ts
+                if last_complete >= post_close_ts
+                else last_complete
             )
         else:
             start_sec = _start_seconds(start_param)
@@ -946,7 +953,12 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 tzinfo=ZoneInfo(tz_name),
             )
             post_close_ts = pd.to_datetime(close_local, utc=True)
-            end_utc = now_utc if now_utc <= post_close_ts else post_close_ts
+            last_complete = (
+                (now_utc.floor("min") - pd.Timedelta(seconds=5)).floor("min")
+            )
+            if last_complete < start_utc:
+                last_complete = start_utc
+            end_utc = last_complete if last_complete <= post_close_ts else post_close_ts
 
         # Anchor deposit: strictly before the session date (base for this session)
         with engine.begin() as conn:
