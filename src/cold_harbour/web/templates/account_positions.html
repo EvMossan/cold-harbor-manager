@@ -1791,7 +1791,7 @@
               fill: {
                 target:{ value:0 },
                 above:'rgba(0,0,0,0)',
-                below: gradNegDaily
+                below:'rgba(0,0,0,0)'
               }
             }, {
               type: 'line',
@@ -1863,7 +1863,7 @@
                     }
                   }
                 },
-                grid: { color: grid, borderDash: [3, 3] }
+                grid: { display: false }
               },
               y: {
                 position: 'left',
@@ -1976,14 +1976,26 @@
               x: {
                 type: 'time', time: { unit: 'week', stepSize: 1, displayFormats: { week: 'MMM dd' }, tooltipFormat: 'PP' },
                 ticks: { maxRotation: 0, minRotation: 0, autoSkip: true },
-                grid: { color: grid, borderDash: [3, 3] }
+                grid: { display: false }
               },
               y: {
-                position: 'left', suggestedMax: 0,
+                position: 'left',
+                suggestedMax: 0,
+                title: { display: !isMobileChart, text: 'Drawdown' },
+                afterBuildTicks: function(axis) {
+                  const min = axis.min;
+                  const max = axis.max;
+                  const mid = (min + max) / 2;
+                  axis.ticks = [
+                    { value: min },
+                    { value: mid },
+                    { value: max }
+                  ];
+                },
                 ticks: {
                   padding: 6,
                   font: { size: 11 },
-                  callback: v => Math.round(Math.abs(Number(v)))
+                  callback: v => Math.round(Math.abs(Number(v))) + '%'
                 },
                 afterFit: function(axis) {
                   axis.width = 60;
@@ -2136,7 +2148,7 @@
                 },
                 min: xMin,
                 max: xMax,
-                grid: { color: grid, borderDash: [3, 3] }
+                grid: { display: false }
               },
               y: {
                 position: 'left',
@@ -2248,9 +2260,20 @@
                                 .replace(/\s*PM/i, ' pm');
                             } catch (_) { return ''; }
                           } },
-                  grid:{ color:grid, borderDash:[3,3] } },
+                  grid:{ display:false } },
               y:{
                 position:'left',
+                title:{ display:!isMobileChart, text:'Drawdown ($)' },
+                afterBuildTicks: function(axis) {
+                  const min = axis.min;
+                  const max = axis.max;
+                  const mid = (min + max) / 2;
+                  axis.ticks = [
+                    { value: min },
+                    { value: mid },
+                    { value: max }
+                  ];
+                },
                 ticks:{
                   padding:6,
                   font:{ size:11 },

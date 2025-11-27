@@ -164,7 +164,7 @@ if not log.handlers:
     lvl_raw = (
         os.getenv("ACCOUNT_WEB_LOG_LEVEL")
         or os.getenv("LOG_LEVEL")
-        or "DEBUG"
+        or "INFO"
     )
     try:
         lvl = getattr(logging, lvl_raw.strip().upper())

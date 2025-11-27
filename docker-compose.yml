@@ -29,6 +29,8 @@ services:
     container_name: web
     working_dir: /app
     env_file: .env
+    environment:
+      WEB_RELOAD: "1"
     ports:
       - "5000:5000"
     volumes:
