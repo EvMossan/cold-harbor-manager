@@ -1,0 +1,20 @@
+services:
+  account-manager:
+    build:
+      context: .
+    image: cold_harbour_manager:latest
+    working_dir: /app
+    entrypoint:
+      - watchmedo
+      - auto-restart
+      - "--directory=/app/src"
+      - "--pattern=*.py"
+      - "--recursive"
+      - --
+      - python
+      - -m
+      - cold_harbour.manager_run
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped

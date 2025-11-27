@@ -1,56 +1,48 @@
 #!/usr/bin/env python3
-"""Small multi-account dashboard (single port, per-account prefixes).
+"""Blueprint-based web layer for the account dashboards.
 
-For each destination configured in ``cold_harbour.destinations.DESTINATIONS``
-we create a Flask Blueprint mounted at ``/<slug>`` that exposes:
-
-  - ``/<slug>/``              → HTML dashboard
-  - ``/<slug>/api/positions`` → JSON snapshot of open positions
-  - ``/<slug>/api/closed``    → JSON list of closed trades
-  - ``/<slug>/api/metrics``   → JSON KPI block
-  - ``/<slug>/api/equity``    → JSON equity series
-  - ``/<slug>/stream/…``      → Server-sent events (SSE) for live updates
-
-All table names and LISTEN/NOTIFY channel names are derived from the
-destination name via a safe slug and do not require extra configuration.
+This file mirrors the old ``account_web.py`` but exposes a blueprint factory
+instead of a module-level Flask app. The actual Flask app will be created in
+``cold_harbour.__init__.py`` via ``create_app``.
 """
 
-import os
-import sys
+from __future__ import annotations
+
 import json
-import math
-import uuid
-import time  # used for SSE keep-alive comments
 import logging
-import psycopg2
+import math
+import os
 import select
-import pandas as pd
+import sys
+import time  # used for SSE keep-alive comments
+import uuid
 from datetime import date, datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
+
+import pandas as pd
+import psycopg2
 from flask import (
-    Flask,
-    jsonify,
-    render_template,
-    Response,
     Blueprint,
-    request,
+    Response,
     current_app,
     g,
+    jsonify,
+    render_template,
+    request,
 )
-from sqlalchemy import create_engine, URL, text
+from sqlalchemy import URL, create_engine, text
 
-from cold_harbour.account_utils import (
+from cold_harbour.core.account_utils import (
     calculate_trade_metrics,
     coalesce_exit_slices,
     trading_session_date,
 )
-from cold_harbour.destinations import (
+from cold_harbour.core.destinations import (
     DESTINATIONS,
     account_table_names,
     notify_channels_for,
     slug_for,
 )
-
 
 # ── config reused from AccountManager ────────────────────────────
 PG_DSN = os.getenv(
@@ -119,6 +111,7 @@ engine = _make_sa_engine()
 # Timescale connection (use SQLAlchemy engine to avoid pandas warnings)
 TS_DSN = os.getenv("TIMESCALE_LIVE_CONN_STRING", "")
 
+
 def _make_ts_engine():
     """Return SQLAlchemy engine for Timescale from URL or libpq DSN.
 
@@ -159,6 +152,7 @@ def _make_ts_engine():
     except Exception:
         return engine
 
+
 ts_engine = _make_ts_engine()
 
 log = logging.getLogger("AccountWeb")
@@ -167,7 +161,6 @@ if not log.handlers:
     fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
     handler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
-    log.addHandler(handler)
     lvl_raw = (
         os.getenv("ACCOUNT_WEB_LOG_LEVEL")
         or os.getenv("LOG_LEVEL")
@@ -179,12 +172,16 @@ if not log.handlers:
         lvl = logging.INFO
     log.setLevel(lvl)
     handler.setLevel(logging.NOTSET)
+    log.addHandler(handler)
     log.propagate = False
 
+# Hardcoded bars table per requirement
 BARS_TABLE = "public.alpaca_bars_1min"
 
-# Toggle SSE streams without env wiring; set to False to re-enable later.
-DISABLE_SSE = True
+# Toggle SSE streams; set to False to enable live updates.
+DISABLE_SSE = False
+
+accounts_bp = Blueprint("accounts", __name__)
 
 
 def _now() -> float:
@@ -226,16 +223,6 @@ def _log_timing(
         pass
 
 
-# Hardcoded bars table per requirement
-BARS_TABLE = "public.alpaca_bars_1min"
-
-# Toggle SSE streams; set to False to enable live updates.
-DISABLE_SSE = False
-
-app = Flask(__name__)
-
-
-@app.before_request
 def _start_request_timer() -> None:
     try:
         g.req_start = _now()
@@ -252,7 +239,6 @@ def _start_request_timer() -> None:
         pass
 
 
-@app.after_request
 def _end_request_timer(resp: Response) -> Response:
     try:
         start_ts = getattr(g, "req_start", None)
@@ -270,6 +256,27 @@ def _end_request_timer(resp: Response) -> Response:
     except Exception:
         pass
     return resp
+
+
+def relax_csp(resp: Response) -> Response:
+    """Install a permissive CSP that works with CDN assets and inline JS."""
+    resp.headers.pop("Content-Security-Policy", None)
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com "
+        "https://cdn.datatables.net https://code.jquery.com; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+        "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com "
+        "https://cdn.datatables.net https://code.jquery.com; "
+        "style-src 'self' 'unsafe-inline' https://cdn.datatables.net"
+    )
+    return resp
+
+
+def register_request_hooks(app) -> None:
+    """Attach common request/response hooks to the Flask app."""
+    app.before_request(_start_request_timer)
+    app.after_request(_end_request_timer)
+    app.after_request(relax_csp)
 
 
 def _make_blueprint_for_dest(dest: dict) -> Blueprint:
@@ -1146,7 +1153,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
     return bp
 
 
-@app.route("/")
+@accounts_bp.route("/")
 def index() -> str:
     """Render a simple index linking all account dashboards.
 
@@ -1165,26 +1172,5 @@ def index() -> str:
     )
 
 
-# Install blueprints for every configured destination
-for _dest in DESTINATIONS:
-    app.register_blueprint(_make_blueprint_for_dest(_dest))
-
-
-@app.after_request
-def relax_csp(resp):
-    """Install a permissive CSP that works with CDN assets and inline JS."""
-    resp.headers.pop("Content-Security-Policy", None)
-    resp.headers["Content-Security-Policy"] = (
-        "default-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com "
-        "https://cdn.datatables.net https://code.jquery.com; "
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
-        "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com "
-        "https://cdn.datatables.net https://code.jquery.com; "
-        "style-src 'self' 'unsafe-inline' https://cdn.datatables.net"
-    )
-    return resp
-
-
-if __name__ == "__main__":
-    # Enable threaded server so long-lived SSE doesn't block other requests
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+# Pre-build the per-destination blueprints so create_app can register them.
+ACCOUNT_BLUEPRINTS = [_make_blueprint_for_dest(d) for d in DESTINATIONS]
