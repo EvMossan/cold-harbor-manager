@@ -1,8 +1,11 @@
+name: cold_harbour_dashboard
+
 services:
-  account-manager:
+  manager:
     build:
       context: .
-    image: cold_harbour_manager:latest
+    image: cold_harbour/manager:dev
+    container_name: cold_harbour-manager
     working_dir: /app
     entrypoint:
       - watchmedo
@@ -19,10 +22,11 @@ services:
       - ./src:/app/src
     restart: unless-stopped
 
-  account-web:
+  web:
     build:
       context: .
-    image: cold_harbour_web:latest
+    image: cold_harbour/web:dev
+    container_name: cold_harbour-web
     working_dir: /app
     env_file: .env
     ports:
