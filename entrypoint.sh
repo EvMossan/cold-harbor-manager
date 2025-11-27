@@ -34,4 +34,5 @@ fi
 sleep 2
 
 # Run gunicorn (Cloud Run provides $PORT)
-exec gunicorn -k gevent -w 1 -b "0.0.0.0:${PORT:-5000}" "cold_harbour:create_app()"
+
+exec gunicorn -k gevent -w 1 -b "0.0.0.0:${PORT:-5000}" cold_harbour.account_web:app
