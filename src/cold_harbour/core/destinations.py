@@ -35,6 +35,15 @@ DESTINATIONS: List[Dict[str, Any]] = [
     },
 ]
 
+# Optional local-only destinations (not tracked in VCS)
+try:
+    from cold_harbour.core import destinations_local
+
+    extra = getattr(destinations_local, "EXTRA_DESTINATIONS", [])
+    if isinstance(extra, list):
+        DESTINATIONS.extend(extra)
+except Exception:
+    pass
 
 # ---------------------------------------------------------------------------
 # Helpers
