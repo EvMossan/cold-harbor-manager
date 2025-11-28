@@ -46,6 +46,7 @@ from cold_harbour.core.account_utils import (
     closed_trades_fifo_from_orders,
     trading_session_date,
 )
+from cold_harbour.core.account_start import earliest_activity_date_async
 from cold_harbour.core.market_schedule import (
     SessionWindow,
     next_session_after_async,
@@ -694,14 +695,31 @@ class AccountManager:
 
         try:
             assert self.repo is not None
+            # Seed calendar from earliest account activity (closed/open/flows).
+            cash_flow_types = os.getenv(
+                "CASH_FLOW_TYPES",
+                (
+                    "CSD,CSW,JNLC,ACATC,ACATS,FEE,CFEE,DIV,DIVCGL,DIVCGS,"
+                    "DIVNRA,DIVROC,DIVTXEX,DIVWH,INT,INTPNL"
+                ),
+            )
+            earliest = await earliest_activity_date_async(
+                self.repo,
+                {
+                    "closed": self.tbl_closed,
+                    "cash_flows": self.tbl_cash_flows,
+                    "open": self.tbl_live,
+                },
+                cash_flow_types=cash_flow_types,
+                fallback_years=5,
+            )
             count = await sync_schedule_async(
                 self.repo,
                 self.tbl_market_schedule,
                 self.rest,
-                lookback_days=self.MARKET_LOOKBACK_DAYS,
-                forward_days=self.MARKET_FORWARD_DAYS,
+                start_date=earliest,
+                forward_days=max(self.MARKET_FORWARD_DAYS, 90),
                 pre_open_time=self._market_pre_open_time,
-                retain_days=180,
             )
             if count:
                 self.log.debug("market schedule refreshed: %d rows", count)
@@ -1148,6 +1166,7 @@ class AccountManager:
             "TABLE_ACCOUNT_CLOSED": self.tbl_closed,
             "TABLE_ACCOUNT_POSITIONS": self.tbl_live,
             "TABLE_ACCOUNT_EQUITY_FULL": self.tbl_equity,
+            "TABLE_MARKET_SCHEDULE": self.tbl_market_schedule,
             "CASH_FLOW_TYPES": os.getenv(
                 "CASH_FLOW_TYPES",
                 (

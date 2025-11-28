@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from alpaca_trade_api.rest import REST, TimeFrame
 from zoneinfo import ZoneInfo
 from cold_harbour.core.account_utils import trading_session_date
+from cold_harbour.core.account_start import earliest_activity_date, earliest_activity_date_async
 from cold_harbour.infrastructure.db import AsyncAccountRepository
 
 # ────────────────────────────────────────────────────────────────
@@ -50,39 +51,70 @@ def _align_flows_to_business_days(
     flows: pd.Series,
     index: pd.DatetimeIndex,
 ) -> pd.Series:
-    """Return flows aligned to business days.
+    """Align cash flows to a provided date index.
 
-    Non-business-day amounts roll to the next business day so the
-    equity curve includes weekend funding.
+    Each flow is rolled forward to the first date in ``index`` that is
+    >= its timestamp. Weekends/holidays slide to the next trading day,
+    and flows beyond the index end are skipped (handled on next rebuild
+    when the index extends).
     """
     if flows.empty:
         return pd.Series(0.0, index=index, dtype=float)
 
-    bidx = pd.DatetimeIndex(index.normalize())
-    result = pd.Series(0.0, index=bidx, dtype=float)
+    idx_dates = pd.DatetimeIndex(index.normalize())
+    if idx_dates.empty:
+        return pd.Series(dtype=float)
 
-    mapped = pd.Series(
+    flows_norm = pd.Series(
         flows.astype(float).values,
         index=pd.to_datetime(flows.index).normalize(),
-    )
-    in_idx = mapped.index.isin(bidx)
-    if in_idx.any():
-        base = mapped[in_idx].groupby(mapped.index[in_idx]).sum()
-        result = result.add(
-            base.reindex(bidx, fill_value=0.0),
-            fill_value=0.0,
-        )
+    ).sort_index()
 
-    extra = mapped[~in_idx]
-    if not extra.empty:
-        bday = pd.offsets.BDay()
-        rolled = extra.groupby(
-            extra.index.map(lambda dt: bday.rollforward(dt))
-        ).sum()
-        rolled = rolled.reindex(bidx, fill_value=0.0)
-        result = result.add(rolled, fill_value=0.0)
+    result = pd.Series(0.0, index=idx_dates, dtype=float)
+
+    for when, amount in flows_norm.items():
+        pos = idx_dates.searchsorted(when, side="left")
+        if pos >= len(idx_dates):
+            continue
+        result.iloc[pos] += float(amount)
 
     return result
+
+
+def _trading_index_from_schedule(
+    engine,
+    schedule_table: Optional[str],
+    start: dt.date,
+    end: dt.date,
+) -> pd.DatetimeIndex:
+    """Return trading-date index [start, end] using the schedule table.
+
+    Falls back to ``pd.bdate_range`` when the table is missing/empty.
+    """
+    if not schedule_table:
+        return pd.bdate_range(start, end, name="date")
+
+    try:
+        df = pd.read_sql(
+            text(
+                f"""
+                SELECT session_date
+                  FROM {schedule_table}
+                 WHERE session_date BETWEEN :start AND :end
+              ORDER  BY session_date
+                """
+            ),
+            engine,
+            params={"start": start, "end": end},
+        )
+    except Exception:
+        return pd.bdate_range(start, end, name="date")
+
+    if df.empty:
+        return pd.bdate_range(start, end, name="date")
+
+    dates = pd.to_datetime(df["session_date"])
+    return pd.DatetimeIndex(dates, name="date")
 
 
 # ────────────────────────────────────────────────────────────────
@@ -169,6 +201,7 @@ def rebuild_equity_series(
     t_closed = cfg["TABLE_ACCOUNT_CLOSED"]
     t_open   = cfg["TABLE_ACCOUNT_POSITIONS"]
     t_eq     = cfg.get("TABLE_ACCOUNT_EQUITY_FULL", "account_equity_full")
+    t_schedule = cfg.get("TABLE_MARKET_SCHEDULE")
     # Derive cash_flows table from equity name when not provided
     t_flows  = cfg.get("TABLE_ACCOUNT_CASH_FLOWS")
     if not t_flows:
@@ -255,45 +288,28 @@ def rebuild_equity_series(
                                for f in frames],
                                ignore_index=True)
 
-    earliest_trade = (
-        trades_df["entry_time"].dt.date.min() if not trades_df.empty else today
+    raw_types = cfg.get(
+        "CASH_FLOW_TYPES",
+        (
+            "CSD,CSW,JNLC,ACATC,ACATS,FEE,CFEE,DIV,DIVCGL,DIVCGS,"
+            "DIVNRA,DIVROC,DIVTXEX,DIVWH,INT,INTPNL"
+        ),
     )
-    realised_s = realised_pl_by_day(start or earliest_trade)
-    earliest_real = realised_s.index.min() if not realised_s.empty else today
-    # Earliest date that has external cash flows
-    try:
-        raw_types = cfg.get(
-            "CASH_FLOW_TYPES",
-            (
-                "CSD,CSW,JNLC,ACATC,ACATS,FEE,CFEE,DIV,DIVCGL,DIVCGS,"
-                "DIVNRA,DIVROC,DIVTXEX,DIVWH,INT,INTPNL"
-            ),
-        )
-        pats = [
-            t.strip().upper()
-            for t in str(raw_types).split(",")
-            if t.strip()
-        ]
-        where_types = (
-            " OR ".join([f"type ILIKE '{p}%'" for p in pats]) or "FALSE"
-        )
-        with engine.begin() as c:
-            erow = c.execute(
-                text(
-                    f"""
-                    SELECT MIN((ts AT TIME ZONE 'America/New_York')::date)
-                      FROM {t_flows}
-                     WHERE {where_types}
-                    """
-                )
-            ).scalar()
-        earliest_flow = erow if erow is not None else today
-    except Exception:
-        earliest_flow = today
+    earliest = earliest_activity_date(
+        engine,
+        {"closed": t_closed, "cash_flows": t_flows, "open": t_open},
+        cash_flow_types=raw_types,
+        fallback_years=5,
+    )
+    realised_s = realised_pl_by_day(start or earliest)
+    start_date = start or earliest
 
-    start_date = start or min(earliest_trade, earliest_real, earliest_flow)
-
-    idx = pd.bdate_range(start_date, today, name="date")
+    idx = _trading_index_from_schedule(
+        engine,
+        t_schedule,
+        start_date,
+        today,
+    )
 
     # ---------- cash flows (external) by day ------------------------
     try:
@@ -448,6 +464,7 @@ def update_today_row(cfg: Dict) -> None:
     t_eq     = cfg.get("TABLE_ACCOUNT_EQUITY_FULL", "account_equity_full")
     t_open   = cfg["TABLE_ACCOUNT_POSITIONS"]
     t_closed = cfg["TABLE_ACCOUNT_CLOSED"]
+    t_schedule = cfg.get("TABLE_MARKET_SCHEDULE")
     # Derive cash_flows table from equity name when not provided
     t_flows  = cfg.get("TABLE_ACCOUNT_CASH_FLOWS")
     if not t_flows:
@@ -471,23 +488,46 @@ def update_today_row(cfg: Dict) -> None:
 
     # Use the America/New_York trading day to align with broker UI.
     now_utc = dt.datetime.now(tz=dt.timezone.utc)
-    today = trading_session_date(now_utc)
-    yesterday = trading_session_date(now_utc - dt.timedelta(days=1))
-    if today == yesterday:
-        # Weekend/holiday – keep daily row unchanged until next session.
-        return
+    today_cal = now_utc.date()
+
+    if t_schedule:
+        with engine.begin() as c:
+            today_row = c.execute(
+                text(
+                    f"""
+                    SELECT session_date
+                      FROM {t_schedule}
+                     WHERE session_date = :d
+                    """
+                ),
+                {"d": today_cal},
+            ).fetchone()
+        if not today_row:
+            return
+        today = today_row[0]
+    else:
+        today = trading_session_date(now_utc)
+
     with engine.begin() as c:
-        prev = c.execute(text(f"""
-            SELECT deposit, unrealised_pl, cumulative_return
-            FROM   {t_eq}
-            WHERE  date = :d"""), {"d": yesterday}).fetchone()
+        prev = c.execute(
+            text(
+                f"""
+                SELECT deposit, unrealised_pl, cumulative_return
+                  FROM {t_eq}
+                 WHERE date < :d
+              ORDER BY date DESC
+                 LIMIT 1
+                """
+            ),
+            {"d": today},
+        ).fetchone()
     if not prev:
         # nothing in the table yet – rebuild full
         rebuild_equity_series(cfg)
         return
     prev_deposit, prev_unreal, prev_cum_ret = prev
 
-    # Guard against NULL/NaN/Inf in yesterday's cumulative return
+    # Guard against NULL/NaN/Inf in the previous day's cumulative return
     try:
         prev_cum_ret = float(prev_cum_ret)
         if not math.isfinite(prev_cum_ret):
@@ -564,7 +604,7 @@ def update_today_row(cfg: Dict) -> None:
             params={"start": start_cal, "end": today},
         )
         flows_series = flows_df.set_index("date")["net_flows"].astype(float)
-        today_idx = pd.bdate_range(today, today, name="date")
+        today_idx = pd.DatetimeIndex([pd.Timestamp(today)], name="date")
         aligned = _align_flows_to_business_days(flows_series, today_idx)
         flows_today = float(aligned.iloc[-1]) if not aligned.empty else 0.0
     except Exception:
@@ -795,6 +835,44 @@ async def _ensure_repo(
     return new_repo, True
 
 
+async def _trading_index_from_schedule_async(
+    repo: AsyncAccountRepository,
+    schedule_table: Optional[str],
+    start: dt.date,
+    end: dt.date,
+) -> pd.DatetimeIndex:
+    """Async trading-date index sourced from the schedule table."""
+    if not schedule_table:
+        return pd.bdate_range(start, end, name="date")
+
+    try:
+        rows = await repo.fetch(
+            f"""
+            SELECT session_date
+              FROM {schedule_table}
+             WHERE session_date BETWEEN $1 AND $2
+          ORDER  BY session_date
+            """,
+            start,
+            end,
+        )
+    except Exception:
+        return pd.bdate_range(start, end, name="date")
+
+    if not rows:
+        return pd.bdate_range(start, end, name="date")
+
+    dates = [
+        r.get("session_date")
+        for r in rows
+        if r.get("session_date") is not None
+    ]
+    if not dates:
+        return pd.bdate_range(start, end, name="date")
+
+    return pd.DatetimeIndex(pd.to_datetime(dates), name="date")
+
+
 async def rebuild_equity_series_async(
     cfg: Dict,
     *,
@@ -815,6 +893,7 @@ async def rebuild_equity_series_async(
         t_open = cfg["TABLE_ACCOUNT_POSITIONS"]
         t_eq = cfg.get("TABLE_ACCOUNT_EQUITY_FULL",
                        "account_equity_full")
+        t_schedule = cfg.get("TABLE_MARKET_SCHEDULE")
         t_flows = cfg.get("TABLE_ACCOUNT_CASH_FLOWS")
         if not t_flows:
             try:
@@ -908,22 +987,6 @@ async def rebuild_equity_series_async(
             " OR ".join([f"type ILIKE '{p}%'" for p in pats]) or "FALSE"
         )
 
-        async def earliest_flow_date() -> dt.date:
-            try:
-                row = await repo.fetchrow(
-                    f"""
-                    SELECT MIN(
-                        (ts AT TIME ZONE 'America/New_York')::date
-                    ) AS dt
-                      FROM {t_flows}
-                     WHERE {where_types}
-                    """
-                )
-                dt_val = row.get("dt") if row else None
-                return dt_val if dt_val is not None else today
-            except Exception:
-                return today
-
         async def flows_series(idx: pd.DatetimeIndex) -> pd.Series:
             try:
                 rows = await repo.fetch(
@@ -973,23 +1036,21 @@ async def rebuild_equity_series_async(
                 ignore_index=True,
             )
 
-        earliest_trade = (
-            trades_df["entry_time"].dt.date.min()
-            if not trades_df.empty
-            else today
+        earliest = await earliest_activity_date_async(
+            repo,
+            {"closed": t_closed, "cash_flows": t_flows, "open": t_open},
+            cash_flow_types=raw_types,
+            fallback_years=5,
         )
-        realised_s = await realised_pl_by_day(start or earliest_trade)
-        earliest_real = (
-            realised_s.index.min() if not realised_s.empty else today
-        )
-        earliest_flow = await earliest_flow_date()
-        start_date = start or min(
-            earliest_trade,
-            earliest_real,
-            earliest_flow,
-        )
+        realised_s = await realised_pl_by_day(start or earliest)
+        start_date = start or earliest
 
-        idx = pd.bdate_range(start_date, today, name="date")
+        idx = await _trading_index_from_schedule_async(
+            repo,
+            t_schedule,
+            start_date,
+            today,
+        )
         flows_s = await flows_series(idx)
 
         def unrealised_pl_series(
@@ -1161,6 +1222,7 @@ async def update_today_row_async(
         t_eq = cfg.get("TABLE_ACCOUNT_EQUITY_FULL", "account_equity_full")
         t_open = cfg["TABLE_ACCOUNT_POSITIONS"]
         t_closed = cfg["TABLE_ACCOUNT_CLOSED"]
+        t_schedule = cfg.get("TABLE_MARKET_SCHEDULE")
         t_flows = cfg.get("TABLE_ACCOUNT_CASH_FLOWS")
         if not t_flows:
             eq_full = t_eq
@@ -1182,18 +1244,31 @@ async def update_today_row_async(
         await _ensure_table_async(repo, t_eq, windows)
 
         now_utc = dt.datetime.now(tz=dt.timezone.utc)
-        today = trading_session_date(now_utc)
-        yesterday = trading_session_date(now_utc - dt.timedelta(days=1))
-        if today == yesterday:
-            return
+        today_cal = now_utc.date()
+        if t_schedule:
+            row = await repo.fetchrow(
+                f"""
+                SELECT session_date
+                  FROM {t_schedule}
+                 WHERE session_date = $1
+                """,
+                today_cal,
+            )
+            if not row:
+                return
+            today = row.get("session_date")
+        else:
+            today = trading_session_date(now_utc)
 
         prev = await repo.fetchrow(
             f"""
             SELECT deposit, unrealised_pl, cumulative_return
               FROM {t_eq}
-             WHERE date = $1
+             WHERE date < $1
+          ORDER BY date DESC
+             LIMIT 1
             """,
-            yesterday,
+            today,
         )
         if not prev:
             await rebuild_equity_series_async(cfg, repo=repo)
@@ -1275,7 +1350,7 @@ async def update_today_row_async(
                 if flow_rows
                 else pd.Series(dtype=float)
             )
-            today_idx = pd.bdate_range(today, today, name="date")
+            today_idx = pd.DatetimeIndex([pd.Timestamp(today)], name="date")
             aligned = _align_flows_to_business_days(
                 flows_series,
                 today_idx,

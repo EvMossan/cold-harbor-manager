@@ -12,3 +12,4 @@ watchdog
 nest_asyncio
 pyzmq
 asyncpg
+alpaca-py

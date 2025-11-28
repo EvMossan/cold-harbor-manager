@@ -272,15 +272,14 @@ async def sync_schedule_async(
     table: str,
     rest: REST,
     *,
-    lookback_days: int = 7,
-    forward_days: int = 21,
+    start_date: Optional[date] = None,
+    forward_days: int = 90,
     pre_open_time: time = time(hour=4, minute=0),
-    retain_days: int = 120,
 ) -> int:
     """Async version of ``sync_schedule`` using asyncpg."""
 
     today = date.today()
-    start = today - timedelta(days=lookback_days)
+    start = start_date or today
     end = today + timedelta(days=forward_days)
 
     sessions = fetch_sessions(
@@ -320,15 +319,10 @@ async def sync_schedule_async(
         post_close_utc = EXCLUDED.post_close_utc,
         updated_at     = now();
     """
-    cutoff = today - timedelta(days=retain_days)
 
     async with repo.pool.acquire() as conn:
         async with conn.transaction():
             await conn.executemany(insert_sql, rows)
-            await conn.execute(
-                f"DELETE FROM {table} WHERE session_date < $1",
-                cutoff,
-            )
 
     return len(sessions)
 
