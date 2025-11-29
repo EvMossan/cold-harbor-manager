@@ -1,52 +1,48 @@
 #!/usr/bin/env python3
-"""Small multi-account dashboard (single port, per-account prefixes).
+"""Blueprint-based web layer for the account dashboards.
 
-For each destination configured in ``cold_harbour.destinations.DESTINATIONS``
-we create a Flask Blueprint mounted at ``/<slug>`` that exposes:
-
-  - ``/<slug>/``              → HTML dashboard
-  - ``/<slug>/api/positions`` → JSON snapshot of open positions
-  - ``/<slug>/api/closed``    → JSON list of closed trades
-  - ``/<slug>/api/metrics``   → JSON KPI block
-  - ``/<slug>/api/equity``    → JSON equity series
-  - ``/<slug>/stream/…``      → Server-sent events (SSE) for live updates
-
-All table names and LISTEN/NOTIFY channel names are derived from the
-destination name via a safe slug and do not require extra configuration.
+This file mirrors the old ``account_web.py`` but exposes a blueprint factory
+instead of a module-level Flask app. The actual Flask app will be created in
+``cold_harbour.__init__.py`` via ``create_app``.
 """
 
-import os
+from __future__ import annotations
+
 import json
+import logging
 import math
-import time  # used for SSE keep-alive comments
-import psycopg2
+import os
 import select
-import pandas as pd
+import sys
+import time  # used for SSE keep-alive comments
+import uuid
 from datetime import date, datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
+
+import pandas as pd
+import psycopg2
 from flask import (
-    Flask,
+    Blueprint,
+    Response,
+    current_app,
+    g,
     jsonify,
     render_template,
-    Response,
-    Blueprint,
     request,
-    current_app,
 )
-from sqlalchemy import create_engine, URL, text
+from sqlalchemy import URL, create_engine, text
 
-from cold_harbour.account_utils import (
+from cold_harbour.core.account_utils import (
     calculate_trade_metrics,
     coalesce_exit_slices,
     trading_session_date,
 )
-from cold_harbour.destinations import (
+from cold_harbour.core.destinations import (
     DESTINATIONS,
     account_table_names,
     notify_channels_for,
     slug_for,
 )
-
 
 # ── config reused from AccountManager ────────────────────────────
 PG_DSN = os.getenv(
@@ -115,6 +111,7 @@ engine = _make_sa_engine()
 # Timescale connection (use SQLAlchemy engine to avoid pandas warnings)
 TS_DSN = os.getenv("TIMESCALE_LIVE_CONN_STRING", "")
 
+
 def _make_ts_engine():
     """Return SQLAlchemy engine for Timescale from URL or libpq DSN.
 
@@ -155,12 +152,131 @@ def _make_ts_engine():
     except Exception:
         return engine
 
+
 ts_engine = _make_ts_engine()
+
+log = logging.getLogger("AccountWeb")
+if not log.handlers:
+    handler = logging.StreamHandler(stream=sys.stdout)
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+    handler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+    lvl_raw = (
+        os.getenv("ACCOUNT_WEB_LOG_LEVEL")
+        or os.getenv("LOG_LEVEL")
+        or "INFO"
+    )
+    try:
+        lvl = getattr(logging, lvl_raw.strip().upper())
+    except Exception:
+        lvl = logging.INFO
+    log.setLevel(lvl)
+    handler.setLevel(logging.NOTSET)
+    log.addHandler(handler)
+    log.propagate = False
 
 # Hardcoded bars table per requirement
 BARS_TABLE = "public.alpaca_bars_1min"
 
-app = Flask(__name__)
+# Toggle SSE streams; set to False to enable live updates.
+DISABLE_SSE = False
+
+accounts_bp = Blueprint("accounts", __name__)
+
+
+def _now() -> float:
+    return time.perf_counter()
+
+
+def _req_id() -> str:
+    try:
+        return str(getattr(g, "req_id"))
+    except Exception:
+        return "-"
+
+
+def _req_account() -> str:
+    try:
+        return str(getattr(g, "req_account"))
+    except Exception:
+        return "-"
+
+
+def _log_timing(
+    label: str,
+    start_ts: float,
+    rows: int | None = None,
+    cache: str | None = None,
+) -> None:
+    try:
+        dur_ms = (_now() - start_ts) * 1000.0
+        log.debug(
+            "timing req_id=%s account=%s op=%s duration_ms=%.1f%s%s",
+            _req_id(),
+            _req_account(),
+            label,
+            dur_ms,
+            f" rows={rows}" if rows is not None else "",
+            f" cache={cache}" if cache else "",
+        )
+    except Exception:
+        pass
+
+
+def _start_request_timer() -> None:
+    try:
+        g.req_start = _now()
+        g.req_id = uuid.uuid4().hex[:8]
+        bp = request.blueprint or ""
+        g.req_account = bp.replace("acct_", "", 1) if bp else "-"
+        log.debug(
+            "http start req_id=%s account=%s path=%s",
+            g.req_id,
+            g.req_account,
+            request.path,
+        )
+    except Exception:
+        pass
+
+
+def _end_request_timer(resp: Response) -> Response:
+    try:
+        start_ts = getattr(g, "req_start", None)
+        if start_ts is not None:
+            dur_ms = (_now() - start_ts) * 1000.0
+            log.debug(
+                "http done req_id=%s account=%s path=%s status=%s "
+                "duration_ms=%.1f",
+                _req_id(),
+                _req_account(),
+                request.path,
+                resp.status_code,
+                dur_ms,
+            )
+    except Exception:
+        pass
+    return resp
+
+
+def relax_csp(resp: Response) -> Response:
+    """Install a permissive CSP that works with CDN assets and inline JS."""
+    resp.headers.pop("Content-Security-Policy", None)
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com "
+        "https://cdn.datatables.net https://code.jquery.com; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+        "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com "
+        "https://cdn.datatables.net https://code.jquery.com; "
+        "style-src 'self' 'unsafe-inline' https://cdn.datatables.net"
+    )
+    return resp
+
+
+def register_request_hooks(app) -> None:
+    """Attach common request/response hooks to the Flask app."""
+    app.before_request(_start_request_timer)
+    app.after_request(_end_request_timer)
+    app.after_request(relax_csp)
 
 
 def _make_blueprint_for_dest(dest: dict) -> Blueprint:
@@ -203,25 +319,31 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
     }
 
     def _fetch_open_df() -> pd.DataFrame:
+        start_ts = _now()
         with engine.begin() as conn:
             sql = text(
                 f"SELECT * FROM {tables['open']} ORDER BY symbol"
             )
-            return pd.read_sql(sql, conn)
+            df = pd.read_sql(sql, conn)
+        _log_timing("positions_sql", start_ts, len(df.index))
+        return df
 
     def _open_version() -> str:
+        start_ts = _now()
         with engine.begin() as conn:
             row = conn.execute(
                 text(
                     f"SELECT COALESCE(MAX(updated_at), NOW()) AS max_upd, COUNT(*) AS cnt FROM {tables['open']}"
                 )
             ).mappings().first()
+        _log_timing("open_version", start_ts, int(row["cnt"] or 0))
         max_upd = row["max_upd"]
         cnt = int(row["cnt"] or 0)
         # ETag must be a string; include count to detect row adds/removes
         return f"{pd.to_datetime(max_upd, utc=True).isoformat()}-{cnt}"
 
     def _fetch_closed_df() -> pd.DataFrame:
+        start_ts = _now()
         with engine.begin() as conn:
             sql = text(
                 f"""
@@ -235,7 +357,9 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                  ORDER BY exit_time DESC
                 """
             )
-            return pd.read_sql(sql, conn)
+            df = pd.read_sql(sql, conn)
+        _log_timing("closed_sql_full", start_ts, len(df.index))
+        return df
 
     @bp.route("/")
     def home() -> str:
@@ -257,14 +381,17 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     @bp.route("/api/positions")
     def api_positions() -> Response:  # type: ignore[override]
+        start_ts = _now()
         df = _fetch_open_df()
         safe = json.loads(
             df.to_json(orient="records", date_format="iso")
         )
+        _log_timing("positions", start_ts, len(df.index))
         return jsonify(safe)
 
     @bp.route("/api/closed")
     def api_closed() -> Response:  # type: ignore[override]
+        start_ts = _now()
         # Return only the most recent 300 rows for UI speed.
         with engine.begin() as conn:
             sql = text(
@@ -281,6 +408,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 """
             )
             df = pd.read_sql(sql, conn)
+        _log_timing("closed", start_ts, len(df.index))
         return jsonify(
             json.loads(df.to_json(orient="records", date_format="iso"))
         )
@@ -291,12 +419,15 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         etag = _open_version()
         inm = request.headers.get("If-None-Match")
         if inm == etag:
+            _log_timing("positions_cached", _now(), cache="hit")
             return Response(status=304)
+        hit_start = _now()
         df = _fetch_open_df()
         payload = json.loads(df.to_json(orient="records", date_format="iso"))
         resp = jsonify(payload)
         resp.headers["ETag"] = etag
         resp.headers["Cache-Control"] = "public, max-age=30, must-revalidate"
+        _log_timing("positions_cached", hit_start, len(df.index), "miss")
         return resp
 
     @bp.route("/api/closed_cached")
@@ -311,7 +442,9 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         etag = pd.to_datetime(ver_row["max_exit"], utc=True).isoformat()
         inm = request.headers.get("If-None-Match")
         if inm == etag:
+            _log_timing("closed_cached", _now(), cache="hit")
             return Response(status=304)
+        hit_start = _now()
         with engine.begin() as conn:
             sql = text(
                 f"""
@@ -331,10 +464,15 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         resp = jsonify(payload)
         resp.headers["ETag"] = etag
         resp.headers["Cache-Control"] = "public, max-age=30, must-revalidate"
+        _log_timing("closed_cached", hit_start, len(df.index), "miss")
         return resp
 
     @bp.route("/stream/closed")
     def stream_closed() -> Response:  # type: ignore[override]
+        if DISABLE_SSE:
+            log.debug("SSE closed disabled; returning 204")
+            return Response(status=204)
+
         def event_stream():
             conn = psycopg2.connect(PG_DSN)
             conn.set_isolation_level(
@@ -345,7 +483,6 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             try:
                 yield ": connected\n\n"
                 while True:
-                    # shorter timeout for quicker disconnect detection
                     if select.select([conn], [], [], 5) == ([], [], []):
                         yield ": ping\n\n"
                         continue
@@ -354,10 +491,8 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                         conn.notifies.pop(0)
                         yield "data: refresh\n\n"
             except GeneratorExit:
-                # client disconnected; fall through to cleanup
                 pass
             except Exception:
-                # swallow to ensure cleanup runs
                 pass
             finally:
                 try:
@@ -380,12 +515,14 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     @bp.route("/api/metrics")
     def api_metrics() -> Response:  # type: ignore[override]
+        start_ts = _now()
         # Serve from short TTL cache if fresh
         try:
             now = pd.Timestamp.utcnow()
             ent = _cache.get("metrics", {})
             ts = ent.get("ts")
             if ts is not None and (now - ts).total_seconds() < ent.get("ttl", 30):
+                _log_timing("metrics", start_ts, cache="hit")
                 return jsonify(ent.get("data") or [{}])
         except Exception:
             pass
@@ -499,10 +636,15 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             _cache["metrics"] = {"ts": pd.Timestamp.utcnow(), "data": payload, "ttl": _cache["metrics"]["ttl"]}
         except Exception:
             pass
+        _log_timing("metrics", start_ts, metrics.shape[0], "miss")
         return jsonify(payload)
 
     @bp.route("/stream/positions")
     def stream_positions() -> Response:  # type: ignore[override]
+        if DISABLE_SSE:
+            log.debug("SSE positions disabled; returning 204")
+            return Response(status=204)
+
         def event_stream():
             conn = psycopg2.connect(PG_DSN)
             conn.set_isolation_level(
@@ -545,8 +687,67 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             },
         )
 
+    @bp.route("/stream/events")
+    def stream_events() -> Response:  # type: ignore[override]
+        if DISABLE_SSE:
+            log.debug("SSE events disabled; returning 204")
+            return Response(status=204)
+
+        def event_stream():
+            conn = psycopg2.connect(PG_DSN)
+            conn.set_isolation_level(
+                psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT
+            )
+            cur = conn.cursor()
+            cur.execute(f"LISTEN {chans['pos']};")
+            cur.execute(f"LISTEN {chans['closed']};")
+            try:
+                yield ": connected\n\n"
+                while True:
+                    if select.select([conn], [], [], 5) == ([], [], []):
+                        yield ": ping\n\n"
+                        continue
+                    conn.poll()
+                    while conn.notifies:
+                        note = conn.notifies.pop(0)
+                        channel = (
+                            "pos"
+                            if note.channel == chans["pos"]
+                            else "closed"
+                        )
+                        try:
+                            payload = json.dumps(
+                                {"channel": channel, "payload": note.payload}
+                            )
+                            yield f"data: {payload}\n\n"
+                        except Exception:
+                            pass
+            except GeneratorExit:
+                pass
+            except Exception:
+                pass
+            finally:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        return Response(
+            event_stream(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @bp.route("/api/equity")
     def api_equity() -> Response:  # type: ignore[override]
+        start_ts = _now()
         # Optional window parameter.
         # Defaults to 'first_trade' to avoid long flat periods before trading
         # actually started. Other accepted values: 'all', '<Nd>' (e.g. 365d).
@@ -559,6 +760,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             ent = _cache.get(cache_key, {})
             ts = ent.get("ts")
             if ts is not None and (now - ts).total_seconds() < ent.get("ttl", 45):
+                _log_timing("equity", start_ts, cache="hit")
                 return jsonify(ent.get("data") or [])
         except Exception:
             pass
@@ -612,6 +814,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             _cache[cache_key] = {"ts": pd.Timestamp.utcnow(), "data": payload, "ttl": ttl}
         except Exception:
             pass
+        _log_timing("equity", start_ts, len(df.index), "miss")
         return jsonify(payload)
 
     @bp.route("/api/equity_intraday")
@@ -624,6 +827,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         aligned with the daily series. Falls back to a zero series when
         the table is empty.
         """
+        start_ts = _now()
         # TTL cache ~30s
         def _to_float(value, default=None):
             try:
@@ -645,7 +849,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 except Exception:
                     return None
 
-        ttl_seconds = HEARTBEAT_SEC
+        ttl_seconds = min(HEARTBEAT_SEC, 10)
         try:
             now = pd.Timestamp.utcnow()
             ent = _cache.get("equity_intraday", {})
@@ -654,6 +858,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 (now - ts).total_seconds() < ent.get("ttl", ttl_seconds)
             )
             if fresh:
+                _log_timing("equity_intraday", start_ts, cache="hit")
                 return jsonify(ent.get("data") or {"series": [], "meta": {}})
         except Exception:
             pass
@@ -730,8 +935,15 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 start_utc = pre_open_ts
             if start_utc > post_close_ts:
                 start_utc = pre_open_ts
+            last_complete = (
+                (now_utc.floor("min") - pd.Timedelta(seconds=5)).floor("min")
+            )
+            if last_complete < start_utc:
+                last_complete = start_utc
             end_utc = (
-                post_close_ts if now_utc >= post_close_ts else now_utc
+                post_close_ts
+                if last_complete >= post_close_ts
+                else last_complete
             )
         else:
             start_sec = _start_seconds(start_param)
@@ -748,7 +960,12 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 tzinfo=ZoneInfo(tz_name),
             )
             post_close_ts = pd.to_datetime(close_local, utc=True)
-            end_utc = now_utc if now_utc <= post_close_ts else post_close_ts
+            last_complete = (
+                (now_utc.floor("min") - pd.Timedelta(seconds=5)).floor("min")
+            )
+            if last_complete < start_utc:
+                last_complete = start_utc
+            end_utc = last_complete if last_complete <= post_close_ts else post_close_ts
 
         # Anchor deposit: strictly before the session date (base for this session)
         with engine.begin() as conn:
@@ -925,12 +1142,18 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             }
         except Exception:
             pass
+        _log_timing(
+            "equity_intraday",
+            start_ts,
+            len(series.get("ts", [])),
+            "miss",
+        )
         return jsonify(payload)
 
     return bp
 
 
-@app.route("/")
+@accounts_bp.route("/")
 def index() -> str:
     """Render a simple index linking all account dashboards.
 
@@ -949,26 +1172,5 @@ def index() -> str:
     )
 
 
-# Install blueprints for every configured destination
-for _dest in DESTINATIONS:
-    app.register_blueprint(_make_blueprint_for_dest(_dest))
-
-
-@app.after_request
-def relax_csp(resp):
-    """Install a permissive CSP that works with CDN assets and inline JS."""
-    resp.headers.pop("Content-Security-Policy", None)
-    resp.headers["Content-Security-Policy"] = (
-        "default-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com "
-        "https://cdn.datatables.net https://code.jquery.com; "
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
-        "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com "
-        "https://cdn.datatables.net https://code.jquery.com; "
-        "style-src 'self' 'unsafe-inline' https://cdn.datatables.net"
-    )
-    return resp
-
-
-if __name__ == "__main__":
-    # Enable threaded server so long-lived SSE doesn't block other requests
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+# Pre-build the per-destination blueprints so create_app can register them.
+ACCOUNT_BLUEPRINTS = [_make_blueprint_for_dest(d) for d in DESTINATIONS]

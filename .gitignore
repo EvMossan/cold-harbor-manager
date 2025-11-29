@@ -3,5 +3,4 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
-Dockerfile_final
-.gcloud/
+src/cold_harbour/core/destinations_local.py

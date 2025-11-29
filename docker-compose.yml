@@ -1,0 +1,38 @@
+name: cold_harbour_dashboard
+
+services:
+  manager:
+    build:
+      context: .
+    image: cold_harbour/manager:dev
+    container_name: manager
+    working_dir: /app
+    entrypoint:
+      - watchmedo
+      - auto-restart
+      - "--directory=/app/src"
+      - "--pattern=*.py"
+      - "--recursive"
+      - --
+      - python
+      - -m
+      - cold_harbour.manager_run
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+    image: cold_harbour/web:dev
+    container_name: web
+    working_dir: /app
+    env_file: .env
+    environment:
+      WEB_RELOAD: "1"
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped

@@ -1165,11 +1165,55 @@ def _trading_days(start: pd.Timestamp, end: pd.Timestamp) -> int:
     Inclusive of *start* date, exclusive of *end* date.
     Works even if both fall on non-trading days.
     """
-    sched = _nyse.schedule(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
-    # Drop the *end* day if exit happened before the closing bell
-    if end.tz_convert("America/New_York").time() < _nyse.close_time:
-        sched = sched.iloc[:-1]
-    return len(sched)
+    series = _trading_days_batch(
+        pd.Series([start]),
+        pd.Series([end]),
+    )
+    return int(series.iloc[0])
+
+
+def _trading_days_batch(
+    entries: pd.Series, exits: pd.Series
+) -> pd.Series:
+    """Vectorised trading-day span for aligned entry/exit timestamps."""
+    if entries.empty:
+        return pd.Series(dtype="int64")
+
+    ny_tz = "America/New_York"
+    ent = pd.to_datetime(entries, utc=True)
+    ex = pd.to_datetime(exits, utc=True)
+
+    ent_ny = ent.dt.tz_convert(ny_tz)
+    ex_ny = ex.dt.tz_convert(ny_tz)
+
+    start_date = ent_ny.min().normalize()
+    end_date = ex_ny.max().normalize()
+    sched = _nyse.schedule(
+        start_date.strftime("%Y-%m-%d"),
+        end_date.strftime("%Y-%m-%d"),
+    )
+
+    if sched.empty:
+        zeros = np.zeros(len(entries), dtype="int64")
+        return pd.Series(zeros, index=entries.index)
+
+    sched_days = pd.DatetimeIndex(sched.index).tz_localize(ny_tz)
+    sched_np = sched_days.view("int64")
+
+    ent_days = ent_ny.dt.normalize().astype("int64")
+    ex_days = ex_ny.dt.normalize().astype("int64")
+
+    start_idx = np.searchsorted(sched_np, ent_days, side="left")
+    end_idx = np.searchsorted(sched_np, ex_days, side="left")
+
+    counts = end_idx - start_idx
+
+    in_sched = np.in1d(ex_days, sched_np)
+    before_close = ex_ny.dt.time < _nyse.close_time
+    counts = counts - (in_sched & before_close).astype(np.int64)
+
+    counts = np.clip(counts, 0, None)
+    return pd.Series(counts, index=entries.index)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1402,8 +1446,8 @@ def calculate_trade_metrics(
             df["exit_class"] = "UNKNOWN"
 
     # Holding period in TRADING days per (collapsed) trade
-    df["holding_days"] = df.apply(
-        lambda r: _trading_days(r["entry_time"], r["exit_time"]), axis=1
+    df["holding_days"] = _trading_days_batch(
+        df["entry_time"], df["exit_time"]
     )
 
     # ---------------- bucket selection for performance metrics ----------------
@@ -1573,58 +1617,69 @@ def coalesce_exit_slices(trades: pd.DataFrame) -> pd.DataFrame:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], utc=True, errors="coerce")
 
-    def _mode_weighted(g: pd.DataFrame) -> str:
-        if "exit_type" not in g.columns or g["exit_type"].isna().all():
-            return "UNKNOWN"
-        s = (
-            g.assign(_w=g["qty"].fillna(0.0))
-             .groupby(g["exit_type"].astype(str).str.upper())["_w"]
-             .sum()
-             .sort_values(ascending=False)
-        )
-        return str(s.index[0]) if len(s) else "UNKNOWN"
+    df["symbol"] = df["symbol"].astype(str).str.upper()
+    df["exit_order_id"] = df["exit_order_id"].astype(str)
 
-    def _collapse(g: pd.DataFrame) -> pd.Series:
-        q = float(g["qty"].sum(skipna=True))
-        w_entry = (
-            float((g["entry_price"] * g["qty"]).sum(skipna=True) / q)
-            if q > 0 else np.nan
+    df["entry_num"] = df["entry_price"] * df["qty"]
+    df["exit_num"] = df["exit_price"] * df["qty"]
+
+    gb = df.groupby(["symbol", "exit_order_id"], sort=False)
+
+    agg = gb.agg(
+        qty=("qty", "sum"),
+        entry_time=("entry_time", "min"),
+        exit_time=("exit_time", "max"),
+        pnl_cash=("pnl_cash", "sum"),
+        entry_num=("entry_num", "sum"),
+        exit_num=("exit_num", "sum"),
+        side=("side", "first"),
+    )
+
+    agg["entry_price"] = np.where(
+        agg["qty"] > 0, agg["entry_num"] / agg["qty"], np.nan
+    )
+    agg["exit_price"] = np.where(
+        agg["qty"] > 0, agg["exit_num"] / agg["qty"], np.nan
+    )
+    agg["duration_sec"] = (
+        agg["exit_time"] - agg["entry_time"]
+    ).dt.total_seconds()
+    has_basis = (
+        (agg["qty"] > 0)
+        & agg["entry_price"].notna()
+        & (agg["entry_price"] != 0)
+    )
+    agg["pnl_pct"] = np.where(
+        has_basis,
+        agg["pnl_cash"] / (agg["entry_price"] * agg["qty"]) * 100.0,
+        np.nan,
+    )
+
+    et = (
+        df.assign(
+            _w=df["qty"].fillna(0.0),
+            exit_type=df["exit_type"].astype(str).str.upper(),
         )
-        w_exit = (
-            float((g["exit_price"] * g["qty"]).sum(skipna=True) / q)
-            if q > 0 else np.nan
+        .groupby(
+            ["symbol", "exit_order_id", "exit_type"], sort=False
+        )["_w"]
+        .sum()
+        .reset_index()
+        .sort_values(
+            ["symbol", "exit_order_id", "_w"],
+            ascending=[True, True, False],
         )
-        pnl = float(g["pnl_cash"].sum(skipna=True))
-        t0 = pd.to_datetime(g["entry_time"].min(), utc=True)
-        t1 = pd.to_datetime(g["exit_time"].max(), utc=True)
-        dur = (t1 - t0).total_seconds() if (pd.notna(t1) and pd.notna(t0)) else np.nan
-        et = _mode_weighted(g)
-        return pd.Series({
-            "symbol": str(g["symbol"].iloc[0]).upper(),
-            "exit_order_id": str(g["exit_order_id"].iloc[0]),
-            "side": g["side"].iloc[0] if "side" in g.columns else "long",
-            "qty": q,
-            "entry_time": t0,
-            "entry_price": w_entry,
-            "exit_time": t1,
-            "exit_price": w_exit,
-            "exit_type": et,
-            "pnl_cash": pnl,
-            "pnl_pct": (pnl / (w_entry * q) * 100.0) if (q > 0 and pd.notna(w_entry) and w_entry) else np.nan,
-            "duration_sec": dur,
-        })
+        .drop_duplicates(["symbol", "exit_order_id"])
+        .set_index(["symbol", "exit_order_id"])["exit_type"]
+    )
+
+    agg["exit_type"] = et.reindex(agg.index).fillna("UNKNOWN")
 
     out = (
-        df.groupby(["symbol", "exit_order_id"], as_index=False, sort=False)
-          .apply(
-              lambda g: _collapse(
-                  g.assign(symbol=g.name[0], exit_order_id=g.name[1])
-              ),
-              include_groups=False,
-          )
-          .reset_index(drop=True)
-          .sort_values("exit_time", ascending=False)
-          .reset_index(drop=True)
+        agg.reset_index()
+        .drop(columns=["entry_num", "exit_num"])
+        .sort_values("exit_time", ascending=False)
+        .reset_index(drop=True)
     )
     return out
 
