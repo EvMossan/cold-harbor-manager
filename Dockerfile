@@ -5,6 +5,7 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app/src
+ENV PORT=5000
 
 # Install curl to download cloudflared and clean up apt lists.
 RUN apt-get update \
@@ -19,10 +20,11 @@ RUN curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/c
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY src/ ./src
+COPY entrypoint.sh .
 
 RUN chmod +x entrypoint.sh
 
-EXPOSE 5000
+EXPOSE ${PORT}
 
 ENTRYPOINT ["./entrypoint.sh"]
