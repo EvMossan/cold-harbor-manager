@@ -6,6 +6,21 @@ from typing import Any, Dict, List
 
 DESTINATIONS: List[Dict[str, Any]] = [
     {
+        "name": "live",
+        "allow_trading": True,
+        "base_url": os.getenv("ALPACA_BASE_URL_LIVE", "https://api.alpaca.markets"),
+        "key_id": os.getenv("ALPACA_API_KEY_LIVE"),
+        "secret_key": os.getenv("ALPACA_SECRET_KEY_LIVE"),
+        "risk_factor": 0.1,
+        "dry_run": False,
+        "orders_table": "placed_orders_live",
+        "initial_deposit": 0.0,
+        "trained_classifier_path": (
+            "/home/tradingbot/proxima/airflow_docer/trained_models/ensemble/"
+            "ensemble_202501.joblib"
+        ),
+    },
+    {
         "name": "cold-harbour_v1.0",
         "allow_trading": True,
         "base_url": os.getenv("ALPACA_BASE_URL_PAPER", "https://paper-api.alpaca.markets"),
@@ -34,16 +49,6 @@ DESTINATIONS: List[Dict[str, Any]] = [
         ),
     },
 ]
-
-# Optional local-only destinations (not tracked in VCS)
-try:
-    from cold_harbour.core import destinations_local
-
-    extra = getattr(destinations_local, "EXTRA_DESTINATIONS", [])
-    if isinstance(extra, list):
-        DESTINATIONS.extend(extra)
-except Exception:
-    pass
 
 # ---------------------------------------------------------------------------
 # Helpers
