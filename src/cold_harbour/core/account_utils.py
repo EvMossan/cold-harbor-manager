@@ -54,216 +54,88 @@ def trading_session_date(now_ts: datetime) -> date:
         search_start = search_end - timedelta(days=10)
 
 
-def fetch_all_orders(
-    api: REST,
-    start: str,
-    end: str,
-    page_size: int = 500,
-    show_progress: bool = True,
-) -> pd.DataFrame:
-    """
-    Fetch orders from Alpaca with nested=True, then flatten parents and
-    their legs into one *flat* DataFrame:
-      • Parent orders appear as rows with parent_id = NaN
-      • Child legs appear as rows with parent_id = <parent.id>
+def fetch_all_orders(api: REST, days_back: int = 365) -> pd.DataFrame:
+    """Walk Alpaca orders in fixed windows, flatten parents with legs,
+    and normalize common numeric/timestamp columns."""
+    window_len = timedelta(days=5)
+    end_date = pd.Timestamp.now(tz=timezone.utc) + timedelta(days=1)
+    start_date = end_date - timedelta(days=days_back)
+    current_start = start_date
+    raw_orders: list[dict] = []
+    seen_ids: set[str] = set()
 
-    The function normalizes common numeric and timestamp columns and
-    computes a robust 'exec_ts' per row:
-        exec_ts := filled_at or updated_at or submitted_at or created_at
+    def _append(raw: dict) -> None:
+        oid = str(raw.get("id") or "")
+        if not oid or oid in seen_ids:
+            return
+        seen_ids.add(oid)
+        raw_orders.append(raw)
 
-    Parameters
-    ----------
-    api : REST
-        Alpaca REST client.
-    start, end : str
-        ISO8601 strings (UTC). Example: "2025-10-08T00:00:00Z".
-    page_size : int
-        Page size per API call (<= 500).
-    show_progress : bool
-        Print minimal paging progress.
-
-    Returns
-    -------
-    pd.DataFrame
-        Flat table of orders and legs with consistent columns and
-        'parent_id' filled for legs.
-    """
-    # --- page window (walk back using 'submitted_at' min in batch) ---
-    cursor = pd.to_datetime(end, utc=True)
-    start_ts = pd.to_datetime(start, utc=True)
-
-    parents_raw: List[Dict[str, Any]] = []
-    page = 0
-
-    while True:
-        page += 1
-        batch = api.list_orders(
-            status="all",
-            after=start_ts.isoformat(),
-            until=cursor.isoformat(),
-            direction="desc",
-            limit=min(page_size, 500),
-            nested=True,  # << root fix: fetch with nested=True
-        )
-        if not batch:
-            break
-
-        parents_raw.extend([o._raw for o in batch])
-
-        if show_progress:
-            print(
-                f"\rpage: {page:<3}  received: {len(batch):<3}  "
-                f"total parents: {len(parents_raw):<6}",
-                end="",
+    while current_start < end_date:
+        current_end = min(current_start + window_len, end_date)
+        try:
+            batch = api.list_orders(
+                status="all",
+                limit=500,
+                nested=True,
+                direction="desc",
+                after=current_start.isoformat(),
+                until=current_end.isoformat(),
             )
+        except Exception:
+            current_start = current_end
+            continue
+        for order in batch:
+            raw = getattr(order, "_raw", order)
+            if isinstance(raw, dict):
+                _append(raw)
+        current_start = current_end
 
-        submitted_times = [
-            pd.to_datetime(p.get("submitted_at"), utc=True)
-            for p in (o._raw for o in batch)
-            if p.get("submitted_at")
-        ]
-        if not submitted_times:
-            break
-
-        cursor = min(submitted_times) - pd.Timedelta(microseconds=1)
-        if cursor <= start_ts:
-            break
-
-    if show_progress:
-        print()
-
-    if not parents_raw:
+    if not raw_orders:
         return pd.DataFrame()
 
-    # --- flatten: add parent row + leg rows with parent_id=parent.id ---
-    flat_rows: List[Dict[str, Any]] = []
-
-    def _pick(d: Dict[str, Any], *keys: str) -> Any:
-        """Safe getter from dict (first non-None among keys)."""
-        for k in keys:
-            if k in d and d[k] is not None:
-                return d[k]
+    def _pick(d: dict, *keys: str) -> Any:
+        for key in keys:
+            if key in d and d[key] is not None:
+                return d[key]
         return None
 
-    for pr in parents_raw:
-        parent_id = str(pr.get("id") or "")
-        # parent row (parent_id = NaN)
-        prow = dict(pr)  # shallow copy
-        if "parent_id" in prow:
-            # Ensure consistency: top-level parent should not point to itself
-            prow["parent_id"] = None
-        # Ensure uniform field names across parent/legs
-        prow["order_type"] = _pick(prow, "order_type", "type")
-        flat_rows.append(prow)
+    flat_rows: list[dict] = []
+    for parent in raw_orders:
+        parent_id = str(parent.get("id") or "")
+        parent_row = dict(parent)
+        if "parent_id" in parent_row:
+            parent_row["parent_id"] = None
+        parent_row["order_type"] = _pick(parent_row, "order_type", "type")
+        flat_rows.append(parent_row)
 
-        # child legs
-        legs = pr.get("legs") or []
+        legs = parent.get("legs") or []
         if isinstance(legs, list):
-            for L in legs:
-                row: Dict[str, Any] = {}
-                # Base identifiers
-                row["id"] = _pick(L, "id")
-                row["client_order_id"] = _pick(L, "client_order_id")
-                row["replaced_by"] = _pick(L, "replaced_by")
-                row["replaces"] = _pick(L, "replaces")
-
-                # Linkage and static fields
-                row["parent_id"] = parent_id
-                row["order_class"] = pr.get("order_class")
-                row["asset_id"] = pr.get("asset_id")
-                row["asset_class"] = pr.get("asset_class")
-                row["symbol"] = pr.get("symbol")
-
-                # Order attributes (legs sometimes use 'type' instead of 'order_type')
-                row["order_type"] = _pick(L, "order_type", "type")
-                row["side"] = _pick(L, "side")
-                row["status"] = _pick(L, "status")
-                row["time_in_force"] = _pick(L, "time_in_force", "tif")
-
-                # Prices and qty
-                row["limit_price"] = _pick(L, "limit_price")
-                row["stop_price"] = _pick(L, "stop_price")
-                row["trail_price"] = _pick(L, "trail_price")
-                row["trail_percent"] = _pick(L, "trail_percent")
-                row["hwm"] = _pick(L, "hwm")
-                row["qty"] = _pick(L, "qty")
-                row["filled_qty"] = _pick(L, "filled_qty")
-                row["filled_avg_price"] = _pick(L, "filled_avg_price")
-                row["notional"] = _pick(L, "notional")
-
-                # Timestamps (prefer leg's own, fallback to parent)
-                for tcol in (
-                    "created_at",
-                    "updated_at",
-                    "submitted_at",
-                    "filled_at",
-                    "expired_at",
-                    "canceled_at",
-                    "failed_at",
-                    "replaced_at",
-                    "expires_at",
-                ):
-                    row[tcol] = _pick(L, tcol) or pr.get(tcol)
-
-                flat_rows.append(row)
+            for leg in legs:
+                child = dict(leg)
+                child["parent_id"] = parent_id or None
+                child["order_type"] = _pick(child, "order_type", "type")
+                flat_rows.append(child)
 
     df = pd.DataFrame(flat_rows)
+    if df.empty:
+        return df
 
-    # --- normalize columns: dtypes and derived exec_ts ---------------
-    # String lower-casing for classifiers
-    for c in ("status", "side", "order_type", "order_class", "symbol"):
-        if c in df.columns:
-            df[c] = df[c].astype(str).str.lower()
-
-    # Numeric conversions
-    for c in (
-        "qty",
-        "filled_qty",
-        "filled_avg_price",
-        "limit_price",
-        "stop_price",
-        "trail_price",
-        "trail_percent",
-        "notional",
-        "hwm",
-    ):
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    # Timestamps → UTC
-    for c in (
-        "filled_at",
-        "updated_at",
-        "submitted_at",
-        "created_at",
-        "canceled_at",
-        "failed_at",
-        "expired_at",
-        "replaced_at",
-        "expires_at",
-    ):
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], utc=True, errors="coerce")
-
-    # Robust execution timestamp for sequencing
-    ts = df.get("filled_at")
-    for alt in ("updated_at", "submitted_at", "created_at"):
-        if alt in df.columns:
-            ts = ts.where(ts.notna(), df[alt]) if ts is not None else df[alt]
-    df["exec_ts"] = pd.to_datetime(ts, utc=True, errors="coerce")
-
-    # Parent rows: no parent_id; legs: parent_id filled
     if "parent_id" not in df.columns:
         df["parent_id"] = pd.NA
 
-    # Deduplicate by unique order id when present
-    if "id" in df.columns:
-        df = df.drop_duplicates(subset=["id"], keep="last").reset_index(drop=True)
+    date_cols = ["created_at", "updated_at", "filled_at", "submitted_at"]
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], utc=True, errors="coerce")
 
-    # Canonical symbol upper-case (useful for grouping)
-    if "symbol" in df.columns:
-        df["symbol"] = df["symbol"].astype(str).str.upper()
+    num_cols = ["qty", "filled_qty", "limit_price", "stop_price"]
+    for col in num_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    if "created_at" in df.columns:
+        df = df.sort_values("created_at", ascending=False)
     return df
 
 
