@@ -34,6 +34,16 @@ High-frequency monitoring and dashboarding for each trading destination with a l
   Run deployments reuse the same encrypted path controlled by
   `CF_ACCESS_*` secrets.
 
+## Documentation
+
+- [Web Layer Architecture](docs/web_architecture.md) – explains how the Flask
+  blueprint per destination exposes SSE streams, cached APIs, and the `/stream/events`
+  flow driven by PostgreSQL `LISTEN`/`NOTIFY`.
+- [Core Analytics Reference](docs/core_analytics.md) – documents the lot/FIFO
+  engines, orphan/chain logic, and equity Smart Sharpe/drawdown computations.
+- [Infrastructure and Deployment](docs/infrastructure.md) – covers the Cloudflare
+  tunnels, Cloud Build pipeline, and required environment secrets.
+
 ## Repository layout
 
 - `src/cold_harbour/` – application code (web layer, services, core helpers, infrastructure glue).
