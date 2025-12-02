@@ -139,11 +139,13 @@ def account_table_names(
     closed_tbl = _schema_qualify(f"closed_trades_{slug}", schema)
     equity_tbl = equity_table_for(dest, schema=schema)
     schedule_tbl = _schema_qualify("market_schedule", schema)
+    metrics_tbl = _schema_qualify(f"account_metrics_{slug}", schema)
     return {
         "open": open_tbl,
         "closed": closed_tbl,
         "equity": equity_tbl,
         "schedule": schedule_tbl,
+        "metrics": metrics_tbl,
     }
 
 

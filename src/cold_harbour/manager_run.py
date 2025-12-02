@@ -90,6 +90,7 @@ def _cfg_for(dest: Dict[str, Any]) -> Dict[str, Any]:
         "TABLE_ACCOUNT_POSITIONS": tables["open"].split(".", 1)[-1],
         "TABLE_ACCOUNT_CLOSED": tables["closed"].split(".", 1)[-1],
         "TABLE_ACCOUNT_EQUITY_FULL": tables["equity"].split(".", 1)[-1],
+        "TABLE_ACCOUNT_METRICS": tables["metrics"].split(".", 1)[-1],
         "TABLE_MARKET_SCHEDULE": tables["schedule"].split(".", 1)[-1],
         "POS_CHANNEL": chans["pos"],
         "CLOSED_CHANNEL": chans["closed"],
@@ -110,6 +111,7 @@ def _cfg_for(dest: Dict[str, Any]) -> Dict[str, Any]:
             "TABLE_ACCOUNT_POSITIONS",
             "TABLE_ACCOUNT_CLOSED",
             "TABLE_ACCOUNT_EQUITY_FULL",
+            "TABLE_ACCOUNT_METRICS",
             "TABLE_MARKET_SCHEDULE",
         ):
             v = cfg[k]
