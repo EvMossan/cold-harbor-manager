@@ -20,34 +20,34 @@ DESTINATIONS: List[Dict[str, Any]] = [
             "ensemble_202501.joblib"
         ),
     },
-    # {
-    #     "name": "cold-harbour_v1.0",
-    #     "allow_trading": True,
-    #     "base_url": os.getenv("ALPACA_BASE_URL_PAPER", "https://paper-api.alpaca.markets"),
-    #     "key_id": os.getenv("ALPACA_API_KEY_JOHNYSSAN"),
-    #     "secret_key": os.getenv("ALPACA_SECRET_KEY_JOHNYSSAN"),
-    #     "risk_factor": 1.0,
-    #     "dry_run": False,
-    #     "orders_table": "placed_orders_1",
-    #     "trained_classifier_path": (
-    #         "/home/tradingbot/proxima/airflow_docer/trained_models/ensemble/"
-    #         "ensemble_202501.joblib"
-    #     ),
-    # },
-    # {
-    #     "name": "cold-harbour_v2.1",
-    #     "allow_trading": True,
-    #     "base_url": os.getenv("ALPACA_BASE_URL_PAPER", "https://paper-api.alpaca.markets"),
-    #     "key_id": os.getenv("ALPACA_API_KEY_cold-harbour_v2.1"),
-    #     "secret_key": os.getenv("ALPACA_SECRET_KEY_cold-harbour_v2.1"),
-    #     "risk_factor": 1.0,
-    #     "dry_run": False,
-    #     "orders_table": "placed_orders_ch21",
-    #     "trained_classifier_path": (
-    #         "/home/tradingbot/proxima/airflow_docer/trained_models/ensemble/"
-    #         "ensemble_202501.joblib"
-    #     ),
-    # },
+    {
+        "name": "cold-harbour_v1.0",
+        "allow_trading": True,
+        "base_url": os.getenv("ALPACA_BASE_URL_PAPER", "https://paper-api.alpaca.markets"),
+        "key_id": os.getenv("ALPACA_API_KEY_JOHNYSSAN"),
+        "secret_key": os.getenv("ALPACA_SECRET_KEY_JOHNYSSAN"),
+        "risk_factor": 1.0,
+        "dry_run": False,
+        "orders_table": "placed_orders_1",
+        "trained_classifier_path": (
+            "/home/tradingbot/proxima/airflow_docer/trained_models/ensemble/"
+            "ensemble_202501.joblib"
+        ),
+    },
+    {
+        "name": "cold-harbour_v2.1",
+        "allow_trading": True,
+        "base_url": os.getenv("ALPACA_BASE_URL_PAPER", "https://paper-api.alpaca.markets"),
+        "key_id": os.getenv("ALPACA_API_KEY_cold-harbour_v2.1"),
+        "secret_key": os.getenv("ALPACA_SECRET_KEY_cold-harbour_v2.1"),
+        "risk_factor": 1.0,
+        "dry_run": False,
+        "orders_table": "placed_orders_ch21",
+        "trained_classifier_path": (
+            "/home/tradingbot/proxima/airflow_docer/trained_models/ensemble/"
+            "ensemble_202501.joblib"
+        ),
+    },
 ]
 
 # ---------------------------------------------------------------------------

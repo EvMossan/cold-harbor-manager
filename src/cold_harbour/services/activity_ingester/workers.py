@@ -11,7 +11,10 @@ import pandas as pd
 from alpaca_trade_api.rest import REST
 from alpaca_trade_api.stream import Stream
 
-from cold_harbour.core.account_analytics import fetch_orders
+from cold_harbour.core.account_analytics import (
+    fetch_all_activities,
+    fetch_orders,
+)
 from cold_harbour.infrastructure.db import AsyncAccountRepository
 from . import storage, transform
 from .config import IngesterConfig
@@ -65,6 +68,48 @@ def _df_to_ingest_records(df: pd.DataFrame) -> List[dict[str, Any]]:
     return records
 
 
+def _df_to_activity_records(
+    df: pd.DataFrame,
+    default_time: Optional[datetime] = None,
+) -> List[dict[str, Any]]:
+    """Transform fetched activity table into storage-ready records."""
+    ingest_time = datetime.now(timezone.utc)
+    records: List[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        def _safe_value(key: str) -> Any:
+            value = row.get(key)
+            return None if pd.isna(value) else value
+
+        net_amount = _safe_value("net_amount")
+        if net_amount is None:
+            net_amount = _safe_value("amount")
+        if net_amount is None:
+            net_amount = 0
+
+        transaction_time = _timestamp_to_datetime(row.get("exec_time"))
+        if transaction_time is None:
+            transaction_time = (
+                default_time or datetime.now(timezone.utc)
+            )
+        records.append(
+            {
+                "id": row.get("id"),
+                "activity_type": _safe_value("activity_type"),
+                "transaction_time": transaction_time,
+                "symbol": _safe_value("symbol"),
+                "side": _safe_value("side"),
+                "qty": _safe_value("qty"),
+                "price": _safe_value("price"),
+                "net_amount": net_amount,
+                "order_id": _safe_value("order_id"),
+                "execution_id": None,
+                "raw_json": None,
+                "ingested_at": ingest_time,
+            }
+        )
+    return records
+
+
 async def run_backfill_task(
     repo: AsyncAccountRepository,
     api_key: str,
@@ -96,11 +141,24 @@ async def run_backfill_task(
 
     if df.empty:
         log.info(f"[{slug}] No orders returned; backfill is complete.")
-        return
+    else:
+        records = _df_to_ingest_records(df)
+        count = await storage.upsert_orders(repo, slug, records)
+        log.info(f"[{slug}] Upserted {count} orders from fetch_orders.")
 
-    records = _df_to_ingest_records(df)
-    count = await storage.upsert_orders(repo, slug, records)
-    log.info(f"[{slug}] Upserted {count} orders from fetch_orders.")
+    log.info(f"[{slug}] Starting Activities Backfill from {start_date}")
+    try:
+        act_df = fetch_all_activities(rest, start_date=start_date)
+        if not act_df.empty:
+            act_records = _df_to_activity_records(
+                act_df, default_time=start_date
+            )
+            act_count = await storage.upsert_activities(
+                repo, slug, act_records
+            )
+            log.info(f"[{slug}] Upserted {act_count} activities.")
+    except Exception as exc:
+        log.error(f"[{slug}] Activities backfill failed: {exc}")
 
 
 async def run_healing_worker(
@@ -126,10 +184,30 @@ async def run_healing_worker(
             log.debug(f"[{slug}] Running healing cycle from {start_date}")
             df = fetch_orders(rest, start_date=start_date)
             if df.empty:
-                continue
-            records = _df_to_ingest_records(df)
-            count = await storage.upsert_orders(repo, slug, records)
-            log.debug(f"[{slug}] Healing upserted {count} orders.")
+                log.debug(f"[{slug}] Healing found no orders.")
+            else:
+                records = _df_to_ingest_records(df)
+                count = await storage.upsert_orders(repo, slug, records)
+                log.debug(f"[{slug}] Healing upserted {count} orders.")
+
+            try:
+                act_df = fetch_all_activities(rest, start_date=start_date)
+                if act_df.empty:
+                    log.debug(f"[{slug}] Healing found no activities.")
+                else:
+                    act_records = _df_to_activity_records(
+                        act_df, default_time=start_date
+                    )
+                    act_count = await storage.upsert_activities(
+                        repo, slug, act_records
+                    )
+                    log.debug(
+                        f"[{slug}] Healing upserted {act_count} activities."
+                    )
+            except Exception as exc:
+                log.error(
+                    f"[{slug}] Healing activities fetch failed: {exc}"
+                )
         except asyncio.CancelledError:
             log.info(f"[{slug}] Healing worker cancelled.")
             break

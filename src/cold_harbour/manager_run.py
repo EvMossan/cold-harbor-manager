@@ -21,11 +21,14 @@ from typing import Dict, Any, List
 import nest_asyncio
 
 from cold_harbour.services.account_manager import AccountManager
+from cold_harbour.services.account_manager.config import _Config
 from cold_harbour.core.destinations import (
     DESTINATIONS,
     account_table_names,
     notify_channels_for,
 )
+
+ACCOUNT_COLUMN_WIDTH = _Config.ACCOUNT_COLUMN_WIDTH
 
 
 class _StreamToLogger:
@@ -56,7 +59,7 @@ class _DefaultFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
         if not hasattr(record, "account"):
-            record.account = "AccountMgr[system]".ljust(20)
+            record.account = "system".ljust(ACCOUNT_COLUMN_WIDTH)
         if not hasattr(record, "log_module"):
             record.log_module = "global"
         return super().format(record)
@@ -71,7 +74,7 @@ class _ModuleFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
         if not hasattr(record, "account"):
-            record.account = "AccountMgr[system]".ljust(20)
+            record.account = "system".ljust(ACCOUNT_COLUMN_WIDTH)
         record.log_module = self.module
         return True
 
@@ -173,7 +176,7 @@ def _configure_logging() -> None:
         "%(account)s %(log_module)-15s %(message)s"
     )
     datefmt = "%Y-%m-%d %H:%M:%S"
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(sys.__stdout__)
     handler.setFormatter(_DefaultFormatter(fmt=fmt, datefmt=datefmt))
     root = logging.getLogger()
     root.handlers.clear()

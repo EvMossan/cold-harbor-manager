@@ -60,6 +60,8 @@ class _Config:
         "E",
     )
 
+    ACCOUNT_COLUMN_WIDTH: int = 20
+
 
 DB_COLS: tuple[str, ...] = (
     "parent_id",

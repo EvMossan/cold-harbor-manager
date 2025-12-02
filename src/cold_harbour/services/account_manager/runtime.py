@@ -46,7 +46,6 @@ from cold_harbour.services.account_manager.utils import (
     _utcnow,
 )
 
-
 class AccountLoggerAdapter(logging.LoggerAdapter):
     """Logger adapter that adds account/module metadata for formatting."""
 
@@ -337,7 +336,7 @@ class AccountManager:
         base_logger = logging.getLogger(log_name)
         self.log = base_logger
         if not base_logger.handlers:
-            handler = logging.StreamHandler(stream=sys.stdout)
+            handler = logging.StreamHandler(stream=sys.__stdout__)
             fmt = (
                 "%(asctime)s %(levelname)-5s "
                 "%(account)s %(log_module)-15s %(message)s"
@@ -367,7 +366,7 @@ class AccountManager:
             handler.setLevel(logging.NOTSET)
             base_logger.propagate = False
 
-        padded_label = f"{log_name:<20}"
+        padded_label = f"{self.account_label:<{self.c.ACCOUNT_COLUMN_WIDTH}}"
         self.log = AccountLoggerAdapter(
             base_logger, padded_label, default_module="runtime"
         )

@@ -255,11 +255,24 @@ def fetch_orders_fast(api, days_back=365):
     return df
 
 
-def fetch_all_activities(api):
+def fetch_all_activities(api, start_date=None, end_date=None):
     """
-    Fetches the complete account activity history (FILL, FEE, DIV, JNLS, etc.).
+    Fetches account activity history (FILL, FEE, DIV, JNLS, etc.).
     Does not filter by activity type.
     """
+    def _to_iso(value):
+        if value is None:
+            return None
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(timezone.utc)
+        else:
+            ts = ts.astimezone(timezone.utc)
+        return ts.isoformat()
+
+    after_iso = _to_iso(start_date)
+    until_iso = _to_iso(end_date)
+
     # print(">>> Downloading full account history (All Events)...")
     all_activities = []
     last_id = None
@@ -270,6 +283,10 @@ def fetch_all_activities(api):
             'direction': 'desc',
             'page_size': 100
         }
+        if after_iso:
+            params['after'] = after_iso
+        if until_iso:
+            params['until'] = until_iso
         if last_id:
             params['page_token'] = last_id
 
