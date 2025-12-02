@@ -164,6 +164,7 @@ async def _ensure_tables(
     tbl_cash_flows: str,
     tbl_equity_intraday: str,
     tbl_market_schedule: str,
+    tbl_metrics: str,
     lock: asyncio.Lock,
     logger: logging.Logger,
 ) -> None:
@@ -235,6 +236,8 @@ async def _ensure_tables(
                 exit_price     real,
                 exit_type      text,
                 pnl_cash       real,
+                pnl_cash_fifo  real,
+                diff_pnl       real,
                 pnl_pct        real,
                 return_pct     real,
                 duration_sec   real,
@@ -273,6 +276,16 @@ async def _ensure_tables(
                 type        text,
                 description text,
                 updated_at  timestamptz DEFAULT now()
+            );
+            """,
+        )
+        await _ensure_table(
+            tbl_metrics,
+            f"""
+            CREATE TABLE {tbl_metrics} (
+                id              text PRIMARY KEY,
+                updated_at      timestamptz DEFAULT now(),
+                metrics_payload text
             );
             """,
         )

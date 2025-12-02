@@ -7,10 +7,15 @@ import json
 from typing import TYPE_CHECKING
 
 import msgpack
+import pandas as pd
 import zmq.asyncio
 
+from cold_harbour.core.account_analytics import calculate_metrics
 from cold_harbour.services.account_manager import snapshot
-from cold_harbour.services.account_manager.utils import _utcnow
+from cold_harbour.services.account_manager.utils import (
+    _json_safe,
+    _utcnow,
+)
 
 if TYPE_CHECKING:
     from .runtime import AccountManager
@@ -142,6 +147,57 @@ async def closed_trades_worker(mgr: "AccountManager") -> None:
             mgr.log.warning("closed_trades_worker error: %s", exc)
         finally:
             await mgr._sleep_until_boundary(mgr.CLOSED_SYNC_SEC)
+
+
+async def metrics_worker(mgr: "AccountManager") -> None:
+    """Compute account metrics and persist a single JSON document."""
+    interval = max(30, int(mgr.CLOSED_SYNC_SEC))
+    while True:
+        try:
+            closed_rows = await mgr._db_fetch(
+                f"SELECT * FROM {mgr.tbl_closed}"
+            )
+            open_rows = await mgr._db_fetch(
+                f"SELECT * FROM {mgr.tbl_live}"
+            )
+            activity_rows = await mgr._db_fetch(
+                f"SELECT * FROM {mgr.tbl_cash_flows}"
+            )
+
+            closed_df = pd.DataFrame(closed_rows)
+            open_df = pd.DataFrame(open_rows)
+            activities_df = pd.DataFrame(activity_rows)
+            if not activities_df.empty and "amount" in activities_df.columns:
+                activities_df = activities_df.rename(
+                    columns={"amount": "net_amount"}
+                )
+
+            metrics_df = calculate_metrics(
+                closed_df, open_df, activities_df
+            )
+            payload = (
+                metrics_df.iloc[0].to_dict()
+                if not metrics_df.empty
+                else {}
+            )
+            metrics_payload = json.dumps(payload, default=_json_safe)
+            await mgr._db_execute(
+                f"""
+                    INSERT INTO {mgr.tbl_metrics} (id, metrics_payload)
+                    VALUES ($1, $2)
+                    ON CONFLICT (id) DO UPDATE SET
+                        metrics_payload = EXCLUDED.metrics_payload,
+                        updated_at = now()
+                    """,
+                "latest",
+                metrics_payload,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            mgr.log.warning("metrics_worker error: %s", exc)
+        finally:
+            await asyncio.sleep(interval)
 
 
 async def ui_heartbeat_worker(mgr: "AccountManager") -> None:

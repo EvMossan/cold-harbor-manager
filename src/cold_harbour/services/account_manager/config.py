@@ -24,6 +24,7 @@ class _Config:
     TABLE_ACCOUNT_CLOSED: str = "account_closed"
     TABLE_ACCOUNT_EQUITY_FULL: str = "account_equity_full"
     TABLE_MARKET_SCHEDULE: str = "market_schedule"
+    TABLE_ACCOUNT_METRICS: str = "account_metrics"
 
     MIN_STOP_GAP: float = 0.01
     HEARTBEAT_SEC: int = 30
@@ -80,6 +81,27 @@ DB_COLS: tuple[str, ...] = (
     "profit_loss_lot",
     "tp_sl_reach_pct",
     "updated_at",
+)
+
+
+CLOSED_TRADE_COLS: tuple[str, ...] = (
+    "entry_lot_id",
+    "exit_order_id",
+    "exit_parent_id",
+    "symbol",
+    "side",
+    "qty",
+    "entry_time",
+    "entry_price",
+    "exit_time",
+    "exit_price",
+    "exit_type",
+    "pnl_cash",
+    "pnl_cash_fifo",
+    "diff_pnl",
+    "pnl_pct",
+    "return_pct",
+    "duration_sec",
 )
 
 

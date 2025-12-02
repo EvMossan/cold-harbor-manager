@@ -230,6 +230,7 @@ async def _activate_session(
             mgr._equity_intraday_worker(), name="equity_intraday"
         ),
         asyncio.create_task(mgr._cash_flows_worker(), name="cash_flows"),
+        asyncio.create_task(mgr._metrics_worker(), name="metrics_worker"),
         asyncio.create_task(
             mgr._ui_heartbeat_worker(), name="ui_heartbeat"
         ),

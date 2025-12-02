@@ -17,6 +17,7 @@ import sys
 import time  # used for SSE keep-alive comments
 import uuid
 from datetime import date, datetime, time as dtime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -515,128 +516,20 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     @bp.route("/api/metrics")
     def api_metrics() -> Response:  # type: ignore[override]
-        start_ts = _now()
-        # Serve from short TTL cache if fresh
-        try:
-            now = pd.Timestamp.utcnow()
-            ent = _cache.get("metrics", {})
-            ts = ent.get("ts")
-            if ts is not None and (now - ts).total_seconds() < ent.get("ttl", 30):
-                _log_timing("metrics", start_ts, cache="hit")
-                return jsonify(ent.get("data") or [{}])
-        except Exception:
-            pass
-
-        trades = _fetch_closed_df()
-        exits_all = coalesce_exit_slices(trades)
-
-        metrics = calculate_trade_metrics(
-            exits_all,
-            include_manual=False,
-            collapse_by_exit=False,
-            value_weighted=True,
-        )
-        if metrics.empty:
-            metrics = pd.DataFrame([{}])
-
+        payload: dict[str, Any] | list[Any] = {}
         with engine.begin() as conn:
-            unreal = conn.scalar(
+            row = conn.execute(
                 text(
-                    f"SELECT COALESCE(SUM(profit_loss), 0)"
-                    f" FROM {tables['open']}"
+                    "SELECT metrics_payload "
+                    "FROM account_metrics "
+                    "ORDER BY updated_at DESC LIMIT 1"
                 )
-            )
-            unreal_lot = conn.scalar(
-                text(
-                    f"SELECT COALESCE(SUM(profit_loss_lot), 0)"
-                    f" FROM {tables['open']}"
-                )
-            )
-            total_ret = conn.scalar(
-                text(
-                    f"""
-                    SELECT COALESCE(
-                             (SELECT cumulative_return
-                                FROM {tables['equity']}
-                               WHERE cumulative_return IS NOT NULL
-                            ORDER BY date DESC LIMIT 1), 0)
-                    """
-                )
-            )
-            open_buy = conn.scalar(
-                text(
-                    f"SELECT COALESCE(SUM(buy_value), 0)"
-                    f" FROM {tables['open']}"
-                )
-            )
-            # Sum of fees/interest from cash_flows for the full window.
+            ).scalar_one_or_none()
+        if row:
             try:
-                fees_sum_raw = conn.scalar(
-                    text(
-                        f"""
-                        SELECT COALESCE(SUM(amount), 0)
-                          FROM {tables['cash_flows']}
-                         WHERE type ILIKE 'FEE%'
-                            OR type ILIKE 'CFEE%'
-                             OR type ILIKE 'INT%'
-                        """
-                    )
-                ) or 0.0
-            except Exception:
-                fees_sum_raw = 0.0
-            fees_total = abs(float(fees_sum_raw))
-            sharpe = conn.execute(
-                text(
-                    f"""
-                    SELECT
-                        sharpe_10  AS s10,
-                        sharpe_21  AS s21,
-                        sharpe_63  AS s63,
-                        sharpe_126 AS s126,
-                        sharpe_252 AS s252
-                      FROM {tables['equity']}
-                     WHERE sharpe_10 IS NOT NULL
-                  ORDER BY date DESC
-                     LIMIT 1
-                    """
-                )
-            ).mappings().first()
-
-        closed_buy = float(metrics.loc[0].get("Total Buy", 0))
-        metrics.loc[0, "Total Buy"] = closed_buy + float(open_buy)
-        metrics.loc[0, "Unrealised P/L"] = unreal
-        metrics.loc[0, "Unrealised P/L (per Lot)"] = unreal_lot
-        # Fees displayed as positive amount; subtract from realised total.
-        metrics.loc[0, "Fees + Interest"] = float(fees_total)
-        base_total_pl = float(metrics.loc[0].get("Total Profit/Loss", 0) or 0)
-        metrics.loc[0, "Total Profit/Loss"] = base_total_pl + float(fees_sum_raw)
-        # Aggregate totals
-        metrics.loc[0, "P/L"] = (
-            metrics.loc[0, "Total Profit/Loss"] + unreal
-        )
-        metrics.loc[0, "P/L (per Lot)"] = (
-            metrics.loc[0, "Total Profit/Loss"] + unreal_lot
-        )
-        metrics.loc[0, "Total Return"] = float(total_ret) * 100.0
-        # Avoid loading the full open table just to count rows
-        with engine.begin() as conn:
-            open_cnt = conn.scalar(text(f"SELECT COUNT(*) FROM {tables['open']}"))
-        metrics.loc[0, "Open Positions"] = int(open_cnt or 0)
-        metrics.loc[0, "Closed Trades"] = trades.shape[0]
-
-        if sharpe:
-            metrics.loc[0, "Sharpe 10d"] = float(sharpe["s10"])
-            metrics.loc[0, "Sharpe 21d"] = float(sharpe["s21"])
-            metrics.loc[0, "Sharpe 63d"] = float(sharpe["s63"])
-            metrics.loc[0, "Sharpe 126d"] = float(sharpe["s126"])
-            metrics.loc[0, "Sharpe 252d"] = float(sharpe["s252"])
-
-        payload = json.loads(metrics.to_json(orient="records"))
-        try:
-            _cache["metrics"] = {"ts": pd.Timestamp.utcnow(), "data": payload, "ttl": _cache["metrics"]["ttl"]}
-        except Exception:
-            pass
-        _log_timing("metrics", start_ts, metrics.shape[0], "miss")
+                payload = json.loads(row)
+            except json.JSONDecodeError:
+                payload = {}
         return jsonify(payload)
 
     @bp.route("/stream/positions")

@@ -110,6 +110,9 @@ class AccountManager:
             TABLE_ACCOUNT_EQUITY_FULL=cfg.get(
                 "TABLE_ACCOUNT_EQUITY_FULL", _Config.TABLE_ACCOUNT_EQUITY_FULL
             ),
+            TABLE_ACCOUNT_METRICS=cfg.get(
+                "TABLE_ACCOUNT_METRICS", _Config.TABLE_ACCOUNT_METRICS
+            ),
             MIN_STOP_GAP=float(cfg.get("MIN_STOP_GAP", _Config.MIN_STOP_GAP)),
             HEARTBEAT_SEC=heartbeat_sec,
             SNAPSHOT_SEC=snapshot_sec,
@@ -229,6 +232,9 @@ class AccountManager:
         self.tbl_cash_flows = _derive_cash_flows(self.tbl_equity)
         self.tbl_market_schedule = _qualify(
             schema, self.c.TABLE_MARKET_SCHEDULE
+        )
+        self.tbl_metrics = _qualify(
+            schema, self.c.TABLE_ACCOUNT_METRICS
         )
 
         # Per-account NOTIFY channels.
@@ -566,6 +572,7 @@ class AccountManager:
             self.tbl_cash_flows,
             self.tbl_equity_intraday,
             self.tbl_market_schedule,
+            self.tbl_metrics,
             self._db_lock,
             self.log,
         )
@@ -706,6 +713,14 @@ class AccountManager:
     async def _closed_trades_worker(self) -> None:
         """Delegate to workers.closed_trades_worker()."""
         await runtime_workers.closed_trades_worker(self)
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  Metrics worker
+    # ──────────────────────────────────────────────────────────────────────
+
+    async def _metrics_worker(self) -> None:
+        """Delegate to workers.metrics_worker()."""
+        await runtime_workers.metrics_worker(self)
 
     # ──────────────────────────────────────────────────────────────────────
     #  Equity worker (optional; if tables present)

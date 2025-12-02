@@ -9,9 +9,10 @@ from typing import Any, Dict, Optional, TYPE_CHECKING
 import pandas as pd
 from zoneinfo import ZoneInfo
 
-from cold_harbour.core.account_utils import (
-    closed_trades_fifo_from_orders,
-    fetch_all_orders,
+from cold_harbour.core.account_analytics import (
+    build_closed_trades_df_lot,
+    fetch_all_activities,
+    fetch_orders,
 )
 from cold_harbour.services.account_manager import snapshot
 from cold_harbour.services.account_manager.utils import (
@@ -28,8 +29,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 def _pull_orders(
     mgr: "AccountManager", *, days_back: int = 365
 ) -> pd.DataFrame:
-    """Return orders via account_utils.fetch_all_orders."""
-    df = fetch_all_orders(api=mgr.rest, days_back=days_back)
+    """Return orders via account_analytics.fetch_orders."""
+    df = fetch_orders(mgr.rest, days_back=days_back)
     if "parent_id" not in df.columns and "parent_order_id" in df.columns:
         df = df.rename(columns={"parent_order_id": "parent_id"})
     if "parent_id" not in df.columns:
@@ -72,7 +73,20 @@ async def _sync_closed_trades(mgr: "AccountManager") -> None:
     if orders_df.empty:
         return
 
-    trades = closed_trades_fifo_from_orders(orders_df)
+    try:
+        activities_df = fetch_all_activities(mgr.rest)
+    except Exception:
+        mgr.log.exception("Closed trades: failed to fetch activities")
+        activities_df = pd.DataFrame()
+
+    if "activity_type" in activities_df.columns:
+        fills_df = activities_df[
+            activities_df["activity_type"] == "FILL"
+        ].copy()
+    else:
+        fills_df = pd.DataFrame()
+
+    trades = build_closed_trades_df_lot(fills_df, orders_df)
     if trades.empty:
         return
 
@@ -111,6 +125,8 @@ async def _sync_closed_trades(mgr: "AccountManager") -> None:
         "exit_price",
         "exit_type",
         "pnl_cash",
+        "pnl_cash_fifo",
+        "diff_pnl",
         "pnl_pct",
         "return_pct",
         "duration_sec",

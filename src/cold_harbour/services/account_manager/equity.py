@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import math
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Any
 
 import numpy as np
 import pandas as pd
 
+from cold_harbour.core.account_analytics import fetch_all_activities
 from cold_harbour.core.equity import (
     rebuild_equity_series_async,
     update_today_row_async,
@@ -24,7 +25,7 @@ async def _bootstrap_cash_flows(
     mgr: "AccountManager",
     max_pages: int | None = None,
 ) -> int:
-    """Load activities newest-to-oldest until a page is already present."""
+    """Load all account activities and persist them into cash flows."""
 
     await mgr._db_execute(
         f"""
@@ -39,142 +40,118 @@ async def _bootstrap_cash_flows(
             """
     )
 
-    async def _page_known(ids: list[str]) -> bool:
-        if not ids:
-            return True
-        placeholders = ", ".join(f"(${i+1})" for i in range(len(ids)))
-        sql = f"""
-                SELECT v.id
-                  FROM (VALUES {placeholders}) AS v(id)
-                  JOIN {mgr.tbl_cash_flows} f
-                    ON f.id = v.id
-                """
-        try:
-            rows = await mgr._db_fetch(sql, *ids)
-            return len(rows) == len(ids)
-        except Exception:
-            return False
-
-    token: Optional[str] = None
-    got_total = 0
-    pages = 0
-    while True:
-        if max_pages is not None and pages >= max_pages:
-            break
-        pages += 1
-        try:
-            acts = mgr.rest.get_activities(
-                page_size=100,
-                page_token=token,
-                direction="desc",
-            )
-        except Exception as exc:
-            mgr.log.debug("flows bootstrap get_activities: %s", exc)
-            break
-        if not acts:
-            break
-
-        rows: list[dict] = []
-        ids: list[str] = []
-        for a in acts:
-            raw = getattr(a, "_raw", None) or getattr(a, "__dict__", {})
-            if not isinstance(raw, dict):
-                continue
-            aid = str(raw.get("id") or raw.get("activity_id") or "")
-            if not aid:
-                continue
-            atype = str(raw.get("activity_type") or raw.get("type") or "")
-            ts = (
-                raw.get("transaction_time")
-                or raw.get("date")
-                or raw.get("processing_date")
-            )
-            try:
-                ts_utc = pd.to_datetime(ts, utc=True).to_pydatetime()
-            except Exception:
-                continue
-            val = (
-                raw.get("net_amount")
-                or raw.get("cash")
-                or raw.get("amount")
-            )
-            if val is None and str(atype).upper() == "FILL":
-                try:
-                    px = float(raw.get("price") or 0.0)
-                    qty = float(raw.get("qty") or 0.0)
-                    side = str(raw.get("side") or "").lower()
-                    if side.startswith("buy"):
-                        val = -abs(px * qty)
-                    elif side.startswith("sell"):
-                        val = abs(px * qty)
-                    else:
-                        val = px * qty
-                except Exception:
-                    val = 0.0
-            try:
-                amount = float(val) if val is not None else 0.0
-            except Exception:
-                amount = 0.0
-            desc = str(raw.get("description") or raw.get("symbol") or "")
-            rows.append(
-                {
-                    "id": aid,
-                    "ts": ts_utc,
-                    "amount": amount,
-                    "type": atype,
-                    "description": desc,
-                }
-            )
-            ids.append(aid)
-
-        if await _page_known(ids):
-            break
-
-        if rows:
-            params = [
-                (
-                    r["id"],
-                    r["ts"],
-                    r["amount"],
-                    r["type"],
-                    r["description"],
-                )
-                for r in rows
-            ]
-            await mgr._db_executemany(
-                f"""
-                    INSERT INTO {mgr.tbl_cash_flows}
-                        (id, ts, amount, type, description)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (id) DO UPDATE SET
-                        ts = EXCLUDED.ts,
-                        amount = EXCLUDED.amount,
-                        type = EXCLUDED.type,
-                        description = EXCLUDED.description,
-                        updated_at = now()
-                    """,
-                params,
-            )
-            got_total += len(rows)
-
-        token = getattr(acts, "next_page_token", None)
-        if not token:
-            try:
-                token = rows[-1]["id"] if rows else None
-            except Exception:
-                token = None
-        if not token:
-            break
-
-    if got_total:
-        mgr.log.info(
-            "flows bootstrap upserted %d rows (%d pages)",
-            got_total,
-            pages,
+    if max_pages is not None:
+        mgr.log.debug(
+            "flows bootstrap ignoring max_pages=%s", max_pages
         )
-    else:
+
+    try:
+        activities = fetch_all_activities(mgr.rest)
+    except Exception:
+        mgr.log.exception(
+            "flows bootstrap failed to fetch activities"
+        )
+        activities = pd.DataFrame()
+
+    if activities.empty:
         mgr.log.info("flows bootstrap: nothing to ingest")
-    return got_total
+        return 0
+
+    records: list[tuple[Any, Any, Any, Any, Any]] = []
+    if "id" not in activities.columns and "activity_id" in activities.columns:
+        activities = activities.rename(columns={"activity_id": "id"})
+
+    seen_ids: set[str] = set()
+    time_cols = [
+        "exec_time",
+        "transaction_time",
+        "activity_time",
+        "date",
+        "timestamp",
+        "created_at",
+    ]
+    amount_cols = ["net_amount", "cash", "amount"]
+
+    def _float_or_none(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(result):
+            return None
+        return result
+
+    for _, row in activities.iterrows():
+        raw_id = row.get("id")
+        if pd.isna(raw_id) or raw_id is None:
+            continue
+        row_id = str(raw_id).strip()
+        if not row_id or row_id in seen_ids:
+            continue
+        seen_ids.add(row_id)
+
+        ts_val = None
+        for col in time_cols:
+            if col not in activities.columns:
+                continue
+            candidate = row.get(col)
+            if pd.isna(candidate):
+                continue
+            ts = pd.to_datetime(
+                candidate, utc=True, errors="coerce"
+            )
+            if pd.notna(ts):
+                ts_val = ts.to_pydatetime()
+                break
+
+        amount = None
+        for col in amount_cols:
+            if col not in activities.columns:
+                continue
+            amount = _float_or_none(row.get(col))
+            if amount is not None:
+                break
+        if amount is None:
+            amount = 0.0
+
+        type_val = row.get("activity_type") or row.get("type") or ""
+        desc_val = row.get("description") or row.get("symbol") or ""
+        records.append(
+            (
+                row_id,
+                ts_val,
+                amount,
+                str(type_val) if type_val not in (None, "") else "",
+                str(desc_val) if desc_val not in (None, "") else "",
+            )
+        )
+
+    if not records:
+        mgr.log.info("flows bootstrap: nothing to ingest")
+        return 0
+
+    await mgr._db_executemany(
+        f"""
+            INSERT INTO {mgr.tbl_cash_flows}
+                (id, ts, amount, type, description)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (id) DO UPDATE SET
+                ts = EXCLUDED.ts,
+                amount = EXCLUDED.amount,
+                type = EXCLUDED.type,
+                description = EXCLUDED.description,
+                updated_at = now()
+            """,
+        records,
+    )
+    mgr.log.info(
+        "flows bootstrap upserted %d rows (%d pages)",
+        len(records),
+        1,
+    )
+    return len(records)
 
 
 async def _rebuild_equity_full(mgr: "AccountManager") -> None:

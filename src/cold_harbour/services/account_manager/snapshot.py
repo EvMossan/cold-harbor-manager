@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Any, Dict, Set, TYPE_CHECKING
+from typing import Any, Dict, Optional, Set, TYPE_CHECKING
 
 import pandas as pd
 
-from cold_harbour.core.account_utils import build_open_positions_df
+from cold_harbour.core.account_analytics import (
+    build_lot_portfolio,
+    fetch_all_activities,
+    fetch_orders,
+)
 from cold_harbour.services.account_manager.utils import (
     _is_at_break_even,
     _last_trade_px,
@@ -17,6 +21,106 @@ from cold_harbour.services.account_manager.utils import (
 
 if TYPE_CHECKING:
     from cold_harbour.services.account_manager.runtime import AccountManager
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    """Convert values to float or return None for invalid input."""
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(result):
+        return None
+    return result
+
+
+def _build_side_map(positions: list[Any]) -> Dict[str, str]:
+    """Map live positions to their long/short side."""
+    side_map: Dict[str, str] = {}
+    for pos in positions:
+        symbol = getattr(pos, "symbol", None)
+        if not symbol:
+            continue
+        try:
+            qty = float(getattr(pos, "qty", 0.0) or 0.0)
+        except Exception:
+            qty = 0.0
+        side_map[str(symbol).upper()] = "short" if qty < 0 else "long"
+    return side_map
+
+
+def _build_live_row(
+    mgr: "AccountManager",
+    entry: pd.Series,
+    now_ts: datetime,
+    side_map: Dict[str, str],
+    symbol_hint: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Translate a lot row to match the live schema."""
+    parent_raw = entry.get("Parent ID")
+    parent_id = str(parent_raw).strip() if parent_raw not in (None, "") else ""
+    if not parent_id:
+        return None
+
+    symbol_value = symbol_hint or entry.get("Symbol")
+    if symbol_value is None:
+        return None
+    symbol = str(symbol_value).upper()
+
+    filled_at_ts = pd.to_datetime(
+        entry.get("Buy Date"), utc=True, errors="coerce"
+    )
+    filled_at = (
+        filled_at_ts.to_pydatetime()
+        if pd.notna(filled_at_ts)
+        else None
+    )
+
+    qty_val = _safe_float(entry.get("Buy Qty"))
+    qty = qty_val if qty_val is not None else 0.0
+
+    avg_fill = _safe_float(entry.get("Buy Price"))
+    avg_px_symbol = _safe_float(entry.get("_avg_px_symbol")) or avg_fill
+    sl_px = _safe_float(entry.get("Stop_Loss_Price"))
+    tp_px = _safe_float(entry.get("Take_Profit_Price"))
+    mkt_px = _safe_float(entry.get("Current_Price"))
+    if mkt_px is None:
+        mkt_px = _last_trade_px(mgr.rest, symbol)
+
+    buy_value = _safe_float(entry.get("Buy_Value"))
+    mkt_value = _safe_float(entry.get("Current Market Value"))
+    profit_loss = _safe_float(entry.get("Profit/Loss"))
+    profit_loss_lot = (
+        mkt_value - buy_value
+        if buy_value is not None and mkt_value is not None
+        else None
+    )
+    tp_sl_reach = _safe_float(entry.get("TP_reach, %"))
+
+    return {
+        "parent_id": parent_id,
+        "symbol": symbol,
+        "side": side_map.get(symbol, "long"),
+        "filled_at": filled_at,
+        "qty": qty,
+        "avg_fill": avg_fill,
+        "avg_px_symbol": avg_px_symbol,
+        "sl_child": None,
+        "sl_px": sl_px,
+        "tp_child": None,
+        "tp_px": tp_px,
+        "mkt_px": mkt_px,
+        "moved_flag": "—",
+        "buy_value": buy_value,
+        "holding_days": None,
+        "mkt_value": mkt_value,
+        "profit_loss": profit_loss,
+        "profit_loss_lot": profit_loss_lot,
+        "tp_sl_reach_pct": tp_sl_reach,
+        "updated_at": now_ts,
+    }
 
 
 def refresh_row_metrics(row: Dict[str, Any], now_ts: datetime) -> None:
@@ -79,37 +183,36 @@ def _maybe_mark_moved_flag(
 async def initial_snapshot(mgr: "AccountManager") -> None:
     """Build a snapshot of all open parents with KPIs pre-filled."""
     mgr.log.info("Bootstrap: scanning live positions …")
-    pos_live = {p.symbol: p._raw for p in mgr.rest.list_positions()}
-    side_map: Dict[str, str] = {}
-    for sym, raw in pos_live.items():
-        try:
-            q = float(raw.get("qty", 0) or 0.0)
-        except Exception:
-            q = 0.0
-        side_map[str(sym).upper()] = "short" if q < 0 else "long"
 
-    if not pos_live:
-        mgr.log.info("No live positions → nothing to bootstrap.")
-        mgr._snapshot_last_complete = _utcnow()
-        mgr._snapshot_ready = True
-        return
+    try:
+        positions = mgr.rest.list_positions()
+    except Exception:
+        mgr.log.exception("Snapshot: failed to list live positions")
+        positions = []
 
-    symbols = list(pos_live)
-    mgr._trace(
-        "snapshot:positions", count=len(pos_live), symbols=symbols[:25]
-    )
-
-    orders_df = mgr._pull_orders()
-
-    sym_set = {str(s).upper() for s in symbols}
-    orders_df = orders_df[
-        orders_df["symbol"].astype(str).str.upper().isin(sym_set)
-    ].copy()
-
-    open_df = build_open_positions_df(orders_df, mgr.rest)
+    side_map = _build_side_map(positions)
     prev_ids = set(mgr.state.keys())
-    new_ids: Set[str] = set()
 
+    try:
+        orders_df = fetch_orders(mgr.rest, days_back=365)
+    except Exception:
+        mgr.log.exception("Snapshot: failed to fetch orders")
+        orders_df = pd.DataFrame()
+
+    try:
+        activities_df = fetch_all_activities(mgr.rest)
+    except Exception:
+        mgr.log.exception("Snapshot: failed to fetch activities")
+        activities_df = pd.DataFrame()
+
+    if "activity_type" in activities_df.columns:
+        fills_df = activities_df[
+            activities_df["activity_type"] == "FILL"
+        ].copy()
+    else:
+        fills_df = pd.DataFrame()
+
+    open_df = build_lot_portfolio(fills_df, orders_df, api=mgr.rest)
     if open_df is None or open_df.empty:
         for pid in list(prev_ids):
             await mgr._delete(pid, skip_closed=True)
@@ -120,98 +223,39 @@ async def initial_snapshot(mgr: "AccountManager") -> None:
 
     now_utc = _utcnow()
     kept = 0
+    new_ids: Set[str] = set()
 
-    for _, r in open_df.iterrows():
+    for _, entry in open_df.iterrows():
+        row = _build_live_row(mgr, entry, now_utc, side_map)
+        if row is None:
+            continue
+        parent_id = row["parent_id"]
+        symbol = row["symbol"]
         try:
-            parent_id = (
-                str(r["Parent ID"])
-                if pd.notna(r.get("Parent ID"))
-                else None
-            )
-            if not parent_id:
-                continue
-            symbol = (
-                str(r["Symbol"]).upper()
-                if pd.notna(r.get("Symbol"))
-                else None
-            )
-            if not symbol:
-                continue
-
-            filled_at_ts = pd.to_datetime(
-                r.get("Buy Date"), utc=True, errors="coerce"
-            )
-            qty = int(float(r.get("Buy Qty") or 0))
-            avg_fill = (
-                float(r.get("Buy Price"))
-                if pd.notna(r.get("Buy Price"))
-                else None
-            )
-            avg_px_symbol = (
-                float(r.get("_avg_px_symbol"))
-                if "_avg_px_symbol" in r
-                and pd.notna(r.get("_avg_px_symbol"))
-                else avg_fill
-            )
-            sl_px = (
-                float(r.get("Stop_Loss_Price"))
-                if pd.notna(r.get("Stop_Loss_Price"))
-                else None
-            )
-            tp_px = (
-                float(r.get("Take_Profit_Price"))
-                if pd.notna(r.get("Take_Profit_Price"))
-                else None
-            )
-            mkt_px = (
-                float(r.get("Current_Price"))
-                if pd.notna(r.get("Current_Price"))
-                else None
-            )
-            if mkt_px is None:
-                mkt_px = _last_trade_px(mgr.rest, symbol)
-
-            row: Dict[str, Any] = {
-                "parent_id": parent_id,
-                "symbol": symbol,
-                "side": side_map.get(symbol, "long"),
-                "filled_at": (
-                    filled_at_ts.to_pydatetime()
-                    if pd.notna(filled_at_ts)
-                    else None
-                ),
-                "qty": qty,
-                "avg_fill": avg_fill,
-                "avg_px_symbol": avg_px_symbol,
-                "sl_child": None,
-                "sl_px": sl_px,
-                "tp_child": None,
-                "tp_px": tp_px,
-                "mkt_px": mkt_px,
-                "moved_flag": "—",
-                "buy_value": None,
-                "holding_days": None,
-                "mkt_value": None,
-                "profit_loss": None,
-                "profit_loss_lot": None,
-                "tp_sl_reach_pct": None,
-                "updated_at": now_utc,
-            }
-
-            mgr.sym2pid.setdefault(symbol, set()).add(parent_id)
             _maybe_mark_moved_flag(mgr, row)
             refresh_row_metrics(row, now_utc)
+            mgr.sym2pid.setdefault(symbol, set()).add(parent_id)
             await mgr._upsert(row, force_push=True)
             kept += 1
             new_ids.add(parent_id)
         except Exception:
             mgr.log.exception(
-                "Snapshot: failed to upsert parent %s", r.get("Parent ID")
+                "Snapshot: failed to upsert parent %s", parent_id
             )
 
     gone = prev_ids - new_ids
     for pid in gone:
         await mgr._delete(pid, skip_closed=True)
+
+    symbol_series = (
+        open_df["Symbol"]
+        if "Symbol" in open_df.columns
+        else pd.Series(dtype=str)
+    )
+    sym_set = {
+        str(sym).upper()
+        for sym in symbol_series.dropna().unique()
+    }
 
     mgr.log.info("Bootstrap stored %d open parents.", kept)
     mgr._trace(
@@ -238,104 +282,81 @@ async def refresh_symbol_snapshot(
 
     mgr._sym_refresh_inflight.add(sym)
     try:
-        orders_df = mgr._pull_orders()
-        if orders_df.empty:
+        try:
+            positions = mgr.rest.list_positions()
+        except Exception:
+            mgr.log.exception("Symbol snapshot: failed to list positions")
+            positions = []
+
+        side_map = _build_side_map(positions)
+        try:
+            orders_df = fetch_orders(mgr.rest, days_back=365)
+        except Exception:
+            mgr.log.exception("Symbol snapshot: failed to fetch orders")
+            orders_df = pd.DataFrame()
+
+        try:
+            activities_df = fetch_all_activities(mgr.rest)
+        except Exception:
+            mgr.log.exception("Symbol snapshot: failed to fetch activities")
+            activities_df = pd.DataFrame()
+
+        if "activity_type" in activities_df.columns:
+            fills_df = activities_df[
+                activities_df["activity_type"] == "FILL"
+            ].copy()
+        else:
+            fills_df = pd.DataFrame()
+
+        if "symbol" in fills_df.columns:
+            fills_df = fills_df[
+                fills_df["symbol"]
+                .astype(str)
+                .str.upper()
+                .eq(sym)
+            ].copy()
+
+        if not orders_df.empty and "symbol" in orders_df.columns:
+            orders_df = orders_df[
+                orders_df["symbol"]
+                .astype(str)
+                .str.upper()
+                .eq(sym)
+            ].copy()
+        else:
+            orders_df = orders_df.copy()
+
+        open_df = build_lot_portfolio(fills_df, orders_df, api=mgr.rest)
+        if open_df is None or open_df.empty:
             for pid in list(mgr.sym2pid.get(sym, set())):
                 await mgr._delete(pid, skip_closed=True)
             return
 
-        df_sym = orders_df[
-            orders_df["symbol"].astype(str).str.upper() == sym
-        ].copy()
-        if df_sym.empty:
-            for pid in list(mgr.sym2pid.get(sym, set())):
-                await mgr._delete(pid, skip_closed=True)
-            return
+        if "Symbol" in open_df.columns:
+            open_df = open_df[
+                open_df["Symbol"]
+                .astype(str)
+                .str.upper()
+                .eq(sym)
+            ].copy()
 
-        open_df = build_open_positions_df(df_sym, mgr.rest)
         now_utc = _utcnow()
         new_ids: Set[str] = set()
-
-        def _side_for_symbol(s: str) -> str:
-            try:
-                pos = mgr.rest.get_position(s)
-                q = float(getattr(pos, "qty", 0.0) or 0.0)
-                return "short" if q < 0 else "long"
-            except Exception:
-                return "long"
+        prev_ids = set(mgr.sym2pid.get(sym, set()))
 
         if open_df is not None and not open_df.empty:
-            for _, r in open_df.iterrows():
-                parent_id = str(r.get("Parent ID") or "")
-                if not parent_id:
+            for _, entry in open_df.iterrows():
+                row = _build_live_row(
+                    mgr, entry, now_utc, side_map, symbol_hint=sym
+                )
+                if row is None:
                     continue
 
-                filled_at_ts = pd.to_datetime(
-                    r.get("Buy Date"), utc=True, errors="coerce"
-                )
-                qty = int(float(r.get("Buy Qty") or 0))
-                avg_fill = (
-                    float(r.get("Buy Price"))
-                    if pd.notna(r.get("Buy Price"))
-                    else None
-                )
-                avg_px_symbol = (
-                    float(r.get("_avg_px_symbol"))
-                    if (
-                        "_avg_px_symbol" in r
-                        and pd.notna(r.get("_avg_px_symbol"))
-                    )
-                    else avg_fill
-                )
-                sl_px = (
-                    float(r.get("Stop_Loss_Price"))
-                    if pd.notna(r.get("Stop_Loss_Price"))
-                    else None
-                )
-                tp_px = (
-                    float(r.get("Take_Profit_Price"))
-                    if pd.notna(r.get("Take_Profit_Price"))
-                    else None
-                )
-                mkt_px = (
-                    float(r.get("Current_Price"))
-                    if pd.notna(r.get("Current_Price"))
-                    else None
-                )
-                if mkt_px is None:
-                    mkt_px = _last_trade_px(mgr.rest, sym)
-
-                row: Dict[str, Any] = {
-                    "parent_id": parent_id,
-                    "symbol": sym,
-                    "side": _side_for_symbol(sym),
-                    "filled_at": (
-                        filled_at_ts.to_pydatetime()
-                        if pd.notna(filled_at_ts)
-                        else None
-                    ),
-                    "qty": qty,
-                    "avg_fill": avg_fill,
-                    "avg_px_symbol": avg_px_symbol,
-                    "sl_child": None,
-                    "sl_px": sl_px,
-                    "tp_child": None,
-                    "tp_px": tp_px,
-                    "mkt_px": mkt_px,
-                    "moved_flag": "—",
-                    "buy_value": None,
-                    "holding_days": None,
-                    "mkt_value": None,
-                    "profit_loss": None,
-                    "profit_loss_lot": None,
-                    "tp_sl_reach_pct": None,
-                    "updated_at": now_utc,
-                }
-
+                parent_id = row["parent_id"]
                 try:
                     _maybe_mark_moved_flag(mgr, row)
-                    mgr.sym2pid.setdefault(sym, set()).add(parent_id)
                     refresh_row_metrics(row, now_utc)
+                    mgr.sym2pid.setdefault(sym, set()).add(parent_id)
                     await mgr._upsert(row, force_push=True)
                     new_ids.add(parent_id)
                 except Exception:
@@ -344,7 +365,7 @@ async def refresh_symbol_snapshot(
                         parent_id,
                     )
 
-        gone = set(mgr.sym2pid.get(sym, set())) - new_ids
+        gone = prev_ids - new_ids
         for pid in list(gone):
             await mgr._delete(pid, skip_closed=True)
     except Exception:
