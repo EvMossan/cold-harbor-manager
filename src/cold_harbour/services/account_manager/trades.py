@@ -47,15 +47,20 @@ async def sync_orders(
     """Fetch new orders, merge with cache, and return the full history."""
     now_ts = _utcnow()
     last_sync = mgr._last_orders_sync_time
+    log = mgr.log.with_module("sync_orders")
     if last_sync is None or mgr._orders_cache.empty:
         start_ts = now_ts - timedelta(days=max_lookback_days)
-        mgr.log.info("Initial Load: Downloading full history")
+        log.info(
+            "Initial Load: Downloading full history lookback=%d days",
+            max_lookback_days,
+        )
     else:
         start_ts = last_sync - timedelta(minutes=30)
         delta = now_ts - last_sync
         minutes = int(delta.total_seconds() / 60) + 30
-        mgr.log.info(
-            "Incremental Load: Checking last %d minutes", minutes
+        log.info(
+            "Incremental Load: Checking last %d minutes lookback=30m overlap",
+            minutes,
         )
     end_ts = now_ts + timedelta(minutes=1)
     fetched = fetch_orders(
@@ -115,6 +120,7 @@ async def _sync_avg_px_symbol(
 
 async def _sync_closed_trades(mgr: "AccountManager") -> None:
     """Recompute closed trades from a safe start anchor."""
+    log = mgr.log.with_module("closed_trades")
     orders_df = await sync_orders(mgr)
     if orders_df.empty:
         return
@@ -122,7 +128,7 @@ async def _sync_closed_trades(mgr: "AccountManager") -> None:
     try:
         activities_df = fetch_all_activities(mgr.rest)
     except Exception:
-        mgr.log.exception("Closed trades: failed to fetch activities")
+        log.exception("Closed trades: failed to fetch activities")
         activities_df = pd.DataFrame()
 
     if "activity_type" in activities_df.columns:

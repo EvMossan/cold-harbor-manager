@@ -182,12 +182,13 @@ def _maybe_mark_moved_flag(
 
 async def initial_snapshot(mgr: "AccountManager") -> None:
     """Build a snapshot of all open parents with KPIs pre-filled."""
-    mgr.log.info("Bootstrap: scanning live positions …")
+    log = mgr.log.with_module("snapshot")
+    log.info("Bootstrap: scanning live positions …")
 
     try:
         positions = mgr.rest.list_positions()
     except Exception:
-        mgr.log.exception("Snapshot: failed to list live positions")
+        log.exception("Snapshot: failed to list live positions")
         positions = []
 
     side_map = _build_side_map(positions)
@@ -196,13 +197,13 @@ async def initial_snapshot(mgr: "AccountManager") -> None:
     try:
         orders_df = await trades.sync_orders(mgr)
     except Exception:
-        mgr.log.exception("Snapshot: failed to fetch orders")
+        log.exception("Snapshot: failed to fetch orders")
         orders_df = pd.DataFrame()
 
     try:
         activities_df = fetch_all_activities(mgr.rest)
     except Exception:
-        mgr.log.exception("Snapshot: failed to fetch activities")
+        log.exception("Snapshot: failed to fetch activities")
         activities_df = pd.DataFrame()
 
     if "activity_type" in activities_df.columns:
@@ -216,7 +217,7 @@ async def initial_snapshot(mgr: "AccountManager") -> None:
     if open_df is None or open_df.empty:
         for pid in list(prev_ids):
             await mgr._delete(pid, skip_closed=True)
-        mgr.log.info("Bootstrap stored 0 open parents.")
+        log.info("Bootstrap stored 0 open parents.")
         mgr._snapshot_last_complete = _utcnow()
         mgr._snapshot_ready = True
         return
@@ -239,7 +240,7 @@ async def initial_snapshot(mgr: "AccountManager") -> None:
             kept += 1
             new_ids.add(parent_id)
         except Exception:
-            mgr.log.exception(
+            log.exception(
                 "Snapshot: failed to upsert parent %s", parent_id
             )
 
@@ -257,7 +258,7 @@ async def initial_snapshot(mgr: "AccountManager") -> None:
         for sym in symbol_series.dropna().unique()
     }
 
-    mgr.log.info("Bootstrap stored %d open parents.", kept)
+    log.info("Bootstrap stored %d open parents.", kept)
     mgr._trace(
         "snapshot:open_df",
         rows=int(open_df.shape[0]),
@@ -282,23 +283,24 @@ async def refresh_symbol_snapshot(
 
     mgr._sym_refresh_inflight.add(sym)
     try:
+        log = mgr.log.with_module("symbol_snapshot")
         try:
             positions = mgr.rest.list_positions()
         except Exception:
-            mgr.log.exception("Symbol snapshot: failed to list positions")
+            log.exception("Symbol snapshot: failed to list positions")
             positions = []
 
         side_map = _build_side_map(positions)
         try:
             orders_df = await trades.sync_orders(mgr)
         except Exception:
-            mgr.log.exception("Symbol snapshot: failed to fetch orders")
+            log.exception("Symbol snapshot: failed to fetch orders")
             orders_df = pd.DataFrame()
 
         try:
             activities_df = fetch_all_activities(mgr.rest)
         except Exception:
-            mgr.log.exception("Symbol snapshot: failed to fetch activities")
+            log.exception("Symbol snapshot: failed to fetch activities")
             activities_df = pd.DataFrame()
 
         if "activity_type" in activities_df.columns:
@@ -369,6 +371,6 @@ async def refresh_symbol_snapshot(
         for pid in list(gone):
             await mgr._delete(pid, skip_closed=True)
     except Exception:
-        mgr.log.exception("symbol snapshot failed for %s", sym)
+        log.exception("symbol snapshot failed for %s", sym)
     finally:
         mgr._sym_refresh_inflight.discard(sym)

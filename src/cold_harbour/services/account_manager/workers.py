@@ -29,7 +29,8 @@ async def price_listener(mgr: "AccountManager") -> None:
     endpoint = mgr.c.ZMQ_SIP_STREAM_ENDPOINT
     sock.connect(endpoint)
     sock.setsockopt(zmq.SUBSCRIBE, b"")
-    mgr.log.info("ZMQ price stream connected %s", endpoint)
+    log = mgr.log.with_module("price_listener")
+    log.info("ZMQ price stream connected %s", endpoint)
 
     threshold = mgr.UI_PUSH_PCT_THRESHOLD
 
@@ -95,13 +96,14 @@ async def price_listener(mgr: "AccountManager") -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            mgr.log.warning("price listener error: %s", exc)
+            log.warning("price listener error: %s", exc)
             await asyncio.sleep(0.1)
 
 
 async def db_worker(mgr: "AccountManager") -> None:
     """Flush rows marked dirty in regular intervals."""
     await asyncio.sleep(0)
+    log = mgr.log.with_module("db_worker")
 
     while True:
         try:
@@ -121,13 +123,14 @@ async def db_worker(mgr: "AccountManager") -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            mgr.log.warning("db_worker error: %s", exc)
+            log.warning("db_worker error: %s", exc)
         finally:
             await asyncio.sleep(mgr.FLUSH_INTERVAL_S)
 
 
 async def snapshot_loop(mgr: "AccountManager") -> None:
     """Rebuild in-memory state from scratch on a timer."""
+    log = mgr.log.with_module("snapshot_loop")
     while True:
         await mgr._sleep_until_boundary(mgr.SNAPSHOT_SEC)
         async with mgr._snap_lock:
@@ -135,18 +138,19 @@ async def snapshot_loop(mgr: "AccountManager") -> None:
                 mgr._maybe_reset_orders_cache()
                 await mgr._initial_snapshot()
             except Exception:
-                mgr.log.exception("snapshot refresh failed")
+                log.exception("snapshot refresh failed")
 
 
 async def closed_trades_worker(mgr: "AccountManager") -> None:
     """Incrementally sync closed trades at an interval."""
+    log = mgr.log.with_module("closed_trades_worker")
     while True:
         try:
             await mgr._sync_closed_trades()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            mgr.log.warning("closed_trades_worker error: %s", exc)
+            log.warning("closed_trades_worker error: %s", exc)
         finally:
             await mgr._sleep_until_boundary(mgr.CLOSED_SYNC_SEC)
 
@@ -154,6 +158,7 @@ async def closed_trades_worker(mgr: "AccountManager") -> None:
 async def metrics_worker(mgr: "AccountManager") -> None:
     """Compute account metrics and persist a single JSON document."""
     interval = max(30, int(mgr.CLOSED_SYNC_SEC))
+    log = mgr.log.with_module("metrics_worker")
     while True:
         try:
             payload = await _build_metrics_payload(mgr)
@@ -172,7 +177,7 @@ async def metrics_worker(mgr: "AccountManager") -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            mgr.log.warning("metrics_worker error: %s", exc)
+            log.warning("metrics_worker error: %s", exc)
         finally:
             await asyncio.sleep(interval)
 
@@ -301,6 +306,7 @@ async def _build_metrics_payload(
 
 async def ui_heartbeat_worker(mgr: "AccountManager") -> None:
     """Emit periodic heartbeat notifications for the UI."""
+    log = mgr.log.with_module("ui_heartbeat")
     while True:
         try:
             payload = json.dumps(
@@ -315,6 +321,6 @@ async def ui_heartbeat_worker(mgr: "AccountManager") -> None:
                 payload,
             )
         except Exception as exc:
-            mgr.log.debug("ui_heartbeat note: %s", exc)
+            log.debug("ui_heartbeat note: %s", exc)
         finally:
             await mgr._sleep_until_boundary(mgr.UI_SNAPSHOT_SEC)

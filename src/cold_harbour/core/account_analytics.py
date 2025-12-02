@@ -49,10 +49,10 @@ def fetch_orders(
         target_start = target_end - timedelta(days=days_back)
 
     actual_days = max(1, (target_end - target_start).days)
-    print(
-        f">>> ROBUST ORDER DOWNLOAD ({target_start.date()} -> "
-        f"{target_end.date()}, ~{actual_days} days)..."
-    )
+    # print(
+    #     f">>> ROBUST ORDER DOWNLOAD ({target_start.date()} -> "
+    #     f"{target_end.date()}, ~{actual_days} days)..."
+    # )
     all_raw_orders = []
     seen_ids = set()
     window_size = timedelta(days=5)
@@ -87,11 +87,11 @@ def fetch_orders(
 
     # --- UNPACKING AND CLEANING ---
     if not all_raw_orders:
-        print("No orders found.")
+        # print("No orders found.")
         return pd.DataFrame()
 
-    print(f"Total objects downloaded: {len(all_raw_orders)}. "
-          f"Starting unpacking...")
+    # print(f"Total objects downloaded: {len(all_raw_orders)}. "
+    #       f"Starting unpacking...")
 
     flat_rows = []
     seen_ids = set()  # Protection against duplicates at date boundaries
@@ -133,8 +133,8 @@ def fetch_orders(
     if 'created_at' in df.columns:
         df = df.sort_values('created_at', ascending=False)
 
-    print(f"SUCCESS. Final table: {len(df)} rows. "
-          f"(Check for presence of 2025-10-23)")
+    # print(f"SUCCESS. Final table: {len(df)} rows. "
+    #       f"(Check for presence of 2025-10-23)")
     return df
 
 
@@ -146,7 +146,7 @@ def fetch_orders_fast(api, days_back=365):
     Alpaca cursors. Simply takes date intervals and downloads everything
     within them.
     """
-    print(f">>> ROBUST ORDER DOWNLOAD (last {days_back} days)...")
+    # print(f">>> ROBUST ORDER DOWNLOAD (last {days_back} days)...")
 
     # 1. Define time boundaries
     # Set the end date to tomorrow for reliability.

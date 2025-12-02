@@ -11,6 +11,7 @@ import pandas as pd
 from alpaca_trade_api.rest import REST
 from alpaca_trade_api.stream import Stream
 
+from cold_harbour.core.account_analytics import fetch_orders
 from cold_harbour.infrastructure.db import AsyncAccountRepository
 from . import storage, transform
 from .config import IngesterConfig
@@ -22,128 +23,46 @@ def _get_rest_client(api_key: str, secret_key: str, base_url: str) -> REST:
     return REST(api_key, secret_key, base_url)
 
 
-def _to_datetime(value: Any) -> Optional[datetime]:
-    """Parse Alpaca timestamps to UTC datetimes."""
-    if value is None:
+def _timestamp_to_datetime(value: Any) -> Optional[datetime]:
+    """Convert pandas-compatible timestamps to datetimes."""
+    if pd.isna(value):
         return None
-    try:
-        parsed = pd.to_datetime(value, utc=True, errors="coerce")
-        if pd.isna(parsed):
-            return None
-        return parsed.to_pydatetime()
-    except Exception:
-        return None
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime()
+    if isinstance(value, datetime):
+        return value
+    return None
 
 
-def _sync_determine_backfill_start(rest: REST) -> datetime:
-    """Find the oldest known activity/order to limit the backfill range."""
-    try:
-        first_orders = rest.list_orders(
-            status="all",
-            limit=1,
-            direction="asc",
-            nested=True,
+def _df_to_ingest_records(df: pd.DataFrame) -> List[dict[str, Any]]:
+    """Transform fetched order table into storage-ready records."""
+    ingest_time = datetime.now(timezone.utc)
+    records: List[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        records.append(
+            {
+                "id": row.get("id"),
+                "client_order_id": row.get("client_order_id"),
+                "symbol": row.get("symbol"),
+                "side": row.get("side"),
+                "type": row.get("order_type"),
+                "status": row.get("status"),
+                "qty": row.get("qty"),
+                "filled_qty": row.get("filled_qty"),
+                "filled_avg_price": row.get("filled_avg_price"),
+                "limit_price": row.get("limit_price"),
+                "stop_price": row.get("stop_price"),
+                "created_at": _timestamp_to_datetime(row.get("created_at")),
+                "updated_at": _timestamp_to_datetime(row.get("updated_at")),
+                "submitted_at": _timestamp_to_datetime(row.get("submitted_at")),
+                "filled_at": _timestamp_to_datetime(row.get("filled_at")),
+                "expired_at": _timestamp_to_datetime(row.get("expired_at")),
+                "canceled_at": _timestamp_to_datetime(row.get("canceled_at")),
+                "raw_json": None,
+                "ingested_at": ingest_time,
+            }
         )
-        if first_orders:
-            dt = _to_datetime(getattr(first_orders[0], "created_at", None))
-            if dt:
-                log.info(f"Detected first order timestamp: {dt}")
-                return dt
-
-        account = rest.get_account()
-        account_created = _to_datetime(getattr(account, "created_at", None))
-        if account_created:
-            log.info(
-                f"No orders found; using account creation date {account_created}"
-            )
-            return account_created
-    except Exception as exc:
-        log.warning(f"Could not determine earliest start date: {exc}")
-
-    fallback = pd.Timestamp.now(tz=timezone.utc) - timedelta(
-        days=IngesterConfig.BACKFILL_DAYS
-    )
-    log.info(f"Falling back to default backfill window: {fallback}")
-    return fallback.to_pydatetime()
-
-
-async def _determine_backfill_start(rest: REST) -> datetime:
-    """Async wrapper around the blocking Alpaca helper."""
-    return await asyncio.to_thread(_sync_determine_backfill_start, rest)
-
-
-async def _fetch_and_ingest_window(
-    repo: AsyncAccountRepository,
-    rest: REST,
-    slug: str,
-    start: datetime,
-    end: datetime,
-) -> None:
-    """
-    Helper: Fetch Orders and Activities for a specific time window via REST
-    and upsert them into the DB.
-    """
-    start_iso = start.isoformat()
-    end_iso = end.isoformat()
-    
-    # 1. Fetch Orders (nested=True to get legs)
-    # Using 'after'/'until' logic similar to the robust sliding window method
-    try:
-        # Alpaca list_orders doesn't support 'after'/'until' strictly in all lib versions
-        # but standard params are usually 'after' and 'until' for dates.
-        # We fetch 'all' statuses to capture history.
-        orders = rest.list_orders(
-            status="all",
-            limit=500,
-            nested=True,
-            direction="asc",  # Oldest first within window
-            after=start_iso,
-            until=end_iso,
-        )
-        
-        # Normalize and Flatten
-        flat_orders = []
-        for o in orders:
-            # Handle Alpaca object to dict
-            raw = o._raw if hasattr(o, "_raw") else o
-            flat_orders.append(transform.normalize_order(raw))
-            
-            # Handle legs if present (bracket orders)
-            legs = raw.get("legs", [])
-            if legs:
-                for leg in legs:
-                    # Leg usually doesn't have parent_id populated inside 'legs' list
-                    # depending on API version, but we treat it as a standalone order update
-                    flat_orders.append(transform.normalize_order(leg))
-
-        if flat_orders:
-            count = await storage.upsert_orders(repo, slug, flat_orders)
-            log.debug(f"[{slug}] Ingested {count} orders from REST window {start_iso}")
-
-    except Exception as e:
-        log.error(f"[{slug}] Error fetching orders for {start_iso}: {e}")
-
-    # 2. Fetch Activities (FILL, DIV, etc.)
-    try:
-        # activity_types=None fetches ALL types
-        activities = rest.get_activities(
-            after=start_iso,
-            until=end_iso,
-            direction="asc",
-            page_size=100
-        )
-        
-        norm_activities = []
-        for a in activities:
-            raw = a._raw if hasattr(a, "_raw") else a
-            norm_activities.append(transform.normalize_rest_activity(raw))
-            
-        if norm_activities:
-            count = await storage.upsert_activities(repo, slug, norm_activities)
-            log.debug(f"[{slug}] Ingested {count} activities from REST window {start_iso}")
-
-    except Exception as e:
-        log.error(f"[{slug}] Error fetching activities for {start_iso}: {e}")
+    return records
 
 
 async def run_backfill_task(
@@ -155,47 +74,33 @@ async def run_backfill_task(
 ) -> None:
     """
     One-off task on startup.
-    Checks DB for latest data. If empty or stale, fetches history up to NOW.
+    Uses the latest order time as a watermark for fetch_orders.
     """
     log.info(f"[{slug}] Starting Backfill/Catch-up check...")
-    
-    # 1. Determine Start Time
-    last_update = await storage.get_latest_order_time(repo, slug)
-    now = datetime.now(timezone.utc)
     rest = _get_rest_client(api_key, secret_key, base_url)
+    now = datetime.now(timezone.utc)
+    last_update = await storage.get_latest_order_time(repo, slug)
 
     if last_update:
-        # We have data, start slightly before last update to ensure overlap
-        start_cursor = last_update - timedelta(minutes=10)
-        log.info(f"[{slug}] Found existing data. Catching up from {start_cursor}")
+        start_date = last_update - timedelta(minutes=30)
+        log.info(f"[{slug}] Incremental backfill from {start_date}")
     else:
-        # No data, query the API for the earliest available timestamp
-        start_cursor = await _determine_backfill_start(rest)
-        log.info(
-            f"[{slug}] Database empty. Starting full backfill from "
-            f"{start_cursor}"
-        )
+        start_date = now - timedelta(days=365)
+        log.info(f"[{slug}] Initial backfill (365 days)")
 
-    log.info(
-        f"[{slug}] Backfill range determined: {start_cursor.isoformat()} -> "
-        f"{now.isoformat()}"
-    )
+    try:
+        df = fetch_orders(rest, start_date=start_date)
+    except Exception as exc:
+        log.error(f"[{slug}] fetch_orders failed: {exc}")
+        return
 
-    # 2. Sliding Window Loop
-    # We move in 5-day chunks to be safe with API limits
-    window_size = timedelta(days=5)
-    current_start = start_cursor
+    if df.empty:
+        log.info(f"[{slug}] No orders returned; backfill is complete.")
+        return
 
-    while current_start < now:
-        current_end = min(current_start + window_size, now + timedelta(minutes=1))
-        
-        await _fetch_and_ingest_window(repo, rest, slug, current_start, current_end)
-        
-        current_start = current_end
-        # Slight pause to be nice to API rate limits
-        await asyncio.sleep(0.2)
-
-    log.info(f"[{slug}] Backfill complete.")
+    records = _df_to_ingest_records(df)
+    count = await storage.upsert_orders(repo, slug, records)
+    log.info(f"[{slug}] Upserted {count} orders from fetch_orders.")
 
 
 async def run_healing_worker(
@@ -211,26 +116,25 @@ async def run_healing_worker(
     """
     log.info(f"[{slug}] Healing worker started.")
     rest = _get_rest_client(api_key, secret_key, base_url)
-    
     while True:
         try:
             await asyncio.sleep(IngesterConfig.HEALING_INTERVAL_SEC)
-            
             now = datetime.now(timezone.utc)
-            lookback = timedelta(seconds=IngesterConfig.HEALING_LOOKBACK_SEC)
-            start_time = now - lookback
-            
-            log.debug(f"[{slug}] Running healing cycle from {start_time}")
-            
-            # Re-fetch recent data.
-            # Upsert logic in storage handles deduplication (idempotency).
-            await _fetch_and_ingest_window(repo, rest, slug, start_time, now)
-            
+            start_date = now - timedelta(
+                seconds=IngesterConfig.HEALING_LOOKBACK_SEC
+            )
+            log.debug(f"[{slug}] Running healing cycle from {start_date}")
+            df = fetch_orders(rest, start_date=start_date)
+            if df.empty:
+                continue
+            records = _df_to_ingest_records(df)
+            count = await storage.upsert_orders(repo, slug, records)
+            log.debug(f"[{slug}] Healing upserted {count} orders.")
         except asyncio.CancelledError:
             log.info(f"[{slug}] Healing worker cancelled.")
             break
-        except Exception as e:
-            log.error(f"[{slug}] Healing worker crashed (retrying): {e}")
+        except Exception as exc:
+            log.error(f"[{slug}] Healing worker crashed (retrying): {exc}")
             await asyncio.sleep(60)
 
 

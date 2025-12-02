@@ -46,6 +46,40 @@ from cold_harbour.services.account_manager.utils import (
     _utcnow,
 )
 
+
+class AccountLoggerAdapter(logging.LoggerAdapter):
+    """Logger adapter that adds account/module metadata for formatting."""
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        account_label: str,
+        default_module: str = "account_mgr",
+    ):
+        super().__init__(
+            logger,
+            {
+                "account": account_label,
+                "log_module": default_module,
+            },
+        )
+        self._account_label = account_label
+        self._default_module = default_module
+
+    def process(self, msg, kwargs):
+        extra = dict(self.extra)
+        overrides = kwargs.get("extra")
+        if overrides:
+            extra.update(overrides)
+        kwargs["extra"] = extra
+        return msg, kwargs
+
+    def with_module(self, module: str) -> "AccountLoggerAdapter":
+        """Return a short-lived adapter with a module override."""
+        return AccountLoggerAdapter(
+            self.logger, self._account_label, default_module=module
+        )
+
 #  AccountManager
 # ──────────────────────────────────────────────────────────────────────
 
@@ -300,19 +334,20 @@ class AccountManager:
         # formatter and disable propagation to avoid double-printing when the
         # root logger already has handlers (e.g. under Airflow).
         log_name = f"AccountMgr[{self.account_label}]"
-        self.log = logging.getLogger(log_name)
-        if not self.log.handlers:
+        base_logger = logging.getLogger(log_name)
+        self.log = base_logger
+        if not base_logger.handlers:
             handler = logging.StreamHandler(stream=sys.stdout)
-            fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+            fmt = (
+                "%(asctime)s %(levelname)-5s "
+                "%(account)s %(log_module)-15s %(message)s"
+            )
             datefmt = "%Y-%m-%d %H:%M:%S"
             formatter = logging.Formatter(fmt=fmt, datefmt=datefmt)
-            # Use local time for timestamps as requested
             formatter.converter = time.localtime  # type: ignore[attr-defined]
             handler.setFormatter(formatter)
-            self.log.addHandler(handler)
+            base_logger.addHandler(handler)
 
-            # Resolve logging level from cfg/env; default to DEBUG to make
-            # troubleshooting easier unless explicitly overridden.
             def _parse_level(v: Optional[str]) -> int:
                 try:
                     if not v:
@@ -328,11 +363,14 @@ class AccountManager:
                 or os.getenv("LOG_LEVEL")
                 or "DEBUG"
             )
-            self.log.setLevel(_parse_level(lvl_name))
-            # Let the logger level control filtering; keep handler open
+            base_logger.setLevel(_parse_level(lvl_name))
             handler.setLevel(logging.NOTSET)
-            # Prevent propagation to root to avoid duplicates
-            self.log.propagate = False
+            base_logger.propagate = False
+
+        padded_label = f"{log_name:<20}"
+        self.log = AccountLoggerAdapter(
+            base_logger, padded_label, default_module="runtime"
+        )
 
         if self.disable_session_sleep:
             self.log.info("Session sleep logic disabled by configuration.")

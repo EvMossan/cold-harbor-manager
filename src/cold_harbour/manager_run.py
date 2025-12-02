@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 from typing import Dict, Any, List
 
 import nest_asyncio
@@ -22,10 +23,57 @@ import nest_asyncio
 from cold_harbour.services.account_manager import AccountManager
 from cold_harbour.core.destinations import (
     DESTINATIONS,
-    slug_for,
     account_table_names,
     notify_channels_for,
 )
+
+
+class _StreamToLogger:
+    """Proxy stdout/stderr writes into the logging system."""
+
+    def __init__(self, logger: logging.Logger, level: int) -> None:
+        self.logger = logger
+        self.level = level
+        self._buffer = ""
+
+    def write(self, message: str) -> None:
+        if not message:
+            return
+        self._buffer += message
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line:
+                self.logger.log(self.level, line)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self.logger.log(self.level, self._buffer)
+            self._buffer = ""
+
+
+class _DefaultFormatter(logging.Formatter):
+    """Formatter that guarantees account/module metadata for every record."""
+
+    def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
+        if not hasattr(record, "account"):
+            record.account = "AccountMgr[system]".ljust(20)
+        if not hasattr(record, "log_module"):
+            record.log_module = "global"
+        return super().format(record)
+
+
+class _ModuleFilter(logging.Filter):
+    """Attach a stable module+account label to downstream log records."""
+
+    def __init__(self, module: str):
+        super().__init__()
+        self.module = module
+
+    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+        if not hasattr(record, "account"):
+            record.account = "AccountMgr[system]".ljust(20)
+        record.log_module = self.module
+        return True
 
 
 def _common_cfg() -> Dict[str, Any]:
@@ -118,6 +166,43 @@ def _cfg_for(dest: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
+def _configure_logging() -> None:
+    """Apply the shared account/module formatter to every logger."""
+    fmt = (
+        "%(asctime)s %(levelname)-5s "
+        "%(account)s %(log_module)-15s %(message)s"
+    )
+    datefmt = "%Y-%m-%d %H:%M:%S"
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_DefaultFormatter(fmt=fmt, datefmt=datefmt))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    logger_map = {
+        "alpaca_trade_api": ("alpaca_api", logging.INFO),
+        "alpaca_trade_api.stream": ("alpaca_stream", logging.INFO),
+        "alpaca.trading.stream": ("alpaca_stream", logging.INFO),
+        "urllib3": ("urllib3", logging.WARNING),
+        "websockets.protocol": ("websockets", logging.INFO),
+        "websockets.handshake": ("websockets", logging.INFO),
+        "websockets.server": ("websockets", logging.INFO),
+        "websockets.client": ("websockets", logging.INFO),
+        "websockets.connection": ("websockets", logging.INFO),
+    }
+    for name, (module, lvl) in logger_map.items():
+        logger = logging.getLogger(name)
+        logger.setLevel(lvl)
+        logger.addFilter(_ModuleFilter(module))
+    sys.stdout = _StreamToLogger(
+        logging.getLogger("AccountMgr[stdout]"), logging.INFO
+    )
+    sys.stderr = _StreamToLogger(
+        logging.getLogger("AccountMgr[stderr]"), logging.ERROR
+    )
+    logging.captureWarnings(True)
+
+
 async def _run_all(managers: List[AccountManager]) -> None:
     """Run all managers concurrently with a shared stop event."""
     stop_evt = asyncio.Event()
@@ -150,9 +235,7 @@ async def _run_all(managers: List[AccountManager]) -> None:
 
 def main() -> None:
     nest_asyncio.apply()
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "DEBUG"))
-    logging.basicConfig(level=logging.INFO, force=True)
-    logging.getLogger("alpaca_trade_api.stream").setLevel(logging.INFO)
+    _configure_logging()
     logging.getLogger("AccountMgr").setLevel(logging.DEBUG)
 
     managers = [AccountManager(_cfg_for(d)) for d in DESTINATIONS]
