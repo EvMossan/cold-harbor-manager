@@ -132,6 +132,7 @@ async def snapshot_loop(mgr: "AccountManager") -> None:
         await mgr._sleep_until_boundary(mgr.SNAPSHOT_SEC)
         async with mgr._snap_lock:
             try:
+                mgr._maybe_reset_orders_cache()
                 await mgr._initial_snapshot()
             except Exception:
                 mgr.log.exception("snapshot refresh failed")

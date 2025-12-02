@@ -6,7 +6,26 @@ import numpy as np
 import pandas as pd
 
 
-def fetch_orders(api, days_back=365):
+def _normalize_timestamp(
+    value: Optional[datetime], *, default: datetime
+) -> datetime:
+    if value is None:
+        return default
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(timezone.utc)
+    else:
+        ts = ts.astimezone(timezone.utc)
+    return ts
+
+
+def fetch_orders(
+    api,
+    days_back=365,
+    *,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+):
     """
     Downloads orders using the "Sliding Window" (Time Window) method.
 
@@ -19,55 +38,60 @@ def fetch_orders(api, days_back=365):
     # 1. Define time boundaries
     # Since the simulation is in the future (2025), take 'now' from
     # the API or system. For reliability, set the end date to tomorrow.
-    end_date = pd.Timestamp.now(tz=timezone.utc) + timedelta(days=1)
-    start_date = end_date - timedelta(days=days_back)
+    now = pd.Timestamp.now(tz=timezone.utc)
+    target_end = _normalize_timestamp(
+        end_date, default=now + timedelta(days=1)
+    )
+    target_start = _normalize_timestamp(
+        start_date, default=target_end - timedelta(days=days_back)
+    )
+    if target_start >= target_end:
+        target_start = target_end - timedelta(days=days_back)
 
+    actual_days = max(1, (target_end - target_start).days)
+    print(
+        f">>> ROBUST ORDER DOWNLOAD ({target_start.date()} -> "
+        f"{target_end.date()}, ~{actual_days} days)..."
+    )
     all_raw_orders = []
-
-    # Window size in days (if too large, API might truncate data)
-    # 5 days is optimal for status='all' + nested=True
+    seen_ids = set()
     window_size = timedelta(days=5)
+    current_start = target_start
 
-    current_start = start_date
-
-    while current_start < end_date:
-        current_end = current_start + window_size
-
-        # Format dates for API (ISO format)
+    while current_start < target_end:
+        current_end = min(
+            current_start + window_size, target_end
+        )
         t_start = current_start.isoformat()
         t_end = current_end.isoformat()
-
-        # print(f"   Requesting window: {current_start.date()} -> "
-        #       f"{current_end.date()}")
-
         try:
-            # Request a specific chunk of time
-            # 'after'/'until' work more reliably than 'page_token'
             batch = api.list_orders(
-                status='all',
+                status="all",
                 limit=500,
                 nested=True,
                 after=t_start,
                 until=t_end,
-                direction='desc'
+                direction="desc",
             )
-
-            if batch:
-                all_raw_orders.extend(batch)
-                # print(f"      -> Found {len(batch)} orders")
-
-        except Exception as e:
-            print(f"   [Error] In window {t_start}: {e}")
-
-        current_start += window_size
+        except Exception as exc:
+            print(f"   [Error] In window {t_start}: {exc}")
+            raise exc
+        if batch:
+            for order_obj in batch:
+                root = getattr(order_obj, "_raw", order_obj)
+                if root["id"] in seen_ids:
+                    continue
+                seen_ids.add(root["id"])
+                all_raw_orders.append(order_obj)
+        current_start = current_end
 
     # --- UNPACKING AND CLEANING ---
     if not all_raw_orders:
         print("No orders found.")
         return pd.DataFrame()
 
-    # print(f"Total objects downloaded: {len(all_raw_orders)}. "
-    #       f"Starting unpacking...")
+    print(f"Total objects downloaded: {len(all_raw_orders)}. "
+          f"Starting unpacking...")
 
     flat_rows = []
     seen_ids = set()  # Protection against duplicates at date boundaries
@@ -109,8 +133,8 @@ def fetch_orders(api, days_back=365):
     if 'created_at' in df.columns:
         df = df.sort_values('created_at', ascending=False)
 
-    # print(f"SUCCESS. Final table: {len(df)} rows. "
-    #       f"(Check for presence of 2025-10-23)")
+    print(f"SUCCESS. Final table: {len(df)} rows. "
+          f"(Check for presence of 2025-10-23)")
     return df
 
 
@@ -254,7 +278,7 @@ def fetch_all_activities(api):
             activities = api.get_activities(**params)
         except Exception as e:
             print(f"API Error: {e}")
-            break
+            raise e
 
         if not activities:
             break

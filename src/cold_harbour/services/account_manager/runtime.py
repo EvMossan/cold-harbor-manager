@@ -22,10 +22,12 @@ import signal
 import os
 import sys
 import time
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from alpaca_trade_api.rest import REST
+
+import pandas as pd
 
 from cold_harbour.core.destinations import sanitize_identifier
 from cold_harbour.services.account_manager import db as db_helpers
@@ -41,6 +43,7 @@ from cold_harbour.services.account_manager.config import _Config
 from cold_harbour.services.account_manager.utils import (
     _json_safe,
     _parse_bool,
+    _utcnow,
 )
 
 #  AccountManager
@@ -166,6 +169,9 @@ class AccountManager:
         )
         self._ts_conn_string = ts_conn.strip()
         self.ts_repo: Optional[AsyncAccountRepository] = None
+        self._orders_cache = pd.DataFrame()
+        self._last_orders_sync_time: Optional[datetime] = None
+        self._orders_cache_reset_at: Optional[datetime] = None
 
         # Keep the URL available in self.cfg for downstream helpers.
         self.cfg["CONN_STRING_POSTGRESQL"] = (
@@ -677,11 +683,24 @@ class AccountManager:
     #  Order helpers
     # ──────────────────────────────────────────────────────────────────────
 
-    def _pull_orders(
-        self, *, days_back: int = 365
-    ) -> pd.DataFrame:
-        """Delegate order retrieval to the trades helper."""
-        return trades._pull_orders(self, days_back=days_back)
+    def _maybe_reset_orders_cache(self) -> None:
+        """Reset the orders cache before a full snapshot pass."""
+        now_ts = _utcnow()
+        last_reset = self._orders_cache_reset_at
+        if last_reset and now_ts - last_reset < timedelta(hours=24):
+            return
+        last_sync = self._last_orders_sync_time
+        if (
+            last_sync
+            and now_ts - last_sync < timedelta(minutes=60)
+        ):
+            self._orders_cache_reset_at = now_ts
+            self.log.info("Skipping cache reset; synced recently")
+            return
+        self._orders_cache = pd.DataFrame()
+        self._last_orders_sync_time = None
+        self._orders_cache_reset_at = now_ts
+        self.log.info("Orders cache reset ahead of snapshot refresh")
 
     # ──────────────────────────────────────────────────────────────────────
     #  Closed-trades sync (watermark window, idempotent)

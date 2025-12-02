@@ -10,7 +10,6 @@ from typing import Any, Dict, Optional, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from functools import partial
 
 from cold_harbour.core.account_analytics import (
     build_closed_trades_df_lot,
@@ -29,18 +28,62 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from cold_harbour.services.account_manager.runtime import AccountManager
 
 
-def _pull_orders(
-    mgr: "AccountManager", *, days_back: int = 365
-) -> pd.DataFrame:
-    """Return orders via account_analytics.fetch_orders."""
-    df = fetch_orders(mgr.rest, days_back=days_back)
+def _normalize_orders_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Prepare a raw orders table before merging into the cache."""
+    if df.empty:
+        return df
     if "parent_id" not in df.columns and "parent_order_id" in df.columns:
         df = df.rename(columns={"parent_order_id": "parent_id"})
     if "parent_id" not in df.columns:
         df["parent_id"] = pd.NA
     if "id" in df.columns:
-        df = df.drop_duplicates(subset=["id"]).reset_index(drop=True)
+        df = df.drop_duplicates(subset=["id"])
     return df
+
+
+async def sync_orders(
+    mgr: "AccountManager", *, max_lookback_days: int = 365
+) -> pd.DataFrame:
+    """Fetch new orders, merge with cache, and return the full history."""
+    now_ts = _utcnow()
+    last_sync = mgr._last_orders_sync_time
+    if last_sync is None or mgr._orders_cache.empty:
+        start_ts = now_ts - timedelta(days=max_lookback_days)
+        mgr.log.info("Initial Load: Downloading full history")
+    else:
+        start_ts = last_sync - timedelta(minutes=30)
+        delta = now_ts - last_sync
+        minutes = int(delta.total_seconds() / 60) + 30
+        mgr.log.info(
+            "Incremental Load: Checking last %d minutes", minutes
+        )
+    end_ts = now_ts + timedelta(minutes=1)
+    fetched = fetch_orders(
+        mgr.rest,
+        days_back=max_lookback_days,
+        start_date=start_ts,
+        end_date=end_ts,
+    )
+    new_df = _normalize_orders_frame(fetched)
+    merged_df = pd.concat(
+        [mgr._orders_cache, new_df], ignore_index=True
+    )
+    time_col = (
+        "updated_at"
+        if "updated_at" in merged_df.columns
+        else "created_at"
+        if "created_at" in merged_df.columns
+        else None
+    )
+    if time_col:
+        merged_df = merged_df.sort_values(time_col)
+    if "id" in merged_df.columns:
+        merged_df = merged_df.drop_duplicates(
+            subset=["id"], keep="last"
+        )
+    mgr._orders_cache = merged_df.reset_index(drop=True)
+    mgr._last_orders_sync_time = now_ts
+    return mgr._orders_cache
 
 
 async def _sync_avg_px_symbol(
@@ -72,7 +115,7 @@ async def _sync_avg_px_symbol(
 
 async def _sync_closed_trades(mgr: "AccountManager") -> None:
     """Recompute closed trades from a safe start anchor."""
-    orders_df = _pull_orders(mgr)
+    orders_df = await sync_orders(mgr)
     if orders_df.empty:
         return
 
@@ -152,22 +195,31 @@ async def _sync_closed_trades(mgr: "AccountManager") -> None:
         tuple(_py(trades.loc[i, c]) for c in cols)
         for i in trades.index
     ]
-    sets = ", ".join(
-        f"{c}=EXCLUDED.{c}"
-        for c in cols
-        if c not in {"entry_lot_id", "exit_order_id"}
-    )
     columns = ",".join(cols)
     placeholders = ",".join(
         f"${i}" for i in range(1, len(cols) + 1)
     )
 
+    # [FIX START] Remove stale closed rows so a given sale appears once.
+    # We delete entries that share the same exit_order_id before inserting.
+    # exit_order_id lives at index 1 of each tuple (see cols above).
+    exit_ids_to_update = [str(item[1]) for item in values if item[1]]
+    if exit_ids_to_update:
+        delete_placeholders = ",".join(
+            f"${i+1}" for i in range(len(exit_ids_to_update))
+        )
+        await mgr._db_execute(
+            f"DELETE FROM {mgr.tbl_closed} "
+            f"WHERE exit_order_id IN ({delete_placeholders})",
+            *exit_ids_to_update,
+        )
+    # [FIX END]
+
     await mgr._db_executemany(
         f"""
             INSERT INTO {mgr.tbl_closed} ({columns})
             VALUES ({placeholders})
-            ON CONFLICT (entry_lot_id, exit_order_id)
-            DO UPDATE SET {sets};
+            ON CONFLICT DO NOTHING;
             """,
         values,
     )

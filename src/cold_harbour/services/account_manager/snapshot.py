@@ -11,8 +11,8 @@ import pandas as pd
 from cold_harbour.core.account_analytics import (
     build_lot_portfolio,
     fetch_all_activities,
-    fetch_orders,
 )
+from cold_harbour.services.account_manager import trades
 from cold_harbour.services.account_manager.utils import (
     _is_at_break_even,
     _last_trade_px,
@@ -194,7 +194,7 @@ async def initial_snapshot(mgr: "AccountManager") -> None:
     prev_ids = set(mgr.state.keys())
 
     try:
-        orders_df = fetch_orders(mgr.rest, days_back=365)
+        orders_df = await trades.sync_orders(mgr)
     except Exception:
         mgr.log.exception("Snapshot: failed to fetch orders")
         orders_df = pd.DataFrame()
@@ -290,7 +290,7 @@ async def refresh_symbol_snapshot(
 
         side_map = _build_side_map(positions)
         try:
-            orders_df = fetch_orders(mgr.rest, days_back=365)
+            orders_df = await trades.sync_orders(mgr)
         except Exception:
             mgr.log.exception("Symbol snapshot: failed to fetch orders")
             orders_df = pd.DataFrame()
