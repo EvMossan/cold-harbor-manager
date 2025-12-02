@@ -15,10 +15,24 @@ High-frequency monitoring and dashboarding for each trading destination with a l
 
 ## Architecture
 
-- **Web dashboard** – `cold_harbour.create_app()` wires the `accounts` blueprint (`src/cold_harbour/web/routes.py`) into Flask, serves `account_positions.html`, and streams updates over SSE (pos/closed channels) using SQLAlchemy listeners backed by PostgreSQL NOTIFY.
-- **Account manager** – `AccountManager` (async, in `src/cold_harbour/services/account_manager.py`) keeps databases, Alpaca REST/ZMQ streams, and in-flight equity/time-series data in sync. `manager_run.py` loads `DESTINATIONS` per-account configs, builds table/channel names via `core.destinations`, and runs all managers with coordinated shutdown.
-- **Data layer** – PostgreSQL + Timescale hosts positions/equity tables under the optional schema defined via `ACCOUNT_SCHEMA`. `infrastructure/db.py` wraps `asyncpg` pools, and helper modules (`core.account_utils`, `core.equity`, `core.market_schedule`) provide order/market logic.
-- **Security tunnel** – `entrypoint.sh` launches `cloudflared access tcp` tunnels for Postgres/Timescale before `gunicorn`, so local dev and Cloud Run deployments reuse the same encrypted path controlled by `CF_ACCESS_*` secrets.
+- **Web dashboard** – `cold_harbour.create_app()` wires the `accounts`
+  blueprint (`src/cold_harbour/web/routes.py`) into Flask, serves
+  `account_positions.html`, and streams updates over SSE.
+- **Account manager** – `AccountManager` (async) keeps databases, Alpaca
+  REST/ZMQ streams, and in-flight equity/time-series data in sync for
+  trading logic.
+- **Data Ingester** – A standalone service
+  (`src/cold_harbour/services/activity_ingester`) that acts as a raw data
+  lake. It ingests orders and activities via Stream and REST (with
+  self-healing capabilities) into the `account_activities` schema.
+- **Data layer** – PostgreSQL + Timescale hosts positions/equity tables.
+  `infrastructure/db.py` wraps `asyncpg` pools, and helper modules
+  (`core.account_utils`, `core.equity`, `core.market_schedule`) provide
+  order/market logic.
+- **Security tunnel** – `entrypoint.sh` launches `cloudflared access tcp`
+  tunnels for Postgres/Timescale before `gunicorn`, so local dev and Cloud
+  Run deployments reuse the same encrypted path controlled by
+  `CF_ACCESS_*` secrets.
 
 ## Repository layout
 
@@ -54,9 +68,12 @@ High-frequency monitoring and dashboarding for each trading destination with a l
 docker compose up --build
 ```
 
-- `manager` service runs `python -m cold_harbour.manager_run` with `watchmedo auto-restart` for live reload.
-- `web` service starts Flask via `entrypoint.sh` with `WEB_RELOAD=1` for template tweaks; it binds to `0.0.0.0:5000`.
-- Both services inherit `.env`, mount `src/`, and reuse the same tunnelling strategy so you get parity with Cloud Run.
+- `manager` service runs `python -m cold_harbour.manager_run` with live reload.
+- `ingester` service runs the raw data collection layer (`activity_ingester.ingester_run`).
+- `web` service starts Flask via `entrypoint.sh` on port `5000`.
+
+All services inherit `.env`, mount `src/`, and reuse the same tunnelling
+strategy so you get parity with Cloud Run.
 
 ## Configuration
 
@@ -90,6 +107,15 @@ docker compose up --build
   ```
 
   or instantiate `AccountManager` with `cold_harbour.app.run_manager(cfg)` when embedding in other scripts. The manager opens ZMQ price streams, polls Alpaca orders, and streams position/equity updates via PostgreSQL `NOTIFY`.
+
+- **Data Ingester Service**:
+
+  ```sh
+  python -m cold_harbour.services.activity_ingester.ingester_run
+  ```
+
+  Launches the background service that captures raw orders and activities
+  into the `account_activities` schema for all configured destinations.
 
 - **Web UI** – SSE endpoints are anchored to `accounts_bp` (`accounts`, `pos`, `closed` channels). Toggle `DISABLE_SSE=True` in the environment to fall back to polling for debugging.
 
