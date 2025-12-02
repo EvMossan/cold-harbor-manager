@@ -1,9 +1,32 @@
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Protocol, Sequence
 import concurrent.futures
 
 import numpy as np
 import pandas as pd
+
+
+class AlpacaOrdersAPI(Protocol):
+    """Minimal interface for Alpaca clients used in this module."""
+
+    def list_orders(
+        self,
+        *,
+        status: str,
+        limit: int,
+        nested: bool,
+        after: str,
+        until: str,
+        direction: str,
+    ) -> Sequence[Any]:
+        """Return a batch of orders matching the given window."""
+
+
+class AlpacaPositionsAPI(Protocol):
+    """Minimal interface for Alpaca clients that expose positions."""
+
+    def list_positions(self) -> Sequence[Any]:
+        """Return current positions (qty, avg_entry_price, etc.)."""
 
 
 def _normalize_timestamp(
@@ -20,18 +43,29 @@ def _normalize_timestamp(
 
 
 def fetch_orders(
-    api,
-    days_back=365,
+    api: AlpacaOrdersAPI,
+    days_back: int = 365,
     *,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
-):
+) -> pd.DataFrame:
     """
-    Downloads orders using the "Sliding Window" (Time Window) method.
+    Download orders in fixed windows to avoid cursor pagination issues.
 
-    Ignores Alpaca cursors. Simply takes date intervals and downloads
-    everything within them. The most reliable method if the API is
-    glitchy with pagination.
+    Args:
+        api: Alpaca-compatible client exposing `list_orders`.
+        days_back: Default days to look back when no start is provided.
+        start_date: Optional earliest timestamp to include (UTC).
+        end_date: Optional exclusive upper bound (UTC).
+
+    Returns:
+        DataFrame with flattened parent/leg rows including `id`,
+        `parent_id`, `symbol`, `side`, `qty`, `order_type`, `status`,
+        `created_at`, `updated_at`, `filled_at`, `limit_price`, and
+        `stop_price`.
+
+    Raises:
+        Exception: Propagates Alpaca API failures from a window.
     """
     # print(f">>> ROBUST ORDER DOWNLOAD (last {days_back} days)...")
 
@@ -357,18 +391,29 @@ def fetch_all_activities(api, start_date=None, end_date=None):
 def build_lot_portfolio(
     fills_df: pd.DataFrame,
     orders_df: pd.DataFrame,
-    api: Any = None
+    api: Optional[AlpacaPositionsAPI] = None,
 ) -> pd.DataFrame:
     """
-    Builds a portfolio based on lots (FIFO/Specific ID).
-    
-    Includes market data columns (Current Price, P/L, TP Reach, etc.)
-    to align with the open positions schema.
+    Build a lot-based portfolio used for live open positions.
 
     Args:
-        fills_df: DataFrame of filled trades.
-        orders_df: DataFrame of orders.
-        api: Alpaca/Broker API object (must support .list_positions()).
+        fills_df: DataFrame with columns `symbol`, `side`, `qty`, `price`,
+            `exec_time`, and `order_id` describing fills.
+        orders_df: DataFrame with `id`, `parent_id`, `status`,
+            `order_type`, `replaced_by`, `limit_price`, and `stop_price`.
+        api: Optional Alpaca client that supports `list_positions` to fetch
+            live market data.
+
+    Returns:
+        Portfolio rows ready for `accounts.open_trades_*` containing
+        columns such as `Parent ID`, `Symbol`, `Buy Date`, `Buy Qty`,
+        `Buy Price`, `Buy_Value`, `Take_Profit_Price`, `Stop_Loss_Price`,
+        `Holding_Period`, `Source`, `Current_Price`,
+        `Current Market Value`, `Profit/Loss`, `_avg_px_symbol`,
+        `TP_reach, %`, and `BrE`.
+
+    Raises:
+        Exception: Propagates Alpaca API issues when enriching market data.
     """
     # print(">>> Building portfolio: Lot-Based + Chain + "
     #       "Orphan Matching (FIXED)...")
@@ -1047,10 +1092,28 @@ def calculate_metrics(
     trades_df: pd.DataFrame,
     open_trades_df: Optional[pd.DataFrame] = None,
     activities_df: Optional[pd.DataFrame] = None,
-    value_weighted: bool = True
+    value_weighted: bool = True,
 ) -> pd.DataFrame:
     """
-    Final Financial Report.
+    Build a final report across closed trades, open positions, and events.
+
+    Args:
+        trades_df: DataFrame with `qty`, `entry_price`, `exit_price`,
+            `pnl_cash`, `pnl_cash_fifo`, `entry_time`, `exit_time`,
+            `exit_type`, `entry_lot_id`, and `exit_order_id`.
+        open_trades_df: Optional DataFrame with columns like `Profit/Loss`,
+            `Buy Price`, `Buy Qty`, and `Current Market Value`.
+        activities_df: Optional DataFrame of activities with `activity_type`
+            and `net_amount`.
+        value_weighted: Whether to weight averages by invested volume.
+
+    Returns:
+        Transposed DataFrame containing equity totals, ratios, fees, and
+        volume counters for the dashboard.
+
+    Raises:
+        Exception: Propagates any arithmetic failures raised while
+            aggregating PV/flows.
     """
     
     # Initialize all variables to safe defaults to avoid UnboundLocalError
