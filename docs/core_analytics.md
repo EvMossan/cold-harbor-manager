@@ -74,3 +74,23 @@ Sharpe/drawdown statistics.
   aligned with the trading schedule so intraday readers (like the web
   layer) can display up-to-date deposits without rerunning the full
   rebuild.
+
+## Analytics vs. Reporting Utils
+
+`src/cold_harbour/core/account_analytics.py` (notably `build_lot_portfolio`)
+is treated as part of the **Account Manager**’s control loop. The manager
+calls it to reconcile fills/orders, maintain lot-level open positions,
+trace parent/child chains, and keep the live state aligned with Alpaca’s
+order book for decision-making. That logic is executed where the trading
+logic runs, so the portfolio it builds lands in `accounts.open_trades_*`
+and `closed_trades_*` tables.
+
+In contrast, the Web layer uses helpers from
+`src/cold_harbour/core/account_utils.py`, especially `calculate_trade_metrics`,
+to summarize the already-settled trades exposed by the manager. Those
+helpers resolve the schema returned by `account_table_names` into
+flattened DataFrames, collapse slice-level exits, and calculate the final
+KPI buckets that populate the dashboard (TP/SL splits, durations,
+mean stop/take, etc.). This split keeps the heavy reconciliation inside
+the manager (analytics) while the UI performs lightweight reporting over
+the cached results (`accounts` schema tables).
