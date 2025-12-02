@@ -331,7 +331,7 @@ def rebuild_equity_series(
         flows_df = pd.read_sql(
             text(
                 f"""
-                SELECT (ts AT TIME ZONE 'America/New_York')::date AS date,
+                SELECT ts::date AS date,
                        SUM(amount) AS net_flows
                   FROM {t_flows}
                  WHERE {where_types}
@@ -541,7 +541,7 @@ def update_today_row(cfg: Dict) -> None:
                 f"""
                 SELECT COALESCE(SUM(pnl_cash), 0) AS pl
                   FROM {t_closed}
-                 WHERE (exit_time AT TIME ZONE 'America/New_York')::date = :d
+                 WHERE exit_time::date = :d
                 """
             ),
             engine,
@@ -568,7 +568,7 @@ def update_today_row(cfg: Dict) -> None:
             open_df["qty"] * (open_df["mkt_px"] - open_df["basis"])
         ).sum()
 
-    # Net flows for today (TZ NY)
+    # Net flows for today (UTC dates)
     try:
         raw_types = cfg.get(
             "CASH_FLOW_TYPES",
@@ -590,11 +590,11 @@ def update_today_row(cfg: Dict) -> None:
         flows_df = pd.read_sql(
             text(
                 f"""
-                SELECT (ts AT TIME ZONE 'America/New_York')::date AS date,
+                SELECT ts::date AS date,
                        SUM(amount) AS net_flows
                   FROM {t_flows}
-                 WHERE (ts AT TIME ZONE 'America/New_York')::date >= :start
-                   AND (ts AT TIME ZONE 'America/New_York')::date <= :end
+                 WHERE ts::date >= :start
+                   AND ts::date <= :end
                    AND ({where_types})
                  GROUP BY 1
                  ORDER BY 1
@@ -991,7 +991,7 @@ async def rebuild_equity_series_async(
             try:
                 rows = await repo.fetch(
                     f"""
-                    SELECT (ts AT TIME ZONE 'America/New_York')::date AS date,
+                    SELECT ts::date AS date,
                            SUM(amount) AS net_flows
                       FROM {t_flows}
                      WHERE {where_types}
@@ -1303,7 +1303,7 @@ async def update_today_row_async(
             f"""
             SELECT COALESCE(SUM(pnl_cash), 0) AS pl
               FROM {t_closed}
-             WHERE (exit_time AT TIME ZONE 'America/New_York')::date = $1
+             WHERE exit_time::date = $1
             """,
             today,
         )
@@ -1331,11 +1331,11 @@ async def update_today_row_async(
             start_cal = min(prev_bday, today)
             flow_rows = await repo.fetch(
                 f"""
-                SELECT (ts AT TIME ZONE 'America/New_York')::date AS date,
+                SELECT ts::date AS date,
                        SUM(amount) AS net_flows
                   FROM {t_flows}
-                 WHERE (ts AT TIME ZONE 'America/New_York')::date >= $1
-                   AND (ts AT TIME ZONE 'America/New_York')::date <= $2
+                 WHERE ts::date >= $1
+                   AND ts::date <= $2
                    AND ({where_types})
               GROUP BY 1
               ORDER BY 1

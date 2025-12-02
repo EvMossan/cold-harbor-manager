@@ -520,9 +520,12 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         with engine.begin() as conn:
             row = conn.execute(
                 text(
-                    "SELECT metrics_payload "
-                    "FROM account_metrics "
-                    "ORDER BY updated_at DESC LIMIT 1"
+                    f"""
+                    SELECT metrics_payload
+                      FROM {tables.get('metrics', 'account_metrics')}
+                  ORDER BY updated_at DESC
+                     LIMIT 1
+                    """
                 )
             ).scalar_one_or_none()
         if row:
@@ -530,6 +533,9 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 payload = json.loads(row)
             except json.JSONDecodeError:
                 payload = {}
+        # Keep compatibility: frontend accepts either [{…}] or {…}
+        if isinstance(payload, dict):
+            return jsonify([payload])
         return jsonify(payload)
 
     @bp.route("/stream/positions")
@@ -673,7 +679,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                     cut = conn.execute(
                         text(
                             f"""
-                            SELECT MIN((ts AT TIME ZONE 'America/New_York')::date)
+                            SELECT MIN(ts::date)
                               FROM {tables['cash_flows']}
                              WHERE type ILIKE 'FILL%'
                             """

@@ -17,8 +17,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import signal
 import contextlib
+import signal
 import os
 import sys
 import time
@@ -27,6 +27,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from alpaca_trade_api.rest import REST
 
+from cold_harbour.core.destinations import sanitize_identifier
 from cold_harbour.services.account_manager import db as db_helpers
 from cold_harbour.services.account_manager import equity as equity_helpers
 from cold_harbour.services.account_manager import market
@@ -233,8 +234,38 @@ class AccountManager:
         self.tbl_market_schedule = _qualify(
             schema, self.c.TABLE_MARKET_SCHEDULE
         )
-        self.tbl_metrics = _qualify(
-            schema, self.c.TABLE_ACCOUNT_METRICS
+
+        def _derive_metrics(
+            base_metrics: str, live_table: str, sch: Optional[str]
+        ) -> str:
+            """Derive per-account metrics table using live suffix."""
+            if "." in base_metrics:
+                return base_metrics
+            # If caller supplied a custom name, respect it verbatim.
+            if base_metrics != _Config.TABLE_ACCOUNT_METRICS:
+                return _qualify(sch, base_metrics)
+            try:
+                live_base = (live_table or "").split(".")[-1]
+                prefixes = (
+                    "open_trades_",
+                    "account_open_positions_",
+                    "open_trades",
+                    "account_open_positions",
+                )
+                suffix = live_base
+                for prefix in prefixes:
+                    if suffix.startswith(prefix):
+                        suffix = suffix[len(prefix) :]
+                        break
+                suffix = sanitize_identifier(suffix)
+                if suffix:
+                    return _qualify(sch, f"{base_metrics}_{suffix}")
+            except Exception:
+                pass
+            return _qualify(sch, base_metrics)
+
+        self.tbl_metrics = _derive_metrics(
+            self.c.TABLE_ACCOUNT_METRICS, self.tbl_live, schema
         )
 
         # Per-account NOTIFY channels.

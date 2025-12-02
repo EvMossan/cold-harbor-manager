@@ -578,70 +578,76 @@
 
     /* human-readable → short label */
     const labelMap = {
-      'P/L'                     : 'Total Profit/Loss (WAC)',
-      'P/L (per Lot)'           : 'Total Profit/Loss',
-      'Total Return'            : 'Total Return %',
-      'Total Profit/Loss'       : 'Realised Profit/Loss',
-      'Unrealised P/L'          : 'Unrealised Profit/Loss (WAC)',
-      'Unrealised P/L (per Lot)': 'Unrealised Profit/Loss (per Lot)',
-      'Fees + Interest'         : 'Fees + Interest',
-
-      /* ratios */
-      'R/R Ratio'               : 'Risk-Reward Ratio',
-      'Breakeven %'             : 'Breakeven %',
-      'P/L Ratio %'             : 'Profit/Loss Ratio %',
-
-      /* counts */
-      'Open Positions'          : 'Open Trades (n)',
-      'Closed Trades'           : 'Closed Trades (n)',
-
-      /* cash aggregates */
-      'Total Buy'               : 'Total Buy',
-      'Total Sells'             : 'Total Sell',
-
-      /* risk / holding */
-      'Mean Stop'               : 'Avg Stop ($)',
-      'Mean Take'               : 'Avg Take ($)',
-      'Mean Holding Period Stop': 'Hold Stop (d)',
-      'Mean Holding Period Take': 'Hold Take (d)',
-
-      /* Sharpe ratios */
-      'Sharpe 10d'              : 'Sharpe 10 days',
-      'Sharpe 21d'              : 'Sharpe 21 days',
-      'Sharpe 63d'              : 'Sharpe 63 days',
-      'Sharpe 126d'             : 'Sharpe 126 days',
-      'Sharpe 252d'             : 'Sharpe 252 days'
+      'TOTAL ACCOUNT RESULT (Equity)': 'Equity Result',
+      'NET REALIZED CASH (FIFO)'     : 'Net Realised Cash (FIFO)',
+      'Unrealized P/L (Open)'        : 'Unrealised P/L (Open)',
+      'Current Open Value'           : 'Open Value',
+      'Breakeven %'                  : 'Breakeven %',
+      'Win Rate %'                   : 'Win Rate %',
+      'Risk-Reward Ratio'            : 'R/R Ratio',
+      'Mean Take ($)'                : 'Mean Take ($)',
+      'Mean Stop ($)'                : 'Mean Stop ($)',
+      'Mean Holding Take (Days)'     : 'Hold Take (d)',
+      'Mean Holding Stop (Days)'     : 'Hold Stop (d)',
+      'Realized P/L (Broker/FIFO)'   : 'Realised P/L (Broker/FIFO)',
+      'Realized P/L (Strategy Only)' : 'Realised P/L (Strategy)',
+      'Total Fees'                   : 'Total Fees',
+      'Net Dividends'                : 'Net Dividends',
+      'Net Interest'                 : 'Net Interest',
+      'Total Buy Volume'             : 'Total Buy',
+      'Total Sell Volume'            : 'Total Sell',
+      'Closed Trades (n)'            : 'Closed Trades',
+      'Open Trades (n)'              : 'Open Positions',
+      'Total Return %'               : 'Total Return',
+      'Sharpe 10d'                   : 'Sharpe 10 days',
+      'Sharpe 21d'                   : 'Sharpe 21 days',
+      'Sharpe 63d'                   : 'Sharpe 63 days',
+      'Sharpe 126d'                  : 'Sharpe 126 days',
+      'Sharpe 252d'                  : 'Sharpe 252 days'
     };
 
     /* display order */
     const metricOrder = [
-      'P/L (per Lot)', 'P/L', 'Total Return',
-      'Total Profit/Loss', 'Unrealised P/L', 'Unrealised P/L (per Lot)',
-      'Fees + Interest',
-      'R/R Ratio', 'Breakeven %', 'P/L Ratio %',
-      'Open Positions', 'Closed Trades',
-      'Total Buy', 'Total Sells',
-      'Mean Stop', 'Mean Take',
-      'Mean Holding Period Stop', 'Mean Holding Period Take',
-      'Sharpe 10d', 'Sharpe 21d', 'Sharpe 63d', 'Sharpe 126d', 'Sharpe 252d'
+      'TOTAL ACCOUNT RESULT (Equity)',
+      'NET REALIZED CASH (FIFO)',
+      'Unrealized P/L (Open)',
+      'Current Open Value',
+      '------------------',
+      'Breakeven %',
+      'Win Rate %',
+      'Risk-Reward Ratio',
+      'Mean Take ($)',
+      'Mean Stop ($)',
+      'Mean Holding Take (Days)',
+      'Mean Holding Stop (Days)',
+      '------------------ ',
+      'Realized P/L (Broker/FIFO)',
+      'Realized P/L (Strategy Only)',
+      'Total Fees',
+      'Net Dividends',
+      'Net Interest',
+      'Total Buy Volume',
+      'Total Sell Volume',
+      'Closed Trades (n)',
+      'Open Trades (n)',
+      'Total Return %',
+      'Sharpe 10d',
+      'Sharpe 21d',
+      'Sharpe 63d',
+      'Sharpe 126d',
+      'Sharpe 252d'
     ];
 
     /** fetch KPI JSON + (re)draw table */
     async function loadKpi () {
       const data = await fetchJson(apiUrl('api/metrics')) || [];
-      const src = (Array.isArray(data) ? data[0] : {}) || {};
-
-      /* derive total P/Ls on the fly */
-      src['P/L'] =
-        (+src['Total Profit/Loss'] || 0) + (+src['Unrealised P/L'] || 0);
-      src['P/L (per Lot)'] =
-        (+src['Total Profit/Loss'] || 0) + (+src['Unrealised P/L (per Lot)'] || 0);
+      const src = (Array.isArray(data) ? data[0] : data) || {};
 
       /* turn object → ordered row-array */
       const rows = metricOrder.map(key => ({
         metric : labelMap[key] || key,
         rawKey : key,
-        value  : src[key] ?? 0
+        value  : key.startsWith('-') ? '' : (src[key] ?? 0)
       }));
 
       const cols = [
@@ -652,7 +658,7 @@
             if (t !== 'display') return +d || 0;
 
             /* pretty-print with correct formatter */
-            if (r.rawKey === 'Total Return')
+            if (r.rawKey === 'Total Return %')
               return wrapPnL(d, pct1.display(+d));
 
             if (r.rawKey.includes('%'))

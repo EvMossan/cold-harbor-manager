@@ -93,6 +93,8 @@ async def _sync_closed_trades(mgr: "AccountManager") -> None:
     trades = trades.copy()
     if "symbol" in trades.columns:
         trades["symbol"] = trades["symbol"].astype(str).str.upper()
+    if "side" in trades.columns:
+        trades["side"] = trades["side"].astype(str).str.lower()
 
     for c in ("entry_time", "exit_time"):
         if c in trades.columns:

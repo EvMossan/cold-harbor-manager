@@ -237,7 +237,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                        exit_time  AT TIME ZONE 'UTC' AS exit_time,
                        entry_price, pnl_cash
                   FROM {mgr.tbl_closed}
-                 WHERE (exit_time AT TIME ZONE 'America/New_York')::date = $1
+                 WHERE exit_time::date = $1
                 """,
             session_date,
         )

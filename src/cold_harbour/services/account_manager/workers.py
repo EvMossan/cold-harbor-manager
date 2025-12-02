@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING
+import math
+from typing import TYPE_CHECKING, Dict, Iterable
 
 import msgpack
 import pandas as pd
@@ -154,32 +155,7 @@ async def metrics_worker(mgr: "AccountManager") -> None:
     interval = max(30, int(mgr.CLOSED_SYNC_SEC))
     while True:
         try:
-            closed_rows = await mgr._db_fetch(
-                f"SELECT * FROM {mgr.tbl_closed}"
-            )
-            open_rows = await mgr._db_fetch(
-                f"SELECT * FROM {mgr.tbl_live}"
-            )
-            activity_rows = await mgr._db_fetch(
-                f"SELECT * FROM {mgr.tbl_cash_flows}"
-            )
-
-            closed_df = pd.DataFrame(closed_rows)
-            open_df = pd.DataFrame(open_rows)
-            activities_df = pd.DataFrame(activity_rows)
-            if not activities_df.empty and "amount" in activities_df.columns:
-                activities_df = activities_df.rename(
-                    columns={"amount": "net_amount"}
-                )
-
-            metrics_df = calculate_metrics(
-                closed_df, open_df, activities_df
-            )
-            payload = (
-                metrics_df.iloc[0].to_dict()
-                if not metrics_df.empty
-                else {}
-            )
+            payload = await _build_metrics_payload(mgr)
             metrics_payload = json.dumps(payload, default=_json_safe)
             await mgr._db_execute(
                 f"""
@@ -198,6 +174,128 @@ async def metrics_worker(mgr: "AccountManager") -> None:
             mgr.log.warning("metrics_worker error: %s", exc)
         finally:
             await asyncio.sleep(interval)
+
+
+def _rename_columns(
+    df: pd.DataFrame, mapping: Dict[str, str]
+) -> pd.DataFrame:
+    """Return a copy of df with selected columns renamed."""
+    if df.empty:
+        return df
+    cols = {k: v for k, v in mapping.items() if k in df.columns}
+    return df.rename(columns=cols)
+
+
+def _safe_float(value: object) -> float | None:
+    """Convert to float or None when not finite."""
+    try:
+        val = float(value)
+    except Exception:
+        return None
+    if math.isnan(val) or math.isinf(val):
+        return None
+    return val
+
+
+def _extract_sharpe(row: Dict[str, object], windows: Iterable[int]) -> dict:
+    """Build a Sharpe payload from an equity row."""
+    result: Dict[str, float] = {}
+    for win in windows:
+        key = f"sharpe_{win}"
+        if key not in row:
+            continue
+        val = _safe_float(row.get(key))
+        if val is None:
+            continue
+        result[f"Sharpe {win}d"] = val
+    return result
+
+
+async def _build_metrics_payload(
+    mgr: "AccountManager",
+) -> Dict[str, object]:
+    """Load source tables, compute KPIs, and add returns/Sharpe."""
+    closed_rows = await mgr._db_fetch(
+        f"SELECT * FROM {mgr.tbl_closed}"
+    )
+    open_rows = await mgr._db_fetch(
+        f"SELECT * FROM {mgr.tbl_live}"
+    )
+    activity_rows = await mgr._db_fetch(
+        f"SELECT * FROM {mgr.tbl_cash_flows}"
+    )
+
+    closed_df = pd.DataFrame(closed_rows)
+    open_df = pd.DataFrame(open_rows)
+    activities_df = pd.DataFrame(activity_rows)
+
+    open_df = _rename_columns(
+        open_df,
+        {
+            "profit_loss": "Profit/Loss",
+            "mkt_value": "Current Market Value",
+            "avg_fill": "Buy Price",
+            "qty": "Buy Qty",
+        },
+    )
+
+    activities_df = _rename_columns(
+        activities_df,
+        {
+            "amount": "net_amount",
+            "type": "activity_type",
+        },
+    )
+    if not activities_df.empty and "activity_type" in activities_df.columns:
+        activities_df["activity_type"] = activities_df[
+            "activity_type"
+        ].astype(str).str.upper()
+
+    metrics_df = calculate_metrics(
+        closed_df, open_df, activities_df
+    )
+    metrics = (
+        metrics_df.iloc[:, 0].to_dict()
+        if not metrics_df.empty
+        else {}
+    )
+
+    # Normalise numeric-looking strings to floats for the UI renderer.
+    def _coerce_number(val: object) -> object:
+        if isinstance(val, (int, float)):
+            return val
+        if isinstance(val, str):
+            s = val.strip()
+            if s.startswith("%"):
+                s = s[1:]
+            s = s.replace(",", "")
+            try:
+                return float(s)
+            except Exception:
+                return val
+        return val
+
+    metrics = {k: _coerce_number(v) for k, v in metrics.items()}
+
+    equity_row = await mgr._db_fetchrow(
+        f"""
+            SELECT *
+              FROM {mgr.tbl_equity}
+          ORDER BY date DESC
+             LIMIT 1
+        """
+    )
+    if equity_row:
+        total_return = _safe_float(equity_row.get("cumulative_return"))
+        if total_return is not None:
+            metrics["Total Return %"] = total_return * 100.0
+
+        sharpe_vals = _extract_sharpe(
+            equity_row, (10, 21, 63, 126, 252)
+        )
+        metrics.update(sharpe_vals)
+
+    return metrics
 
 
 async def ui_heartbeat_worker(mgr: "AccountManager") -> None:

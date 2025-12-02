@@ -132,17 +132,20 @@ def account_table_names(
     - open:   ``accounts.open_trades_<slug>``
     - closed: ``accounts.closed_trades_<slug>``
     - equity: ``accounts.equity_full_<slug>``
+    - metrics: ``accounts.account_metrics_<slug>``
     - schedule: shared ``accounts.market_schedule`` for all accounts
     """
     slug = slug_for(dest)
     open_tbl = _schema_qualify(f"open_trades_{slug}", schema)
     closed_tbl = _schema_qualify(f"closed_trades_{slug}", schema)
     equity_tbl = equity_table_for(dest, schema=schema)
+    metrics_tbl = _schema_qualify(f"account_metrics_{slug}", schema)
     schedule_tbl = _schema_qualify("market_schedule", schema)
     return {
         "open": open_tbl,
         "closed": closed_tbl,
         "equity": equity_tbl,
+        "metrics": metrics_tbl,
         "schedule": schedule_tbl,
     }
 

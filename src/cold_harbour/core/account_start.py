@@ -64,7 +64,7 @@ def earliest_activity_date(
             d = conn.execute(
                 text(
                     f"""
-                    SELECT MIN((ts AT TIME ZONE 'America/New_York')::date)
+                    SELECT MIN(ts::date)
                       FROM {tables['cash_flows']}
                      WHERE {where_types}
                     """
@@ -126,7 +126,7 @@ async def earliest_activity_date_async(
     try:
         row = await repo.fetchrow(
             f"""
-            SELECT MIN((ts AT TIME ZONE 'America/New_York')::date) AS d
+            SELECT MIN(ts::date) AS d
               FROM {tables['cash_flows']}
              WHERE {where_types}
             """
