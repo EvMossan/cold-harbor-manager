@@ -382,6 +382,11 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     @bp.route("/api/positions")
     def api_positions() -> Response:  # type: ignore[override]
+        """Return the current open-trades table as JSON records.
+
+        Each list item mirrors `tables['open']` and emits keys such as
+        `symbol`, `qty`, `avg_entry_price`, `entry_time`, and `side`.
+        """
         start_ts = _now()
         df = _fetch_open_df()
         safe = json.loads(
@@ -392,6 +397,11 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     @bp.route("/api/closed")
     def api_closed() -> Response:  # type: ignore[override]
+        """Return the most-recent closed trades (limit 300) as JSON.
+
+        Each row includes entry/exit prices/dates, `pnl_cash`, and
+        `return_pct` so the UI can render closed trades and KPIs.
+        """
         start_ts = _now()
         # Return only the most recent 300 rows for UI speed.
         with engine.begin() as conn:
@@ -416,6 +426,12 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     @bp.route("/api/positions_cached")
     def api_positions_cached() -> Response:  # type: ignore[override]
+        """Return cached open positions with ETag/304 semantics.
+
+        The JSON payload is identical to `/api/positions`. If the
+        client's `If-None-Match` matches the current ETag, the handler
+        replies with `304` and no body.
+        """
         # Build ETag from DB version (max(updated_at) + count)
         etag = _open_version()
         inm = request.headers.get("If-None-Match")
@@ -433,6 +449,12 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     @bp.route("/api/closed_cached")
     def api_closed_cached() -> Response:  # type: ignore[override]
+        """Return cached closed trades along with an exit-time ETag.
+
+        The payload is an array of `symbol`, `entry_time`, `exit_time`,
+        `qty`, `entry_price`, `exit_price`, `pnl_cash`, and `return_pct`.
+        Clients can reuse the provided `ETag` for polling.
+        """
         # Compute a lightweight ETag based on latest exit_time and limited count
         with engine.begin() as conn:
             ver_row = conn.execute(
@@ -516,6 +538,12 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     @bp.route("/api/metrics")
     def api_metrics() -> Response:  # type: ignore[override]
+        """Return the latest KPI payload from `tables['metrics']`.
+
+        The response is either a single dict or a list of dicts containing
+        vendor metrics such as `net_pnl`, `drawdown`, and `sharpe`,
+        matching the structure stored in `account_metrics_*`.
+        """
         payload: dict[str, Any] | list[Any] = {}
         with engine.begin() as conn:
             row = conn.execute(
@@ -646,6 +674,13 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     @bp.route("/api/equity")
     def api_equity() -> Response:  # type: ignore[override]
+        """Return equity history rows filtered by the `window` query.
+
+        Each row exposes `date`, `deposit`, `cumulative_return`,
+        `realised_return`, and `drawdown`. Supported windows:
+        `all`, `first_trade` (default), or `<Nd>` to limit to the last
+        N days.
+        """
         start_ts = _now()
         # Optional window parameter.
         # Defaults to 'first_trade' to avoid long flat periods before trading
@@ -718,6 +753,12 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     @bp.route("/api/equity_intraday")
     def api_equity_intraday() -> Response:  # type: ignore[override]
+        """Return minute-level intraday equity and metadata.
+
+        Response format: `{ "series": [ { "ts": "...", "deposit": n,
+        "pl_cash": n, "drawdown_cash": n } ], "meta": { ... } }`. The
+        TTL is capped at `min(HEARTBEAT_SEC, 10)` seconds.
+        """
         """Return intraday equity as cash P/L relative to yesterday.
 
         Option A: read precomputed points from the manager's

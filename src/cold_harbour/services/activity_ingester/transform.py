@@ -9,13 +9,54 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TypedDict
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 # Timezone for Alpaca ID generation (Eastern Time)
 NY_TZ = ZoneInfo("America/New_York")
+
+
+class OrderRecord(TypedDict, total=False):
+    """Normalized schema for `raw_orders_<slug>`."""
+
+    id: Optional[str]
+    client_order_id: Optional[str]
+    symbol: Optional[str]
+    side: Optional[str]
+    type: Optional[str]
+    status: Optional[str]
+    qty: Optional[Decimal]
+    filled_qty: Optional[Decimal]
+    filled_avg_price: Optional[Decimal]
+    limit_price: Optional[Decimal]
+    stop_price: Optional[Decimal]
+    created_at: Optional[datetime]
+    updated_at: Optional[datetime]
+    submitted_at: Optional[datetime]
+    filled_at: Optional[datetime]
+    expired_at: Optional[datetime]
+    canceled_at: Optional[datetime]
+    raw_json: str
+    ingested_at: datetime
+
+
+class ActivityRecord(TypedDict, total=False):
+    """Normalized schema for `raw_activities_<slug>`."""
+
+    id: Optional[str]
+    activity_type: Optional[str]
+    transaction_time: Optional[datetime]
+    symbol: Optional[str]
+    side: Optional[str]
+    qty: Optional[Decimal]
+    price: Optional[Decimal]
+    net_amount: Optional[Decimal]
+    execution_id: Optional[str]
+    order_id: Optional[str]
+    raw_json: str
+    ingested_at: datetime
 
 
 def _to_decimal(value: Any) -> Optional[Decimal]:
@@ -88,10 +129,17 @@ def _generate_synthetic_activity_id(timestamp: datetime, execution_id: str) -> s
     return f"{time_str}::{execution_id}"
 
 
-def normalize_order(raw: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_order(raw: Dict[str, Any]) -> OrderRecord:
     """
-    Normalize an order object (from REST or Stream 'order' field)
-    to the `raw_orders` table schema.
+    Normalize REST or stream orders for insertion into `raw_orders`.
+
+    Args:
+        raw: Raw API payload containing order metadata.
+
+    Returns:
+        OrderRecord where prices, quantities, and timestamps are coerced
+        into Decimal/UTC datetime, `symbol` is upper-cased, `side` is
+        lower-case, and `raw_json` holds the original payload.
     """
     # Handle stream structure where 'order' might be nested or flat
     # Usually passed directly as the order dictionary
@@ -123,9 +171,16 @@ def normalize_order(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def normalize_rest_activity(raw: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_rest_activity(raw: Dict[str, Any]) -> ActivityRecord:
     """
-    Normalize an activity object from REST API `GET /v2/account/activities`.
+    Normalize REST activity rows for idempotent inserts.
+
+    Args:
+        raw: Response from `GET /v2/account/activities`.
+
+    Returns:
+        ActivityRecord with parsed amounts, UTC timestamps, and extracted
+        execution IDs when the REST ID embeds them.
     """
     # REST API provides the ID natively
     activity_id = raw.get("id")
@@ -157,11 +212,17 @@ def normalize_rest_activity(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def normalize_stream_activity(event: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_stream_activity(event: Dict[str, Any]) -> ActivityRecord:
     """
-    Normalize a 'trade_updates' event (fill/partial_fill) from WebSocket.
-    
-    Generates a synthetic ID to match REST API format for idempotency.
+    Normalize a WebSocket `trade_updates` event for ingestion.
+
+    Args:
+        event: Alpaca WebSocket payload describing a fill or partial.
+
+    Returns:
+        ActivityRecord with synthetic `id` (YYYYMMDDHHMMSSmmm::exec_id),
+        UTC-normalized `transaction_time`, Decimal amounts, and signed
+        `net_amount` where buys are negative.
     """
     # Event structure: {"event": "fill", "execution_id": "...", "order": {...}, ...}
     event_type = event.get("event")

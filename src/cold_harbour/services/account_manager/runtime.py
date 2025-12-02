@@ -83,11 +83,37 @@ class AccountLoggerAdapter(logging.LoggerAdapter):
 # ──────────────────────────────────────────────────────────────────────
 
 
-class AccountManager:
-    """Realtime account-state synchronizer for Alpaca.
+POS_CHANNEL_PREFIX = "pos_channel_"
+CLOSED_CHANNEL_PREFIX = "closed_channel_"
 
-    Public surface and runtime semantics are preserved exactly. See
-    the module docstring for a summary of invariants.
+
+class AccountManager:
+    """Realtime account-state synchronizer with managed background workers.
+
+    Attributes:
+        cfg: Original configuration dictionary supplied by the caller.
+        c: Normalized, typed configuration (_Config) that backs runtime knobs.
+        log: Logger that tags account labels and module names.
+        rest: Alpaca REST client used for fills/orders market calls.
+        repo: AsyncAccountRepository for the live Postgres schema.
+        ts_repo: Optional repository pointing at Timescale.
+        tbl_live: Qualified table name for open trades.
+        tbl_closed: Qualified table name for closed trades.
+        tbl_equity, tbl_equity_intraday, tbl_cash_flows, tbl_metrics:
+            Tables used for equity/flow updating plus KPIs.
+        pos_channel, closed_channel: NOTIFY channels broadcast to SSE clients.
+        state, sym2pid: In-memory caches for open positions.
+        HEARTBEAT_SEC, SNAPSHOT_SEC, CLOSED_SYNC_SEC, EQUITY_INTRADAY_SEC:
+            Execution intervals exposed to background tasks.
+        _active_tasks: List of asyncio Tasks spawned by ``run()``.
+
+    The manager spawns several persistent workers:
+        * Market schedule polling (`_market_schedule_worker` / `_schedule_supervisor`).
+        * Snapshot loop (`_snapshot_loop`).
+        * Closed trade refresh (`_closed_sync_worker`).
+        * Equity background reporter (`_equity_worker` and intraday updater).
+        * Price streamer + order ingestion (`_price_worker` / `_orders_worker`).
+        * UI push/flush thread (`_ui_flush_worker`).
     """
 
     DEFAULT_TABLE = "account_open_positions"
@@ -318,8 +344,10 @@ class AccountManager:
         if not label:
             # Try to infer from channel name like "pos_channel_<slug>"
             ch = str(self.pos_channel or "")
-            if ch.startswith("pos_channel_") and len(ch) > len("pos_channel_"):
-                label = ch.split("pos_channel_", 1)[1]
+            if ch.startswith(POS_CHANNEL_PREFIX) and len(ch) > len(
+                POS_CHANNEL_PREFIX
+            ):
+                label = ch.split(POS_CHANNEL_PREFIX, 1)[1]
         if not label:
             # Fallback to table suffix after the last underscore, e.g.
             # accounts.account_open_positions_<slug> → <slug>
