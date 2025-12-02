@@ -36,3 +36,34 @@ services:
     volumes:
       - ./src:/app/src
     restart: unless-stopped
+
+  ingester:
+    build:
+      context: .
+    image: cold_harbour/ingester:dev
+    container_name: ingester
+    
+    # We use watchmedo to monitor changes in /app/src and restart the process
+    entrypoint:
+      - watchmedo
+      - auto-restart
+      - "--directory=/app/src"
+      - "--pattern=*.py"
+      - "--recursive"
+      - --
+      - python
+      - -m
+      - cold_harbour.services.activity_ingester.ingester_run
+      
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+        reservations:
+          cpus: '0.10'
+          memory: 128M

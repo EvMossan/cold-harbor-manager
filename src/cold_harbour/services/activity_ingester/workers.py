@@ -1,6 +1,4 @@
-"""
-Async workers for Data Ingester: Stream, Backfill, and Healing.
-"""
+"""Async workers for Data Ingester: Stream, Backfill, and Healing."""
 
 from __future__ import annotations
 
@@ -9,6 +7,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
+import pandas as pd
 from alpaca_trade_api.rest import REST
 from alpaca_trade_api.stream import Stream
 
@@ -21,6 +20,56 @@ log = logging.getLogger("IngesterWorkers")
 
 def _get_rest_client(api_key: str, secret_key: str, base_url: str) -> REST:
     return REST(api_key, secret_key, base_url)
+
+
+def _to_datetime(value: Any) -> Optional[datetime]:
+    """Parse Alpaca timestamps to UTC datetimes."""
+    if value is None:
+        return None
+    try:
+        parsed = pd.to_datetime(value, utc=True, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.to_pydatetime()
+    except Exception:
+        return None
+
+
+def _sync_determine_backfill_start(rest: REST) -> datetime:
+    """Find the oldest known activity/order to limit the backfill range."""
+    try:
+        first_orders = rest.list_orders(
+            status="all",
+            limit=1,
+            direction="asc",
+            nested=True,
+        )
+        if first_orders:
+            dt = _to_datetime(getattr(first_orders[0], "created_at", None))
+            if dt:
+                log.info(f"Detected first order timestamp: {dt}")
+                return dt
+
+        account = rest.get_account()
+        account_created = _to_datetime(getattr(account, "created_at", None))
+        if account_created:
+            log.info(
+                f"No orders found; using account creation date {account_created}"
+            )
+            return account_created
+    except Exception as exc:
+        log.warning(f"Could not determine earliest start date: {exc}")
+
+    fallback = pd.Timestamp.now(tz=timezone.utc) - timedelta(
+        days=IngesterConfig.BACKFILL_DAYS
+    )
+    log.info(f"Falling back to default backfill window: {fallback}")
+    return fallback.to_pydatetime()
+
+
+async def _determine_backfill_start(rest: REST) -> datetime:
+    """Async wrapper around the blocking Alpaca helper."""
+    return await asyncio.to_thread(_sync_determine_backfill_start, rest)
 
 
 async def _fetch_and_ingest_window(
@@ -113,19 +162,25 @@ async def run_backfill_task(
     # 1. Determine Start Time
     last_update = await storage.get_latest_order_time(repo, slug)
     now = datetime.now(timezone.utc)
-    
+    rest = _get_rest_client(api_key, secret_key, base_url)
+
     if last_update:
         # We have data, start slightly before last update to ensure overlap
         start_cursor = last_update - timedelta(minutes=10)
         log.info(f"[{slug}] Found existing data. Catching up from {start_cursor}")
     else:
-        # No data, full backfill
-        days = IngesterConfig.BACKFILL_DAYS
-        start_cursor = now - timedelta(days=days)
-        log.info(f"[{slug}] Database empty. Starting full backfill from {start_cursor}")
+        # No data, query the API for the earliest available timestamp
+        start_cursor = await _determine_backfill_start(rest)
+        log.info(
+            f"[{slug}] Database empty. Starting full backfill from "
+            f"{start_cursor}"
+        )
 
-    rest = _get_rest_client(api_key, secret_key, base_url)
-    
+    log.info(
+        f"[{slug}] Backfill range determined: {start_cursor.isoformat()} -> "
+        f"{now.isoformat()}"
+    )
+
     # 2. Sliding Window Loop
     # We move in 5-day chunks to be safe with API limits
     window_size = timedelta(days=5)

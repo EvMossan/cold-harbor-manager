@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from functools import partial
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
-import pandas as pd
 from zoneinfo import ZoneInfo
+
+import pandas as pd
+from functools import partial
 
 from cold_harbour.core.account_analytics import (
     build_closed_trades_df_lot,
@@ -686,7 +689,9 @@ async def _run_trade_stream(mgr: "AccountManager") -> None:
             paper=("paper" in mgr.c.ALPACA_BASE_URL),
             url_override=ws_url,
         )
-        stream.subscribe_trade_updates(_on_trade_update)
+        stream.subscribe_trade_updates(
+            partial(_on_trade_update, mgr)  # type: ignore[arg-type]
+        )
         await stream.run()
     except asyncio.CancelledError:
         raise
@@ -704,7 +709,9 @@ async def _run_trade_stream(mgr: "AccountManager") -> None:
                 mgr.c.SECRET_KEY,
                 base_url=URL(mgr.c.ALPACA_BASE_URL),
             )
-            stream.subscribe_trade_updates(_on_trade_update)
+            stream.subscribe_trade_updates(
+                partial(_on_trade_update, mgr)  # type: ignore[arg-type]
+            )
             await stream._run_forever()  # type: ignore[attr-defined]
         except asyncio.CancelledError:
             raise

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+import concurrent.futures
 
 import numpy as np
 import pandas as pd
@@ -110,6 +111,123 @@ def fetch_orders(api, days_back=365):
 
     # print(f"SUCCESS. Final table: {len(df)} rows. "
     #       f"(Check for presence of 2025-10-23)")
+    return df
+
+
+def fetch_orders_fast(api, days_back=365):
+    """
+    Downloads orders using the "Sliding Window" (Time Window) method.
+
+    Optimized with multithreading to perform parallel requests. Ignores
+    Alpaca cursors. Simply takes date intervals and downloads everything
+    within them.
+    """
+    print(f">>> ROBUST ORDER DOWNLOAD (last {days_back} days)...")
+
+    # 1. Define time boundaries
+    # Set the end date to tomorrow for reliability.
+    end_date = pd.Timestamp.now(tz=timezone.utc) + timedelta(days=1)
+    start_date = end_date - timedelta(days=days_back)
+
+    # Window size in days (5 days is optimal for status='all')
+    window_size = timedelta(days=5)
+
+    # Pre-calculate time windows to fetch
+    time_windows = []
+    current_start = start_date
+    while current_start < end_date:
+        current_end = current_start + window_size
+        time_windows.append((current_start, current_end))
+        current_start += window_size
+
+    all_raw_orders = []
+
+    def _fetch_window(time_range):
+        """Helper function to fetch a single batch in a thread."""
+        t_start_obj, t_end_obj = time_range
+        t_start = t_start_obj.isoformat()
+        t_end = t_end_obj.isoformat()
+
+        try:
+            return api.list_orders(
+                status='all',
+                limit=500,
+                nested=True,
+                after=t_start,
+                until=t_end,
+                direction='desc'
+            )
+        except Exception as e:
+            print(f"   [Error] In window {t_start}: {e}")
+            return []
+
+    # 2. Execute requests in parallel
+    # max_workers=10 is usually safe for Alpaca to avoid rate limits
+    print(f"   Spawning threads for {len(time_windows)} time windows...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as exe:
+        future_to_window = {
+            exe.submit(_fetch_window, window): window
+            for window in time_windows
+        }
+
+        for future in concurrent.futures.as_completed(future_to_window):
+            batch = future.result()
+            if batch:
+                all_raw_orders.extend(batch)
+
+    # --- UNPACKING AND CLEANING ---
+    if not all_raw_orders:
+        print("No orders found.")
+        return pd.DataFrame()
+
+    print(f"Total objects downloaded: {len(all_raw_orders)}. "
+          f"Starting unpacking...")
+
+    flat_rows = []
+    seen_ids = set()
+
+    # Process downloaded objects
+    for order_obj in all_raw_orders:
+        root = getattr(order_obj, '_raw', order_obj)
+
+        if root['id'] in seen_ids:
+            continue
+        seen_ids.add(root['id'])
+
+        # Parent
+        parent_row = root.copy()
+        legs_data = parent_row.pop('legs', None)
+        parent_row['parent_id'] = None
+        flat_rows.append(parent_row)
+
+        # Children
+        if legs_data:
+            for leg in legs_data:
+                leg_row = leg.copy()
+                leg_row['parent_id'] = root['id']
+                flat_rows.append(leg_row)
+
+    df = pd.DataFrame(flat_rows)
+
+    # Type conversion
+    date_cols = [
+        'created_at', 'updated_at', 'filled_at', 'submitted_at'
+    ]
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], utc=True, errors='coerce')
+
+    num_cols = ['qty', 'filled_qty', 'limit_price', 'stop_price']
+    for col in num_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Sorting for aesthetics
+    if 'created_at' in df.columns:
+        df = df.sort_values('created_at', ascending=False)
+
+    print(f"SUCCESS. Final table: {len(df)} rows. "
+          f"(Check for presence of 2025-10-23)")
     return df
 
 
