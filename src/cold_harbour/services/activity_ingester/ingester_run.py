@@ -20,7 +20,7 @@ from cold_harbour.services.activity_ingester.runtime import IngesterService
 
 def main() -> None:
     # Configure logging
-    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = os.getenv("LOG_LEVEL", "DEBUG").upper()
     logging.basicConfig(
         level=getattr(logging, log_level, logging.INFO),
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
