@@ -25,7 +25,7 @@ async def load_orders_from_db(
             id, client_order_id, parent_id, symbol, side, order_type, status,
             qty, filled_qty, filled_avg_price, limit_price, stop_price,
             created_at, updated_at, submitted_at, filled_at,
-            expired_at, canceled_at
+            expired_at, canceled_at, replaced_by, replaces
         FROM {table_name}
         WHERE created_at >= $1
         ORDER BY created_at DESC
@@ -62,6 +62,12 @@ async def load_orders_from_db(
     for col in num_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    uuid_cols = ["id", "parent_id", "client_order_id", "replaced_by", "replaces"]
+    for col in uuid_cols:
+        if col in df.columns:
+            # Convert to str, preserving None as None (not "None")
+            df[col] = df[col].apply(lambda x: str(x) if x else None)
 
     return df
 

@@ -23,7 +23,10 @@ class OrderRecord(TypedDict, total=False):
 
     id: Optional[str]
     client_order_id: Optional[str]
+    request_id: Optional[str]
     parent_id: Optional[str]
+    replaced_by: Optional[str]
+    replaces: Optional[str]
     symbol: Optional[str]
     side: Optional[str]
     order_type: Optional[str]
@@ -39,6 +42,7 @@ class OrderRecord(TypedDict, total=False):
     filled_at: Optional[datetime]
     expired_at: Optional[datetime]
     canceled_at: Optional[datetime]
+    replaced_at: Optional[datetime]
     ingested_at: datetime
 
 
@@ -141,13 +145,13 @@ def normalize_order(raw: Dict[str, Any]) -> OrderRecord:
         into Decimal/UTC datetime, `symbol` is upper-cased, `side` is
         lower-case, and `ingested_at` records the timestamp of ingestion.
     """
-    # Handle stream structure where 'order' might be nested or flat
-    # Usually passed directly as the order dictionary
     data = raw
 
     parent_id_raw = (
         data.get("parent_order_id") or data.get("parent_id")
     )
+    replaced_by_raw = data.get("replaced_by")
+    replaces_raw = data.get("replaces")
 
     order_type_raw = (
         data.get("order_type") or data.get("type") or ""
@@ -156,25 +160,29 @@ def normalize_order(raw: Dict[str, Any]) -> OrderRecord:
     return {
         "id": data.get("id"),
         "client_order_id": data.get("client_order_id"),
+        "request_id": data.get("request_id"),
         "parent_id": str(parent_id_raw) if parent_id_raw else None,
+        "replaced_by": str(replaced_by_raw) if replaced_by_raw else None,
+        "replaces": str(replaces_raw) if replaces_raw else None,
         "symbol": str(data.get("symbol") or "").upper(),
         "side": str(data.get("side") or "").lower(),
         "order_type": str(order_type_raw).lower(),
         "status": str(data.get("status") or "").lower(),
-        
+
         "qty": _to_decimal(data.get("qty")),
         "filled_qty": _to_decimal(data.get("filled_qty") or 0),
         "filled_avg_price": _to_decimal(data.get("filled_avg_price")),
         "limit_price": _to_decimal(data.get("limit_price")),
         "stop_price": _to_decimal(data.get("stop_price")),
-        
+
         "created_at": _parse_ts(data.get("created_at")),
         "updated_at": _parse_ts(data.get("updated_at")),
         "submitted_at": _parse_ts(data.get("submitted_at")),
         "filled_at": _parse_ts(data.get("filled_at")),
         "expired_at": _parse_ts(data.get("expired_at")),
         "canceled_at": _parse_ts(data.get("canceled_at")),
-        
+        "replaced_at": _parse_ts(data.get("replaced_at")),
+
         "ingested_at": datetime.now(timezone.utc),
     }
 

@@ -48,7 +48,10 @@ def _df_to_ingest_records(df: pd.DataFrame) -> List[dict[str, Any]]:
             {
                 "id": row.get("id"),
                 "client_order_id": row.get("client_order_id"),
+                "request_id": row.get("request_id"),
                 "parent_id": row.get("parent_id"),
+                "replaced_by": row.get("replaced_by"),
+                "replaces": row.get("replaces"),
                 "symbol": row.get("symbol"),
                 "side": row.get("side"),
                 "order_type": row.get("order_type"),
@@ -64,6 +67,7 @@ def _df_to_ingest_records(df: pd.DataFrame) -> List[dict[str, Any]]:
                 "filled_at": _timestamp_to_datetime(row.get("filled_at")),
                 "expired_at": _timestamp_to_datetime(row.get("expired_at")),
                 "canceled_at": _timestamp_to_datetime(row.get("canceled_at")),
+                "replaced_at": _timestamp_to_datetime(row.get("replaced_at")),
                 "ingested_at": ingest_time,
             }
         )

@@ -157,7 +157,13 @@ def fetch_orders(
     df = pd.DataFrame(flat_rows)
 
     # Type conversion
-    date_cols = ['created_at', 'updated_at', 'filled_at', 'submitted_at']
+    date_cols = [
+        'created_at',
+        'updated_at',
+        'filled_at',
+        'submitted_at',
+        'replaced_at',
+    ]
     for col in date_cols:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], utc=True, errors='coerce')
@@ -272,7 +278,11 @@ def fetch_orders_fast(api, days_back=365):
 
     # Type conversion
     date_cols = [
-        'created_at', 'updated_at', 'filled_at', 'submitted_at'
+        'created_at',
+        'updated_at',
+        'filled_at',
+        'submitted_at',
+        'replaced_at',
     ]
     for col in date_cols:
         if col in df.columns:
@@ -786,7 +796,7 @@ def build_lot_portfolio(
     cond_profit = (diff_cur >= 0) & (dist_tp > 0)
     cond_loss = (diff_cur < 0) & (dist_sl > 0)
 
-    pos_df["TP_reach, %"] = np.select(
+    tp_reach_values = np.select(
         [
             cond_profit,  # If profitable and TP exists
             cond_loss     # If loss and SL exists
@@ -796,7 +806,8 @@ def build_lot_portfolio(
             (diff_cur / dist_sl) * 100.0   # % progress toward SL (negative)
         ],
         default=np.nan  # If data is missing (e.g., no SL), set to NaN
-    ).round(2)
+    )
+    pos_df["TP_reach, %"] = pd.Series(tp_reach_values).round(2)
 
     # Break Even (BrE) Check (Remains unchanged)
     def _be_price(p):
