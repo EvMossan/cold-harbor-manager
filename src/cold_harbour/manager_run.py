@@ -93,6 +93,7 @@ def _cfg_for(dest: Dict[str, Any]) -> Dict[str, Any]:
         "TABLE_MARKET_SCHEDULE": tables["schedule"].split(".", 1)[-1],
         "POS_CHANNEL": chans["pos"],
         "CLOSED_CHANNEL": chans["closed"],
+        "ENABLE_TRADE_STREAM": dest.get("trade_stream_enabled", False),
     }
 
     # Pass initial deposit from Destinations.

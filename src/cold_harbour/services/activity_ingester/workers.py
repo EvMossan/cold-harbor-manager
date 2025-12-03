@@ -14,6 +14,7 @@ from alpaca_trade_api.stream import Stream
 from cold_harbour.core.account_analytics import (
     fetch_all_activities,
     fetch_orders,
+    get_history_start_dates,
 )
 from cold_harbour.infrastructure.db import AsyncAccountRepository
 from . import storage, transform
@@ -127,14 +128,26 @@ async def run_backfill_task(
     last_update = await storage.get_latest_order_time(repo, slug)
 
     if last_update:
-        start_date = last_update - timedelta(minutes=30)
-        log.info(f"[{slug}] Incremental backfill from {start_date}")
+        order_start_date = last_update - timedelta(minutes=30)
+        activity_start_date = order_start_date
+        log.info(
+            f"[{slug}] Incremental backfill from {order_start_date}"
+        )
     else:
-        start_date = now - timedelta(days=365)
-        log.info(f"[{slug}] Initial backfill (365 days)")
+        log.info(
+            f"[{slug}] Detecting account history start dates via API..."
+        )
+        (
+            order_start_date,
+            activity_start_date,
+        ) = get_history_start_dates(rest)
+        log.info(
+            f"[{slug}] Dynamic Backfill Plan: Orders from "
+            f"{order_start_date}, Activities from {activity_start_date}"
+        )
 
     try:
-        df = fetch_orders(rest, start_date=start_date)
+        df = fetch_orders(rest, start_date=order_start_date)
     except Exception as exc:
         log.error(f"[{slug}] fetch_orders failed: {exc}")
         return
@@ -146,12 +159,16 @@ async def run_backfill_task(
         count = await storage.upsert_orders(repo, slug, records)
         log.info(f"[{slug}] Upserted {count} orders from fetch_orders.")
 
-    log.info(f"[{slug}] Starting Activities Backfill from {start_date}")
+    log.info(
+        f"[{slug}] Starting Activities Backfill from {activity_start_date}"
+    )
     try:
-        act_df = fetch_all_activities(rest, start_date=start_date)
+        act_df = fetch_all_activities(
+            rest, start_date=activity_start_date
+        )
         if not act_df.empty:
             act_records = _df_to_activity_records(
-                act_df, default_time=start_date
+                act_df, default_time=activity_start_date
             )
             act_count = await storage.upsert_activities(
                 repo, slug, act_records

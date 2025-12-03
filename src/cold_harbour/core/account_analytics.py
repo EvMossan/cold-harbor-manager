@@ -2,9 +2,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Protocol, Sequence
 import concurrent.futures
 
+from alpaca_trade_api.rest import REST
+
 import numpy as np
 import pandas as pd
+import logging
 
+log = logging.getLogger("IngesterRuntime")
 
 class AlpacaOrdersAPI(Protocol):
     """Minimal interface for Alpaca clients used in this module."""
@@ -167,8 +171,7 @@ def fetch_orders(
     if 'created_at' in df.columns:
         df = df.sort_values('created_at', ascending=False)
 
-    # print(f"SUCCESS. Final table: {len(df)} rows. "
-    #       f"(Check for presence of 2025-10-23)")
+    log.debug(f"SUCCESS. Final table: {len(df)} rows. ")
     return df
 
 
@@ -287,6 +290,68 @@ def fetch_orders_fast(api, days_back=365):
     print(f"SUCCESS. Final table: {len(df)} rows. "
           f"(Check for presence of 2025-10-23)")
     return df
+
+
+def get_history_start_dates(api: REST) -> tuple[datetime, datetime]:
+    """
+    Determines the earliest timestamps for orders and activities via API.
+    """
+    fallback_date = (
+        pd.Timestamp.now(tz=timezone.utc).to_pydatetime()
+        - timedelta(days=365)
+    )
+
+    try:
+        acct = api.get_account()
+        created_at_raw = getattr(acct, "created_at", None)
+        account_created = (
+            pd.to_datetime(created_at_raw, utc=True).to_pydatetime()
+            if created_at_raw
+            else fallback_date
+        )
+    except Exception as exc:
+        log.warning("Could not detect account creation date: %s", exc)
+        account_created = fallback_date
+
+    earliest_order = account_created
+    earliest_activity = account_created
+
+    try:
+        orders = api.list_orders(status="all", limit=1, direction="asc")
+        if orders:
+            raw_o = getattr(orders[0], "_raw", {})
+            ts_str = (
+                raw_o.get("submitted_at")
+                or raw_o.get("created_at")
+                or raw_o.get("updated_at")
+            )
+            if ts_str:
+                earliest_order = pd.to_datetime(
+                    ts_str, utc=True
+                ).to_pydatetime()
+    except Exception as exc:
+        log.warning("Could not fetch earliest order: %s", exc)
+
+    try:
+        acts = api.get_activities(page_size=1, direction="asc")
+        if acts:
+            raw_a = getattr(acts[0], "_raw", {})
+            ts_str = (
+                raw_a.get("transaction_time")
+                or raw_a.get("activity_time")
+                or raw_a.get("date")
+            )
+            if ts_str:
+                earliest_activity = pd.to_datetime(
+                    ts_str, utc=True
+                ).to_pydatetime()
+    except Exception as exc:
+        log.warning("Could not fetch earliest activity: %s", exc)
+
+    return (
+        earliest_order - timedelta(days=1),
+        earliest_activity - timedelta(days=1),
+    )
 
 
 def fetch_all_activities(api, start_date=None, end_date=None):

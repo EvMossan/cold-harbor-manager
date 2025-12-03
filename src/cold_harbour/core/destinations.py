@@ -19,6 +19,7 @@ DESTINATIONS: List[Dict[str, Any]] = [
             "/home/tradingbot/proxima/airflow_docer/trained_models/ensemble/"
             "ensemble_202501.joblib"
         ),
+        "trade_stream_enabled": False,
     },
     {
         "name": "cold-harbour_v1.0",
@@ -33,6 +34,7 @@ DESTINATIONS: List[Dict[str, Any]] = [
             "/home/tradingbot/proxima/airflow_docer/trained_models/ensemble/"
             "ensemble_202501.joblib"
         ),
+        "trade_stream_enabled": False,
     },
     {
         "name": "cold-harbour_v2.1",
@@ -47,6 +49,7 @@ DESTINATIONS: List[Dict[str, Any]] = [
             "/home/tradingbot/proxima/airflow_docer/trained_models/ensemble/"
             "ensemble_202501.joblib"
         ),
+        "trade_stream_enabled": False,
     },
 ]
 

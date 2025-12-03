@@ -182,6 +182,9 @@ class AccountManager:
             CLOSED_CHANNEL=cfg.get("CLOSED_CHANNEL", _Config.CLOSED_CHANNEL),
             ACCOUNT_SCHEMA=cfg.get("ACCOUNT_SCHEMA", _Config.ACCOUNT_SCHEMA),
             LOG_LEVEL=cfg.get("LOG_LEVEL"),
+            ENABLE_TRADE_STREAM=_parse_bool(
+                cfg.get("ENABLE_TRADE_STREAM", False)
+            ),
             UI_SNAPSHOT_SEC=ui_snapshot_sec,
             DISABLE_SESSION_SLEEP=_parse_bool(
                 cfg.get(

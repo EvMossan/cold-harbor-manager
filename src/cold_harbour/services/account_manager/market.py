@@ -234,8 +234,11 @@ async def _activate_session(
         asyncio.create_task(
             mgr._ui_heartbeat_worker(), name="ui_heartbeat"
         ),
-        asyncio.create_task(mgr._run_trade_stream(), name="trade_stream"),
     ]
+    if mgr.c.ENABLE_TRADE_STREAM:
+        tasks.append(
+            asyncio.create_task(mgr._run_trade_stream(), name="trade_stream")
+        )
     mgr._active_tasks = tasks
     mgr._active_session = session
 

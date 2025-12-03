@@ -49,9 +49,11 @@ class _Config:
 
     ACCOUNT_SCHEMA: Optional[str] = "accounts"
 
-    DISABLE_SESSION_SLEEP: bool = True
+    DISABLE_SESSION_SLEEP: bool = False
 
     LOG_LEVEL: Optional[str] = None
+
+    ENABLE_TRADE_STREAM: bool = False
 
     TRADE_CONDITIONS_EXCLUDE: tuple[str, ...] = (
         "",
