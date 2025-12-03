@@ -70,12 +70,3 @@ def _is_flat(qty: float) -> bool:
     """Near-zero test used in order handlers."""
     return abs(qty) < 1e-12
 
-
-def _last_trade_px(rest: Any, symbol: str) -> Optional[float]:
-    """Return last trade price from the REST client or None."""
-    try:
-        if hasattr(rest, "get_latest_trade"):
-            return float(rest.get_latest_trade(symbol).price)
-        return float(rest.get_last_trade(symbol).price)
-    except Exception:
-        return None

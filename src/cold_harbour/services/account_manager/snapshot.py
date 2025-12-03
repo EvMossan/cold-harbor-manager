@@ -10,13 +10,11 @@ import pandas as pd
 
 from cold_harbour.core.account_analytics import build_lot_portfolio
 from cold_harbour.services.account_manager import trades
+from cold_harbour.services.account_manager.db import fetch_latest_prices
+from cold_harbour.services.account_manager.loader import load_activities_from_db
 from cold_harbour.services.account_manager.utils import (
     _is_at_break_even,
-    _last_trade_px,
     _utcnow,
-)
-from cold_harbour.services.account_manager.loader import (
-    load_activities_from_db,
 )
 
 if TYPE_CHECKING:
@@ -56,6 +54,7 @@ def _build_live_row(
     entry: pd.Series,
     now_ts: datetime,
     side_map: Dict[str, str],
+    price_cache: Dict[str, float],
     symbol_hint: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Translate a lot row to match the live schema."""
@@ -87,7 +86,8 @@ def _build_live_row(
     tp_px = _safe_float(entry.get("Take_Profit_Price"))
     mkt_px = _safe_float(entry.get("Current_Price"))
     if mkt_px is None:
-        mkt_px = _last_trade_px(mgr.rest, symbol)
+        mkt_px = price_cache.get(symbol)
+        # Fallback: rely on Timescale rows; keep None if the tick is missing.
 
     buy_value = _safe_float(entry.get("Buy_Value"))
     mkt_value = _safe_float(entry.get("Current Market Value"))
@@ -224,12 +224,25 @@ async def initial_snapshot(mgr: "AccountManager") -> None:
         mgr._snapshot_ready = True
         return
 
+    symbol_series = (
+        open_df["Symbol"]
+        if "Symbol" in open_df.columns
+        else pd.Series(dtype=str)
+    )
+    sym_set = {
+        str(sym).upper()
+        for sym in symbol_series.dropna().unique()
+    }
+    price_cache = await fetch_latest_prices(mgr.ts_repo, list(sym_set))
+
     now_utc = _utcnow()
     kept = 0
     new_ids: Set[str] = set()
 
     for _, entry in open_df.iterrows():
-        row = _build_live_row(mgr, entry, now_utc, side_map)
+        row = _build_live_row(
+            mgr, entry, now_utc, side_map, price_cache=price_cache
+        )
         if row is None:
             continue
         parent_id = row["parent_id"]
@@ -249,16 +262,6 @@ async def initial_snapshot(mgr: "AccountManager") -> None:
     gone = prev_ids - new_ids
     for pid in gone:
         await mgr._delete(pid, skip_closed=True)
-
-    symbol_series = (
-        open_df["Symbol"]
-        if "Symbol" in open_df.columns
-        else pd.Series(dtype=str)
-    )
-    sym_set = {
-        str(sym).upper()
-        for sym in symbol_series.dropna().unique()
-    }
 
     log.info("Bootstrap stored %d open parents.", kept)
     mgr._trace(
@@ -346,6 +349,8 @@ async def refresh_symbol_snapshot(
                 .eq(sym)
             ].copy()
 
+        price_cache = await fetch_latest_prices(mgr.ts_repo, [sym])
+
         now_utc = _utcnow()
         new_ids: Set[str] = set()
         prev_ids = set(mgr.sym2pid.get(sym, set()))
@@ -353,7 +358,12 @@ async def refresh_symbol_snapshot(
         if open_df is not None and not open_df.empty:
             for _, entry in open_df.iterrows():
                 row = _build_live_row(
-                    mgr, entry, now_utc, side_map, symbol_hint=sym
+                    mgr,
+                    entry,
+                    now_utc,
+                    side_map,
+                    price_cache=price_cache,
+                    symbol_hint=sym,
                 )
                 if row is None:
                     continue

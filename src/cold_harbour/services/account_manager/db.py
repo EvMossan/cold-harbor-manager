@@ -14,6 +14,38 @@ async def _db_fetch(
     return await repo.fetch(sql, *args)
 
 
+async def fetch_latest_prices(
+    repo: Optional[AsyncAccountRepository], symbols: list[str]
+) -> dict[str, float]:
+    """
+    Fetch the latest price tick for a list of symbols from TimescaleDB.
+    Returns a dict {symbol: price}.
+    """
+    if not repo or not symbols:
+        return {}
+
+    symbols_upper = [s.upper() for s in symbols]
+
+    # Use DISTINCT ON to grab the newest row per symbol.
+    # Adjust the timestamp column name if the schema uses 'time'.
+    sql = """
+        SELECT DISTINCT ON (symbol) symbol, price
+        FROM alpaca_trade_data
+        WHERE symbol = ANY($1)
+        ORDER BY symbol, timestamp DESC
+    """
+
+    try:
+        rows = await repo.fetch(sql, symbols_upper)
+        return {
+            row["symbol"].upper(): float(row["price"])
+            for row in rows
+            if row.get("price") is not None
+        }
+    except Exception:
+        return {}
+
+
 async def _db_fetchrow(
     repo: Optional[AsyncAccountRepository], sql: str, *args: Any
 ) -> Optional[dict]:
