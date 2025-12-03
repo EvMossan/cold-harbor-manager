@@ -379,9 +379,8 @@ class AccountManager:
             handler.setLevel(logging.NOTSET)
             base_logger.propagate = False
 
-        padded_label = f"{self.account_label:<{self.c.ACCOUNT_COLUMN_WIDTH}}"
         self.log = AccountLoggerAdapter(
-            base_logger, padded_label, default_module="runtime"
+            base_logger, self.account_label, default_module="runtime"
         )
 
         if self.disable_session_sleep:
