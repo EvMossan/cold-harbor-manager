@@ -25,6 +25,7 @@ from cold_harbour.core.destinations import (
     DESTINATIONS,
     account_table_names,
     notify_channels_for,
+    slug_for,
 )
 
 
@@ -74,11 +75,13 @@ def _cfg_for(dest: Dict[str, Any]) -> Dict[str, Any]:
     base = _common_cfg()
     schema = base.get("ACCOUNT_SCHEMA", "accounts")
 
+    slug = slug_for(dest)
     tables = account_table_names(dest, schema=schema)
     chans = notify_channels_for(dest)
 
     cfg = {
         **base,
+        "ACCOUNT_SLUG": slug,
         "API_KEY": dest.get("key_id"),
         "SECRET_KEY": dest.get("secret_key"),
         "ALPACA_BASE_URL": dest.get(

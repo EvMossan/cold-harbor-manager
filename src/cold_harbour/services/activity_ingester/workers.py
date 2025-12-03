@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Dict
 
 import pandas as pd
 from alpaca_trade_api.rest import REST
@@ -111,6 +112,23 @@ def _df_to_activity_records(
     return records
 
 
+# -------------------------------------------------------------------------
+# Helper for JSON Logging
+# -------------------------------------------------------------------------
+def _json_dumper(obj: Any) -> str:
+    """Safe JSON dumper for logging purposes."""
+    def _default(o):
+        if isinstance(o, (datetime, pd.Timestamp)):
+            return o.isoformat()
+        if hasattr(o, "__str__"):
+            return str(o)
+        return str(type(o))
+    try:
+        return json.dumps(obj, default=_default)
+    except Exception:
+        return str(obj)
+
+
 async def run_backfill_task(
     repo: AsyncAccountRepository,
     api_key: str,
@@ -124,7 +142,7 @@ async def run_backfill_task(
     """
     log.info(f"[{slug}] Starting Backfill/Catch-up check...")
     rest = _get_rest_client(api_key, secret_key, base_url)
-    now = datetime.now(timezone.utc)
+    
     last_update = await storage.get_latest_order_time(repo, slug)
 
     if last_update:
@@ -198,29 +216,27 @@ async def run_healing_worker(
             start_date = now - timedelta(
                 seconds=IngesterConfig.HEALING_LOOKBACK_SEC
             )
-            log.debug(f"[{slug}] Running healing cycle from {start_date}")
+            # log.debug(f"[{slug}] Running healing cycle from {start_date}")
             df = fetch_orders(rest, start_date=start_date)
-            if df.empty:
-                log.debug(f"[{slug}] Healing found no orders.")
-            else:
+            if not df.empty:
                 records = _df_to_ingest_records(df)
                 count = await storage.upsert_orders(repo, slug, records)
-                log.debug(f"[{slug}] Healing upserted {count} orders.")
+                if count > 0:
+                    log.info(f"[{slug}] Healing upserted {count} orders.")
 
             try:
                 act_df = fetch_all_activities(rest, start_date=start_date)
-                if act_df.empty:
-                    log.debug(f"[{slug}] Healing found no activities.")
-                else:
+                if not act_df.empty:
                     act_records = _df_to_activity_records(
                         act_df, default_time=start_date
                     )
                     act_count = await storage.upsert_activities(
                         repo, slug, act_records
                     )
-                    log.debug(
-                        f"[{slug}] Healing upserted {act_count} activities."
-                    )
+                    if act_count > 0:
+                        log.info(
+                            f"[{slug}] Healing upserted {act_count} activities."
+                        )
             except Exception as exc:
                 log.error(
                     f"[{slug}] Healing activities fetch failed: {exc}"
@@ -243,39 +259,54 @@ async def run_stream_consumer(
     """
     Real-time WebSocket consumer.
     Listens for 'trade_updates', transforms them, and upserts to DB immediately.
+    Logs payload details to assist debugging.
     """
     log.info(f"[{slug}] Stream consumer starting...")
-    
-    # Handle Paper vs Live URL for Stream
-    # alpaca-trade-api Stream class usually expects the base API URL
-    # and handles the conversion to wss:// internally, or we pass the specific WS URL.
-    # We'll rely on the library's default behavior based on 'paper' in base_url.
-    is_paper = "paper" in base_url
     
     async def _on_trade_update(*args: Any):
         try:
             # support multiple handler signatures (conn, channel, data)
             raw = args[-1]
             event = raw._raw if hasattr(raw, "_raw") else raw
+            
+            # --- DEBUG LOGGING: RAW INCOMING ---
+            # Using INFO level so you can see it without changing env vars
+            log.info(f"[{slug}] >>> STREAM RAW: {_json_dumper(event)}")
+
             event_type = event.get("event")
             
             # 1. Handle Order Updates (status changes)
             # The event itself contains the 'order' object
             order_data = event.get("order")
             if order_data:
-                norm_order = transform.normalize_order(order_data)
-                await storage.upsert_orders(repo, slug, [norm_order])
+                try:
+                    norm_order = transform.normalize_order(order_data)
+                    # --- DEBUG LOGGING: NORMALIZED ORDER ---
+                    log.info(f"[{slug}] NORM ORDER: {_json_dumper(norm_order)}")
+                    
+                    cnt = await storage.upsert_orders(repo, slug, [norm_order])
+                    log.info(f"[{slug}] DB UPSERT ORDER: {cnt} rows")
+                except Exception as oe:
+                    log.error(f"[{slug}] Order process error: {oe}")
             
             # 2. Handle Activities (Fills)
             # 'fill' and 'partial_fill' events are essentially Trade Activities
             if event_type in ("fill", "partial_fill"):
-                norm_activity = transform.normalize_stream_activity(event)
-                await storage.upsert_activities(repo, slug, [norm_activity])
+                try:
+                    norm_activity = transform.normalize_stream_activity(event)
+                    # --- DEBUG LOGGING: NORMALIZED ACTIVITY ---
+                    log.info(f"[{slug}] NORM ACTIVITY (ID={norm_activity.get('id')}): {_json_dumper(norm_activity)}")
+                    
+                    cnt = await storage.upsert_activities(repo, slug, [norm_activity])
+                    if cnt == 0:
+                        log.warning(f"[{slug}] DB UPSERT ACTIVITY SKIPPED (Duplicate ID?): {norm_activity.get('id')}")
+                    else:
+                        log.info(f"[{slug}] DB UPSERT ACTIVITY: {cnt} rows")
+                except Exception as ae:
+                    log.error(f"[{slug}] Activity process error: {ae}")
                 
-            log.debug(f"[{slug}] Stream event processed: {event_type}")
-            
         except Exception as e:
-            log.error(f"[{slug}] Stream processing error: {e}")
+            log.error(f"[{slug}] Stream processing fatal error: {e}")
 
     # Reconnection loop
     while True:
@@ -284,14 +315,12 @@ async def run_stream_consumer(
                 api_key,
                 secret_key,
                 base_url=base_url,
-                data_feed="iex"  # Not used for trade_updates but required param
+                data_feed="iex" 
             )
             
-            # Subscribe
             stream.subscribe_trade_updates(_on_trade_update)
             
             log.info(f"[{slug}] Connecting to WebSocket...")
-            # _run_forever is a blocking async call
             await stream._run_forever()
             
         except asyncio.CancelledError:

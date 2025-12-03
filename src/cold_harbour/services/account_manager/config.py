@@ -15,6 +15,7 @@ class _Config:
     API_KEY: str
     SECRET_KEY: str
     ALPACA_BASE_URL: str = "https://paper-api.alpaca.markets"
+    ACCOUNT_SLUG: str = "default"
 
     POSTGRESQL_LIVE_SQLALCHEMY: str = ""
     CONN_STRING_POSTGRESQL: Optional[str] = None

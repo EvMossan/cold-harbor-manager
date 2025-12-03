@@ -164,6 +164,7 @@ class AccountManager:
             TABLE_ACCOUNT_METRICS=cfg.get(
                 "TABLE_ACCOUNT_METRICS", _Config.TABLE_ACCOUNT_METRICS
             ),
+            ACCOUNT_SLUG=cfg.get("ACCOUNT_SLUG", _Config.ACCOUNT_SLUG),
             MIN_STOP_GAP=float(cfg.get("MIN_STOP_GAP", _Config.MIN_STOP_GAP)),
             HEARTBEAT_SEC=heartbeat_sec,
             SNAPSHOT_SEC=snapshot_sec,

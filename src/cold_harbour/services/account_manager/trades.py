@@ -11,17 +11,17 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from cold_harbour.core.account_analytics import (
-    build_closed_trades_df_lot,
-    fetch_all_activities,
-    fetch_orders,
-)
+from cold_harbour.core.account_analytics import build_closed_trades_df_lot
 from cold_harbour.services.account_manager import snapshot
 from cold_harbour.services.account_manager.utils import (
     _is_at_break_even,
     _is_flat,
     _json_safe,
     _utcnow,
+)
+from cold_harbour.services.account_manager.loader import (
+    load_activities_from_db,
+    load_orders_from_db,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -63,11 +63,10 @@ async def sync_orders(
             minutes,
         )
     end_ts = now_ts + timedelta(minutes=1)
-    fetched = fetch_orders(
-        mgr.rest,
+    fetched = await load_orders_from_db(
+        mgr.repo,
+        mgr.c.ACCOUNT_SLUG,
         days_back=max_lookback_days,
-        start_date=start_ts,
-        end_date=end_ts,
     )
     new_df = _normalize_orders_frame(fetched)
     merged_df = pd.concat(
@@ -126,8 +125,10 @@ async def _sync_closed_trades(mgr: "AccountManager") -> None:
         return
 
     try:
-        activities_df = fetch_all_activities(mgr.rest)
-    except Exception:
+        activities_df = await load_activities_from_db(
+            mgr.repo, mgr.c.ACCOUNT_SLUG
+        )
+    except Exception:  # pragma: no cover - logging safeguard
         log.exception("Closed trades: failed to fetch activities")
         activities_df = pd.DataFrame()
 

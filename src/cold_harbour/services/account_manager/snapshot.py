@@ -8,15 +8,15 @@ from typing import Any, Dict, Optional, Set, TYPE_CHECKING
 
 import pandas as pd
 
-from cold_harbour.core.account_analytics import (
-    build_lot_portfolio,
-    fetch_all_activities,
-)
+from cold_harbour.core.account_analytics import build_lot_portfolio
 from cold_harbour.services.account_manager import trades
 from cold_harbour.services.account_manager.utils import (
     _is_at_break_even,
     _last_trade_px,
     _utcnow,
+)
+from cold_harbour.services.account_manager.loader import (
+    load_activities_from_db,
 )
 
 if TYPE_CHECKING:
@@ -201,7 +201,9 @@ async def initial_snapshot(mgr: "AccountManager") -> None:
         orders_df = pd.DataFrame()
 
     try:
-        activities_df = fetch_all_activities(mgr.rest)
+        activities_df = await load_activities_from_db(
+            mgr.repo, mgr.c.ACCOUNT_SLUG
+        )
     except Exception:
         log.exception("Snapshot: failed to fetch activities")
         activities_df = pd.DataFrame()
@@ -298,7 +300,9 @@ async def refresh_symbol_snapshot(
             orders_df = pd.DataFrame()
 
         try:
-            activities_df = fetch_all_activities(mgr.rest)
+            activities_df = await load_activities_from_db(
+                mgr.repo, mgr.c.ACCOUNT_SLUG
+            )
         except Exception:
             log.exception("Symbol snapshot: failed to fetch activities")
             activities_df = pd.DataFrame()

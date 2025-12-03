@@ -10,12 +10,14 @@ from typing import TYPE_CHECKING, Optional, Any
 import numpy as np
 import pandas as pd
 
-from cold_harbour.core.account_analytics import fetch_all_activities
 from cold_harbour.core.equity import (
     rebuild_equity_series_async,
     update_today_row_async,
 )
 from cold_harbour.services.account_manager.utils import _utcnow
+from cold_harbour.services.account_manager.loader import (
+    load_activities_from_db,
+)
 
 if TYPE_CHECKING:
     from cold_harbour.services.account_manager.runtime import AccountManager
@@ -46,7 +48,9 @@ async def _bootstrap_cash_flows(
         )
 
     try:
-        activities = fetch_all_activities(mgr.rest)
+        activities = await load_activities_from_db(
+            mgr.repo, mgr.c.ACCOUNT_SLUG
+        )
     except Exception:
         mgr.log.exception(
             "flows bootstrap failed to fetch activities"
