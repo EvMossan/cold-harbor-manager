@@ -47,7 +47,7 @@ from cold_harbour.services.account_manager.utils import (
 )
 
 class AccountLoggerAdapter(logging.LoggerAdapter):
-    """Logger adapter that adds account/module metadata for formatting."""
+    """Adapter that prefixes AccountManager logs with account/module info."""
 
     def __init__(
         self,
@@ -55,29 +55,17 @@ class AccountLoggerAdapter(logging.LoggerAdapter):
         account_label: str,
         default_module: str = "account_mgr",
     ):
-        super().__init__(
-            logger,
-            {
-                "account": account_label,
-                "log_module": default_module,
-            },
-        )
+        super().__init__(logger, {"account_label": account_label})
         self._account_label = account_label
-        self._default_module = default_module
+        self._module = default_module
 
     def process(self, msg, kwargs):
-        extra = dict(self.extra)
-        overrides = kwargs.get("extra")
-        if overrides:
-            extra.update(overrides)
-        kwargs["extra"] = extra
-        return msg, kwargs
+        prefix = f"[{self._account_label}] {self._module}"
+        return f"{prefix} {msg}", kwargs
 
     def with_module(self, module: str) -> "AccountLoggerAdapter":
-        """Return a short-lived adapter with a module override."""
-        return AccountLoggerAdapter(
-            self.logger, self._account_label, default_module=module
-        )
+        """Return a short-lived adapter that reports `<module>` in the prefix."""
+        return AccountLoggerAdapter(self.logger, self._account_label, default_module=module)
 
 #  AccountManager
 # ──────────────────────────────────────────────────────────────────────
@@ -365,10 +353,7 @@ class AccountManager:
         self.log = base_logger
         if not base_logger.handlers:
             handler = logging.StreamHandler(stream=sys.__stdout__)
-            fmt = (
-                "%(asctime)s %(levelname)-5s "
-                "%(account)s %(log_module)-15s %(message)s"
-            )
+            fmt = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
             datefmt = "%Y-%m-%d %H:%M:%S"
             formatter = logging.Formatter(fmt=fmt, datefmt=datefmt)
             formatter.converter = time.localtime  # type: ignore[attr-defined]

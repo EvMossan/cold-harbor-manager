@@ -206,26 +206,20 @@ async def _sync_closed_trades(mgr: "AccountManager") -> None:
         f"${i}" for i in range(1, len(cols) + 1)
     )
 
-    # [FIX START] Remove stale closed rows so a given sale appears once.
-    # We delete entries that share the same exit_order_id before inserting.
-    # exit_order_id lives at index 1 of each tuple (see cols above).
-    exit_ids_to_update = [str(item[1]) for item in values if item[1]]
-    if exit_ids_to_update:
-        delete_placeholders = ",".join(
-            f"${i+1}" for i in range(len(exit_ids_to_update))
-        )
-        await mgr._db_execute(
-            f"DELETE FROM {mgr.tbl_closed} "
-            f"WHERE exit_order_id IN ({delete_placeholders})",
-            *exit_ids_to_update,
-        )
-    # [FIX END]
+    conflict_target = "entry_lot_id, exit_order_id"
+    update_cols = [
+        c for c in cols if c not in ("entry_lot_id", "exit_order_id")
+    ]
+    update_clause = ", ".join(
+        f"{c}=EXCLUDED.{c}" for c in update_cols
+    )
 
     await mgr._db_executemany(
         f"""
             INSERT INTO {mgr.tbl_closed} ({columns})
             VALUES ({placeholders})
-            ON CONFLICT DO NOTHING;
+            ON CONFLICT ({conflict_target}) DO UPDATE SET
+                {update_clause};
             """,
         values,
     )
