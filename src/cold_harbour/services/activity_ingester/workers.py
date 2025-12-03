@@ -47,9 +47,10 @@ def _df_to_ingest_records(df: pd.DataFrame) -> List[dict[str, Any]]:
             {
                 "id": row.get("id"),
                 "client_order_id": row.get("client_order_id"),
+                "parent_id": row.get("parent_id"),
                 "symbol": row.get("symbol"),
                 "side": row.get("side"),
-                "type": row.get("order_type"),
+                "order_type": row.get("order_type"),
                 "status": row.get("status"),
                 "qty": row.get("qty"),
                 "filled_qty": row.get("filled_qty"),
@@ -62,7 +63,6 @@ def _df_to_ingest_records(df: pd.DataFrame) -> List[dict[str, Any]]:
                 "filled_at": _timestamp_to_datetime(row.get("filled_at")),
                 "expired_at": _timestamp_to_datetime(row.get("expired_at")),
                 "canceled_at": _timestamp_to_datetime(row.get("canceled_at")),
-                "raw_json": None,
                 "ingested_at": ingest_time,
             }
         )

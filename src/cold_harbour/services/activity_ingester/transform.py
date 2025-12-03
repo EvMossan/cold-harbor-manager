@@ -23,9 +23,10 @@ class OrderRecord(TypedDict, total=False):
 
     id: Optional[str]
     client_order_id: Optional[str]
+    parent_id: Optional[str]
     symbol: Optional[str]
     side: Optional[str]
-    type: Optional[str]
+    order_type: Optional[str]
     status: Optional[str]
     qty: Optional[Decimal]
     filled_qty: Optional[Decimal]
@@ -38,7 +39,6 @@ class OrderRecord(TypedDict, total=False):
     filled_at: Optional[datetime]
     expired_at: Optional[datetime]
     canceled_at: Optional[datetime]
-    raw_json: str
     ingested_at: datetime
 
 
@@ -139,18 +139,27 @@ def normalize_order(raw: Dict[str, Any]) -> OrderRecord:
     Returns:
         OrderRecord where prices, quantities, and timestamps are coerced
         into Decimal/UTC datetime, `symbol` is upper-cased, `side` is
-        lower-case, and `raw_json` holds the original payload.
+        lower-case, and `ingested_at` records the timestamp of ingestion.
     """
     # Handle stream structure where 'order' might be nested or flat
     # Usually passed directly as the order dictionary
     data = raw
 
+    parent_id_raw = (
+        data.get("parent_order_id") or data.get("parent_id")
+    )
+
+    order_type_raw = (
+        data.get("order_type") or data.get("type") or ""
+    )
+
     return {
         "id": data.get("id"),
         "client_order_id": data.get("client_order_id"),
+        "parent_id": str(parent_id_raw) if parent_id_raw else None,
         "symbol": str(data.get("symbol") or "").upper(),
         "side": str(data.get("side") or "").lower(),
-        "type": str(data.get("type") or data.get("order_type") or "").lower(),
+        "order_type": str(order_type_raw).lower(),
         "status": str(data.get("status") or "").lower(),
         
         "qty": _to_decimal(data.get("qty")),
@@ -166,7 +175,6 @@ def normalize_order(raw: Dict[str, Any]) -> OrderRecord:
         "expired_at": _parse_ts(data.get("expired_at")),
         "canceled_at": _parse_ts(data.get("canceled_at")),
         
-        "raw_json": _serialize_raw(raw),
         "ingested_at": datetime.now(timezone.utc),
     }
 

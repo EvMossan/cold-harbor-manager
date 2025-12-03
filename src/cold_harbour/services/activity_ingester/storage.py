@@ -42,10 +42,11 @@ async def ensure_schema_and_tables(
         CREATE TABLE IF NOT EXISTS {t_orders} (
             id UUID PRIMARY KEY,
             client_order_id TEXT,
+            parent_id TEXT,
             
             symbol TEXT NOT NULL,
             side TEXT NOT NULL,
-            type TEXT NOT NULL,
+            order_type TEXT NOT NULL,
             status TEXT NOT NULL,
             
             qty NUMERIC,
@@ -61,7 +62,6 @@ async def ensure_schema_and_tables(
             expired_at TIMESTAMPTZ,
             canceled_at TIMESTAMPTZ,
             
-            raw_json JSONB,
             ingested_at TIMESTAMPTZ DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_{slug}_orders_updated ON {t_orders}(updated_at);
@@ -135,10 +135,13 @@ async def upsert_orders(
     
     # Columns matching the dict keys from transform.normalize_order
     cols = [
-        "id", "client_order_id", "symbol", "side", "type", "status",
-        "qty", "filled_qty", "filled_avg_price", "limit_price", "stop_price",
+        "id", "client_order_id", "parent_id", "symbol", "side",
+        "order_type",
+        "status",
+        "qty", "filled_qty", "filled_avg_price", "limit_price",
+        "stop_price",
         "created_at", "updated_at", "submitted_at", "filled_at",
-        "expired_at", "canceled_at", "raw_json", "ingested_at"
+        "expired_at", "canceled_at", "ingested_at"
     ]
     
     # Prepare values list
@@ -153,7 +156,7 @@ async def upsert_orders(
     # We update fields that can change during order lifecycle
     update_cols = [
         "status", "filled_qty", "filled_avg_price", "updated_at", 
-        "filled_at", "expired_at", "canceled_at", "raw_json"
+        "filled_at", "expired_at", "canceled_at"
     ]
     updates = ",".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
 
