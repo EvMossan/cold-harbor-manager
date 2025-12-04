@@ -462,40 +462,23 @@ def fetch_all_activities(api, start_date=None, end_date=None):
     # print(f"Loaded {len(df)} account events.")
     return df
 
-
 def build_lot_portfolio(
     fills_df: pd.DataFrame,
     orders_df: pd.DataFrame,
-    api: Optional[AlpacaPositionsAPI] = None,
+    api: Any = None,
+    debug: bool = False,
 ) -> pd.DataFrame:
     """
-    Build a lot-based portfolio used for live open positions.
-
-    Args:
-        fills_df: DataFrame with columns `symbol`, `side`, `qty`, `price`,
-            `exec_time`, and `order_id` describing fills.
-        orders_df: DataFrame with `id`, `parent_id`, `status`,
-            `order_type`, `replaced_by`, `limit_price`, and `stop_price`.
-        api: Optional Alpaca client that supports `list_positions` to fetch
-            live market data.
-
-    Returns:
-        Portfolio rows ready for `accounts.open_trades_*` containing
-        columns such as `Parent ID`, `Symbol`, `Buy Date`, `Buy Qty`,
-        `Buy Price`, `Buy_Value`, `Take_Profit_Price`, `Stop_Loss_Price`,
-        `Holding_Period`, `Source`, `Current_Price`,
-        `Current Market Value`, `Profit/Loss`, `_avg_px_symbol`,
-        `TP_reach, %`, and `BrE`.
-
-    Raises:
-        Exception: Propagates Alpaca API issues when enriching market data.
+    Builds a portfolio using DEEP CHAIN tracing and SIBLING ORPHAN matching.
+    Avoids loose fuzzy matching to prevent false positives.
     """
-    # print(">>> Building portfolio: Lot-Based + Chain + "
-    #       "Orphan Matching (FIXED)...")
+    if debug:
+        print(
+            "\n>>> [DEBUG] STARTING PORTFOLIO BUILD "
+            "(DEEP CHAIN + SIBLINGS) <<<"
+        )
 
-    # === 0. HELPER: Mock _be_price if not defined globally ===
-    # Assumes Break Even is roughly the Buy Price. 
-    # Adjust logic if you have a specific formula for fees.
+    # === 0. HELPER ===
     def _be_price(p):
         return p
 
@@ -503,344 +486,434 @@ def build_lot_portfolio(
     pos_map: Dict[str, Dict[str, float]] = {}
     if api:
         try:
-            for p in api.list_positions():
+            # Fetch BOTH open positions and raw orders to help validate
+            raw_positions = api.list_positions()
+            for p in raw_positions:
                 q = float(p.qty)
                 if abs(q) < 1e-9:
                     continue
-                # Handle API variations for current price
+
                 cur_px = float(getattr(p, "current_price", 0.0))
                 if cur_px == 0.0 and q != 0:
-                    cur_px = float(p.market_value) / q
-                
+                    try:
+                        cur_px = float(p.market_value) / q
+                    except Exception:
+                        cur_px = 0.0
+
                 pos_map[p.symbol.lower()] = {
-                    "qty": q, 
-                    "avg_px": float(p.avg_entry_price), 
-                    "cur_px": cur_px
+                    "qty": q,
+                    "avg_px": float(p.avg_entry_price),
+                    "cur_px": cur_px,
                 }
         except Exception as e:
-            print(f"Warning: list_positions failed: {e}")
-            pos_map = {}
+            print(f"   [!] Warning: list_positions failed: {e}")
 
-    # === 2. PROTECTION AGAINST EMPTY INPUT ===
+    # === 2. PREPARE DATAFRAMES ===
     empty_cols = [
-        'Parent ID', 'Symbol', 'Buy Date', 'Buy Qty', 'Buy Price', 'Buy_Value',
-        'Take_Profit_Price', 'Stop_Loss_Price', 'Source', 
-        'Holding_Period', 'Current_Price', 'Current Market Value', 
-        'Profit/Loss', '_avg_px_symbol', 'TP_reach, %', 'BrE'
+        "Parent ID",
+        "Symbol",
+        "Buy Date",
+        "Buy Qty",
+        "Buy Price",
+        "Buy_Value",
+        "Take_Profit_Price",
+        "Stop_Loss_Price",
+        "Source",
+        "Holding_Period",
+        "Current_Price",
+        "Current Market Value",
+        "Profit/Loss",
+        "_avg_px_symbol",
+        "TP_reach, %",
+        "BrE",
     ]
-
     if fills_df.empty:
-        print("Warning: Trades table is empty. Portfolio is empty.")
         return pd.DataFrame(columns=empty_cols)
 
-    # Check for the presence of the critical time column
-    time_col = 'exec_time'
+    time_col = "exec_time"
     if time_col not in fills_df.columns:
-        for alt in ['transaction_time', 'timestamp', 'created_at']:
+        for alt in ["transaction_time", "timestamp", "created_at"]:
             if alt in fills_df.columns:
                 fills_df[time_col] = pd.to_datetime(fills_df[alt], utc=True)
                 break
 
     if time_col not in fills_df.columns:
-        print("ERROR: Trade time column not found. Sorting impossible.")
         return pd.DataFrame(columns=empty_cols)
 
-    # Sort trades chronologically (critical for FIFO)
     fills_df = fills_df.sort_values(time_col)
 
-    # === 3. PREPARING ORDERS ===
-    orders_map = {}
-    sell_order_parents = {}
-    children_map = {}
+    # === 3. PREPARE ORDERS MAP (FULL INDEXING) ===
+    orders_map: Dict[str, Dict[str, Any]] = {}
+    sell_order_parents: Dict[str, str] = {}
+    children_map: Dict[str, list] = {}  # Parent -> [Children]
+    replacement_map: Dict[str, str] = {}  # Old_ID -> New_ID (Chain forward)
 
     if not orders_df.empty:
-        # Remove duplicates
-        orders_df = orders_df.drop_duplicates(subset='id')
-        orders_map = orders_df.set_index('id').to_dict('index')
+        # Sort by updated_at desc to get latest status if dups exist
+        if "updated_at" in orders_df.columns:
+            orders_df = orders_df.sort_values("updated_at", ascending=False)
 
-        # Map parents for sells
-        if 'parent_id' in orders_df.columns:
-            temp = orders_df[['id', 'parent_id']].dropna()
-            sell_order_parents = pd.Series(
-                temp.parent_id.values, index=temp.id
-            ).to_dict()
+        orders_df = orders_df.drop_duplicates(subset="id")
+        orders_map = orders_df.set_index("id").to_dict("index")
 
-            # Map children
-            kids = orders_df[orders_df['parent_id'].notna()]
-            for pid, group in kids.groupby('parent_id'):
-                children_map[str(pid)] = group['id'].tolist()
+        for _, row in orders_df.iterrows():
+            oid = row["id"]
+            pid = row.get("parent_id")
+            rep_by = row.get("replaced_by")
+            replaces = row.get("replaces")
 
-    # === 4. HELPER FOR CHAINS ===
-    def trace_active_leg(start_order_id, visited=None):
-        if start_order_id not in orders_map:
-            return None
+            # Parent Map
+            if pd.notna(pid):
+                sell_order_parents[oid] = pid
+                pid_str = str(pid)
+                if pid_str not in children_map:
+                    children_map[pid_str] = []
+                children_map[pid_str].append(oid)
+
+            # Forward Link (Order A replaced by Order B)
+            if pd.notna(rep_by):
+                replacement_map[str(oid)] = str(rep_by)
+
+            # Backward Link (Order B replaces Order A)
+            if pd.notna(replaces):
+                replacement_map[str(replaces)] = str(oid)
+
+    # === 4. DEEP RECURSIVE TRACER ===
+    def get_active_legs_recursive(start_id, visited=None):
+        """
+        Recursively follows 'replaced_by' links to find the FINAL active orders.
+        """
         if visited is None:
             visited = set()
-        if start_order_id in visited:
-            return None
-        visited.add(start_order_id)
 
-        order = orders_map[start_order_id]
-        status = order.get('status')
-        o_type = order.get('order_type') or order.get('type')
+        oid = str(start_id)
+        if oid in visited:
+            return []
+
+        visited.add(oid)
+
+        # If ID not in map, we can't trace it further
+        if oid not in orders_map:
+            return []
+
+        order = orders_map[oid]
+        status = order.get("status")
+        o_type = order.get("order_type") or order.get("type")
 
         active_statuses = [
-            'new', 'held', 'accepted', 'partially_filled',
-            'pending_new', 'calculated', 'open'
+            "new",
+            "held",
+            "accepted",
+            "partially_filled",
+            "pending_new",
+            "open",
+            "calculated",
         ]
+
+        results = []
+
+        # 1. If active, return self
         if status in active_statuses:
-            if o_type == 'limit':
-                return order.get('limit_price')
-            elif o_type in ['stop', 'stop_limit']:
-                return order.get('stop_price')
+            price = None
+            if o_type == "limit":
+                price = order.get("limit_price")
+            elif o_type in ["stop", "stop_limit"]:
+                price = order.get("stop_price")
 
-        if status == 'replaced':
-            replaced_by_id = order.get('replaced_by')
-            if replaced_by_id:
-                return trace_active_leg(str(replaced_by_id), visited)
-        return None
+            if price is not None:
+                results.append(
+                    {
+                        "id": oid,
+                        "type": o_type,
+                        "price": float(price),
+                        "qty": float(order.get("qty", 0)),
+                        "status": status,
+                    }
+                )
 
-    # === 5. LOT ASSEMBLY (CORE LOGIC) ===
-    lots = {}
-    fifo_queues = {}
+        # 2. Check for replacements (The Chain)
+        next_id = replacement_map.get(oid)
+        if next_id:
+            results.extend(get_active_legs_recursive(next_id, visited))
+
+        return results
+
+    # === 5. BUILD LOTS ===
+    lots: Dict[str, Dict[str, Any]] = {}
+    fifo_queues: Dict[str, list] = {}
 
     for _, row in fills_df.iterrows():
-        side = str(row.get('side')).lower()
-        symbol = str(row.get('symbol'))
-        qty = float(row.get('qty', 0))
-        price = float(row.get('price', 0))
+        side = str(row.get("side")).lower()
+        symbol = str(row.get("symbol"))
+        qty = float(row.get("qty", 0))
+        price = float(row.get("price", 0))
         exec_time = row.get(time_col)
-        fill_oid = str(row.get('order_id'))
+        fill_oid = str(row.get("order_id"))
 
-        if side == 'buy':
+        if side == "buy":
             if fill_oid not in lots:
                 lots[fill_oid] = {
-                    'Parent ID': fill_oid,
-                    'Symbol': symbol,
-                    'Buy Date': exec_time,
-                    'Buy Price': price,
-                    'Total Cost': price * qty,
-                    'Original Qty': qty,
-                    'Remaining Qty': qty,
-                    'Source': 'Matched'
+                    "Parent ID": fill_oid,
+                    "Symbol": symbol,
+                    "Buy Date": exec_time,
+                    "Buy Price": price,
+                    "Total Cost": price * qty,
+                    "Original Qty": qty,
+                    "Remaining Qty": qty,
+                    "Source": "Matched",
                 }
                 if symbol not in fifo_queues:
                     fifo_queues[symbol] = []
                 fifo_queues[symbol].append(fill_oid)
             else:
-                lot = lots[fill_oid]
-                lot['Original Qty'] += qty
-                lot['Remaining Qty'] += qty
-                lot['Total Cost'] += (price * qty)
-                if lot['Original Qty'] > 0:
-                    lot['Buy Price'] = lot['Total Cost'] / lot['Original Qty']
+                l = lots[fill_oid]
+                l["Original Qty"] += qty
+                l["Remaining Qty"] += qty
+                l["Total Cost"] += price * qty
+                if l["Original Qty"] > 0:
+                    l["Buy Price"] = l["Total Cost"] / l["Original Qty"]
 
-        elif side == 'sell':
-            qty_to_sell = qty
-            
-            # 1. Direct link
-            parent_id = str(sell_order_parents.get(fill_oid))
-            if parent_id in lots and lots[parent_id]['Remaining Qty'] > 0:
-                deduct = min(lots[parent_id]['Remaining Qty'], qty_to_sell)
-                lots[parent_id]['Remaining Qty'] -= deduct
-                qty_to_sell -= deduct
+        elif side == "sell":
+            q_sell = qty
 
-            # 2. FIFO Matching
-            if qty_to_sell > 0.000001 and symbol in fifo_queues:
-                for lot_id in list(fifo_queues[symbol]):
-                    if qty_to_sell <= 0.000001:
+            # 1. Try Parent Link
+            pid = str(sell_order_parents.get(fill_oid))
+            if pid in lots and lots[pid]["Remaining Qty"] > 0:
+                d_val = min(lots[pid]["Remaining Qty"], q_sell)
+                lots[pid]["Remaining Qty"] -= d_val
+                q_sell -= d_val
+
+            # 2. FIFO Fallback
+            if q_sell > 1e-6 and symbol in fifo_queues:
+                for lid in list(fifo_queues[symbol]):
+                    if q_sell <= 1e-6:
                         break
-                    target = lots[lot_id]
-                    if target['Remaining Qty'] <= 0.000001:
+                    tgt = lots[lid]
+                    if tgt["Remaining Qty"] <= 1e-6:
                         continue
-                    deduct = min(target['Remaining Qty'], qty_to_sell)
-                    target['Remaining Qty'] -= deduct
-                    qty_to_sell -= deduct
+                    d_val = min(tgt["Remaining Qty"], q_sell)
+                    tgt["Remaining Qty"] -= d_val
+                    q_sell -= d_val
 
-    # === 6. FINALIZATION AND TARGET SEARCH ===
+    # === 6. PROCESS LOTS (Deep Tracing) ===
+    final_lots = []
     now = pd.Timestamp.now(tz=timezone.utc)
-    final_lots_data = []
 
     for oid, lot in lots.items():
-        qty_rem = lot['Remaining Qty']
-        if qty_rem <= 0.000001:
+        if lot["Remaining Qty"] <= 1e-6:
             continue
 
-        symbol = lot['Symbol']
-        buy_price = lot['Buy Price']
-        buy_dt = lot['Buy Date']
+        tp_px, sl_px = None, None
+        src = "Calculated"
 
-        tp_price = None
-        sl_price = None
-        source_note = 'Calculated'
-
-        # Search via Parent/Child links
+        # --- TRACE VIA PARENT/CHILDREN ---
         if oid in children_map:
+            # Check every child of this Buy Order
             for child_id in children_map[oid]:
-                child_id = str(child_id)
-                active_price = trace_active_leg(child_id)
-                if active_price is not None:
-                    child = orders_map[child_id]
-                    o_type = child.get('order_type') or child.get('type')
-                    if o_type == 'limit':
-                        tp_price = float(active_price)
-                    elif o_type in ['stop', 'stop_limit']:
-                        sl_price = float(active_price)
+                active_legs = get_active_legs_recursive(child_id)
 
-        if tp_price or sl_price:
-            source_note = 'Chain Traced'
+                for leg in active_legs:
+                    # If we find multiple active legs of same type,
+                    # currently we just take the first valid one.
+                    if leg["type"] == "limit":
+                        tp_px = leg["price"]
+                    elif leg["type"] in ["stop", "stop_limit"]:
+                        sl_px = leg["price"]
 
-        # Look up market data
-        sym_data = pos_map.get(symbol.lower(), {})
-        cur_px = sym_data.get("cur_px", np.nan)
-        avg_px_symbol = sym_data.get("avg_px", np.nan)
+        if tp_px or sl_px:
+            src = "Chain Traced"
 
-        # Compute lot-level P/L: (current price - symbol average price) * remaining qty
-        pnl = np.nan
-        if pd.notna(cur_px) and pd.notna(avg_px_symbol):
-            pnl = (cur_px - avg_px_symbol) * qty_rem
+        sdata = pos_map.get(lot["Symbol"].lower(), {})
+        final_lots.append(
+            {
+                **lot,
+                "Take_Profit_Price": tp_px,
+                "Stop_Loss_Price": sl_px,
+                "Holding_Period": (now - lot["Buy Date"]).days,
+                "Source": src,
+                "Current_Price": sdata.get("cur_px", np.nan),
+                "_avg_px_symbol": sdata.get("avg_px", np.nan),
+            }
+        )
 
-        final_lots_data.append({
-            'Parent ID': oid,
-            'Symbol': symbol,
-            'Buy Date': buy_dt,
-            'Buy Qty': qty_rem,
-            'Buy Price': buy_price,
-            'Buy_Value': qty_rem * buy_price,
-            'Take_Profit_Price': tp_price,
-            'Stop_Loss_Price': sl_price,
-            'Holding_Period': (now - buy_dt).days, 
-            'Source': source_note,
-            'Current_Price': cur_px,
-            'Current Market Value': (qty_rem * cur_px) if pd.notna(cur_px) else np.nan,
-            'Profit/Loss': pnl,
-            '_avg_px_symbol': avg_px_symbol
-        })
+    # === 7. ORPHAN MATCHING (SIBLING STRATEGY) ===
+    if debug:
+        print("--- Step 5: Orphan Matching (Sibling Pairs) ---")
 
-    # === 7. ORPHAN MATCHING (FIXED VERSION) ===
-    if not orders_df.empty:
-        active_statuses = [
-            'new', 'held', 'accepted', 'pending_new', 'open', 'calculated'
-        ]
-        type_col = 'type' if 'type' in orders_df.columns else 'order_type'
+    if not orders_df.empty and final_lots:
+        # Filter Active Sells
+        active_mask = (
+            orders_df["status"].isin(
+                [
+                    "new",
+                    "held",
+                    "accepted",
+                    "pending_new",
+                    "open",
+                    "calculated",
+                ]
+            )
+            & (orders_df["side"] == "sell")
+        )
+        orphans_df = orders_df[active_mask].copy()
 
-        potential_orphans = orders_df[
-            (orders_df['status'].isin(active_statuses)) &
-            (orders_df['side'] == 'sell') &
-            (orders_df[type_col].isin(['stop', 'stop_limit', 'limit']))
-        ]
+        for c in ["limit_price", "stop_price", "qty"]:
+            if c in orphans_df.columns:
+                orphans_df[c] = pd.to_numeric(
+                    orphans_df[c],
+                    errors="coerce",
+                )
 
-        unprotected_by_symbol = {}
-        for item in final_lots_data:
-            if (item['Stop_Loss_Price'] is None or
-                    item['Take_Profit_Price'] is None):
-                sym = item['Symbol']
-                if sym not in unprotected_by_symbol:
-                    unprotected_by_symbol[sym] = []
-                unprotected_by_symbol[sym].append(item)
+        used_order_ids = set()
 
-        for sym, items in unprotected_by_symbol.items():
-            total_exposed_qty = sum(x['Buy Qty'] for x in items)
-            sym_orders = potential_orphans[potential_orphans['symbol'] == sym]
+        for lot in final_lots:
+            # Skip if fully protected
+            if lot["Stop_Loss_Price"] and lot["Take_Profit_Price"]:
+                continue
 
-            found_tp = None
-            found_sl = None
+            sym = lot["Symbol"]
+            lot_qty = lot["Remaining Qty"]
 
-            for _, o_row in sym_orders.iterrows():
-                o_qty = float(o_row.get('qty', 0))
-                if abs(o_qty - total_exposed_qty) < 0.1:
-                    current_type = o_row.get(type_col)
-                    if current_type == 'limit' and found_tp is None:
-                        found_tp = float(o_row.get('limit_price'))
-                    elif (current_type in ['stop', 'stop_limit'] and
-                          found_sl is None):
-                        found_sl = float(o_row.get('stop_price'))
+            candidates = orphans_df[
+                (orphans_df["symbol"] == sym)
+                & (~orphans_df["id"].isin(used_order_ids))
+            ]
+            if candidates.empty:
+                continue
 
-            if found_tp is not None or found_sl is not None:
-                for item in items:
-                    updated = False
-                    if (found_tp is not None and
-                            item['Take_Profit_Price'] is None):
-                        item['Take_Profit_Price'] = found_tp
-                        updated = True
+            # Strategy: find bracket pairs (Limit + Stop) with same quantity
+            found_tp_id = None
+            found_tp_px = None
+            found_tp_qty = None
 
-                    if (found_sl is not None and
-                            item['Stop_Loss_Price'] is None):
-                        item['Stop_Loss_Price'] = found_sl
-                        updated = True
+            found_sl_id = None
+            found_sl_px = None
+            found_sl_qty = None
 
-                    if updated:
-                        item['Source'] = 'Orphan Match'
+            limits = candidates[candidates["order_type"] == "limit"]
+            stops = candidates[
+                candidates["order_type"].isin(["stop", "stop_limit"])
+            ]
 
-    if not final_lots_data:
-        return pd.DataFrame(columns=empty_cols)
+            # Best LIMIT candidate (closest to lot quantity)
+            if not limits.empty:
+                limits = limits.copy()
+                limits["diff"] = (limits["qty"] - lot_qty).abs()
+                best_limit = limits.sort_values("diff").iloc[0]
 
-    pos_df = pd.DataFrame(final_lots_data)
+                if (
+                    best_limit["diff"] < 20
+                    or (best_limit["diff"] / lot_qty) < 0.1
+                ):
+                    found_tp_id = best_limit["id"]
+                    found_tp_px = float(best_limit["limit_price"])
+                    found_tp_qty = float(best_limit["qty"])
 
-    # === 8. DERIVED COLUMNS (IMPROVED LOGIC) ===
+            # Now find STOP that matches TP quantity (sibling pair)
+            target_qty = found_tp_qty if found_tp_qty else lot_qty
 
-    # 1. Calculate price difference (P/L per share)
+            if not stops.empty:
+                stops = stops.copy()
+                stops["diff"] = (stops["qty"] - target_qty).abs()
+                best_stop = stops.sort_values("diff").iloc[0]
+
+                # Very strict match for bracket sibling
+                if best_stop["diff"] < 0.1:
+                    found_sl_id = best_stop["id"]
+                    found_sl_px = float(best_stop["stop_price"])
+                    found_sl_qty = float(best_stop["qty"])
+                elif (
+                    found_tp_id is None
+                    and best_stop["diff"] < 20
+                ):
+                    found_sl_id = best_stop["id"]
+                    found_sl_px = float(best_stop["stop_price"])
+
+            if found_tp_id and not lot["Take_Profit_Price"]:
+                lot["Take_Profit_Price"] = found_tp_px
+                lot["Source"] = "Orphan Sibling"
+                used_order_ids.add(found_tp_id)
+                if debug:
+                    print(
+                        f"   [Pair] {sym}: Linked TP "
+                        f"{found_tp_px} (Qty {found_tp_qty})"
+                    )
+
+            if found_sl_id and not lot["Stop_Loss_Price"]:
+                lot["Stop_Loss_Price"] = found_sl_px
+                lot["Source"] = "Orphan Sibling"
+                used_order_ids.add(found_sl_id)
+                if debug:
+                    print(
+                        f"   [Pair] {sym}: Linked SL "
+                        f"{found_sl_px} (Qty {found_sl_qty}) - Sibling Match"
+                    )
+
+    # === 8. FINAL CALCS ===
+    pos_df = pd.DataFrame(final_lots)
+    if pos_df.empty:
+        return pos_df
+
+    pos_df["Current Market Value"] = (
+        pos_df["Remaining Qty"] * pos_df["Current_Price"]
+    )
+    pos_df["Buy_Value"] = (
+        pos_df["Remaining Qty"] * pos_df["Buy Price"]
+    )
+
+    mask_pnl = (
+        pos_df["Current_Price"].notna()
+        & pos_df["_avg_px_symbol"].notna()
+    )
+    pos_df.loc[mask_pnl, "Profit/Loss"] = (
+        (
+            pos_df.loc[mask_pnl, "Current_Price"]
+            - pos_df.loc[mask_pnl, "_avg_px_symbol"]
+        )
+        * pos_df.loc[mask_pnl, "Remaining Qty"]
+    )
+
     diff_cur = pos_df["Current_Price"] - pos_df["Buy Price"]
-
-    # 2. Calculate distances to targets
-    # Distance to TP (positive value)
     dist_tp = pos_df["Take_Profit_Price"] - pos_df["Buy Price"]
-    # Distance to SL (positive value: Buy - SL, e.g., 100 - 90 = 10)
     dist_sl = pos_df["Buy Price"] - pos_df["Stop_Loss_Price"]
 
-    # 3. Smart TP_reach calculation
-    # If profitable (>=0) -> (Current - Buy) / (TP - Buy)
-    # If loss (<0)        -> (Current - Buy) / (Buy - SL) -> yields negative %
-
-    # Conditions
     cond_profit = (diff_cur >= 0) & (dist_tp > 0)
     cond_loss = (diff_cur < 0) & (dist_sl > 0)
 
-    tp_reach_values = np.select(
+    pos_df["TP_reach, %"] = np.select(
+        [cond_profit, cond_loss],
         [
-            cond_profit,  # If profitable and TP exists
-            cond_loss     # If loss and SL exists
+            (diff_cur / dist_tp) * 100.0,
+            (diff_cur / dist_sl) * 100.0,
         ],
-        [
-            (diff_cur / dist_tp) * 100.0,  # % progress toward TP
-            (diff_cur / dist_sl) * 100.0   # % progress toward SL (negative)
-        ],
-        default=np.nan  # If data is missing (e.g., no SL), set to NaN
-    )
-    pos_df["TP_reach, %"] = pd.Series(tp_reach_values).round(2)
-
-    # Break Even (BrE) Check (Remains unchanged)
-    def _be_price(p):
-        return p  # Placeholder if no external fee logic
-
-    def _be_price(p):
-        return p  # Placeholder if no external fee logic
+        default=np.nan,
+    ).round(2)
 
     pos_df["BrE"] = pos_df.apply(
         lambda r: int(
-            pd.notna(r["Stop_Loss_Price"]) and
-            np.isclose(
+            pd.notna(r["Stop_Loss_Price"])
+            and np.isclose(
                 r["Stop_Loss_Price"],
-                _be_price(r["Buy Price"]),
-                atol=0.01,  # CHANGED: Allow 0.01 (1 cent) difference
-                rtol=0
+                r["Buy Price"],
+                atol=0.02,
             )
         ),
         axis=1,
     )
 
-    # Format Buy Date
+    pos_df.rename(columns={"Remaining Qty": "Buy Qty"}, inplace=True)
     pos_df["Buy Date"] = (
-        pd.to_datetime(pos_df["Buy Date"], utc=True)
+        pd.to_datetime(pos_df["Buy Date"])
         .dt.strftime("%Y-%m-%d %H:%M:%S")
     )
 
-    # Final Sort
-    pos_df = pos_df.sort_values(
-        by=['Symbol', 'Buy Date'], ascending=[True, False]
-    ).reset_index(drop=True)
+    if debug:
+        print(">>> PORTFOLIO BUILD COMPLETE <<<")
 
-    return pos_df
+    return pos_df.sort_values(
+        ["Symbol", "Buy Date"],
+        ascending=[True, False],
+    ).reset_index(drop=True)
 
 
 def build_closed_trades_df_lot(
