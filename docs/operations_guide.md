@@ -38,6 +38,10 @@ new destinations or managing the runtime infrastructure.
 | `WEB_RELOAD` | When `1`, the web service runs `gunicorn --reload` for template tuning. |
 | `ACCOUNT_SCHEMA` | Optional schema prefix (default `accounts`) shared across manager/web/ingester migrations. |
 | `TRAINED_CLASSIFIER_PATH` *(if used)* | Override or extend the `trained_classifier_path` defined per destination so the manager can import a new model artifact before trading. |
+| `POSTGRESQL_LIVE_LOCAL_CONN_STRING` | Direct Postgres DSN that bypasses Cloudflare tunnels when running manager/ingester near the database or inside the same network. |
+| `TIMESCALE_LIVE_LOCAL_CONN_STRING` | Direct Timescale DSN used alongside the local Postgres tunnel bypass when running dev instances in-network. |
+| `UI_BATCH_MS` | Millisecond window before batching SSE/UI payloads (higher values throttle updates for noisy feeds). |
+| `UI_SNAPSHOT_SEC` | Time window (seconds) between full UI snapshots/deltas to ensure clients recovering from reconnects get a fresh view. |
 
 ## Database management
 

@@ -9,16 +9,17 @@ fills/orders, matches trades, and enriches every position, while
 
 ### `build_lot_portfolio`
 
-Creates a **lot-based portfolio** that mirrors the open-position table.
-It sorts fills by execution time, builds `lots` keyed by `order_id`, and
-maintains `fifo_queues` so partial closes can fall back to FIFO when a
-parent/child link is missing. The function also consumes Alpaca's
-current positions (via `api.list_positions()`) to append `cur_px` and
-`avg_px` data for live quoting. Every lot tracks `Take_Profit_Price` and
-`Stop_Loss_Price` by tracing active children through `trace_active_leg`.
-Parent-child chains are resolved by inspecting `orders_df` metadata,
-allowing the logic to follow replacements (`status == 'replaced'`) and
-derive current limit/stop levels.
+Constructs a **lot-based portfolio** that mirrors the open-position table
+while enriching it with the Deep Chain Tracer. The tracer recursively
+follows `replaced_by` links in `orders_map` to surface the final active
+legs (limit/stop) for bracket chains even when orders have been
+modified or replaced multiple times. The function still sorts fills by
+execution time, builds `lots` keyed by `order_id`, and keeps
+`fifo_queues` for partial closes, but every lot now inherits up-to-date
+`Take_Profit_Price` and `Stop_Loss_Price` values resolved from the latest
+child legs discovered by the tracer. `orders_df` metadata (`status`,
+`side`, `parent_id`, etc.) drives each pass, ensuring the lot view matches
+the live Alpaca order book.
 
 ### `build_closed_trades_df_fifo`
 
@@ -34,12 +35,14 @@ fallbacks when parent matches are unavailable.
 
 ### Orphan matching
 
-The lot portfolio includes a second pass that scans remaining open lots
-with missing stop or take-profit levels. It filters `orders_df` for
-active sell orders (`status` in `['new', 'held', ...]`) whose quantity
-matches the exposed lot quantity, then assigns orphaned TP/SL prices
-from that order. Any lot updated via this heuristic receives a `Source`
-flag of `Orphan Match` to signal the compensation logic.
+The lot portfolio includes a **Sibling Strategy** that handles orphaned
+sells (limit + stop pairs) whose explicit parent linkage is missing.
+It matches these orphaned orders with open lots by comparing quantities
+and uses the sell orders’ price legs to populate the lot’s missing TP/SL
+targets, effectively pairing the closest sibling legs when the parent
+chain can no longer be followed. Lots that receive values this way record
+`Source: Sibling Strategy`, signalling that the targets were derived
+from nearby orders rather than from a direct parent-child chain.
 
 ### Parent-child chain tracing
 

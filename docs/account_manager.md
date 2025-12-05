@@ -35,8 +35,11 @@ The `AccountManager` runs several concurrent `asyncio` tasks:
 2.  **`db_worker`**: A throttling mechanism that flushes "dirty" state (changed prices) to the database at a fixed interval (e.g., every 60s) to avoid overwhelming the DB with tick-by-tick updates, while immediate structural changes (fills) are pushed instantly.
 3.  **`snapshot_loop`**: Periodically performs a "full sync" with Alpaca to ensure local state hasn't drifted from the broker (e.g., due to missed WebSocket messages).
 4.  **`closed_trades_worker`**: Periodically scans for newly closed trades and archives them to the closed trades history table.
-5.  **`ui_heartbeat_worker`**: Emits a heartbeat signal over the PostgreSQL notification channel to let the frontend know the backend is alive.
-6.  **`market_schedule_worker`**: Keeps the local market schedule table in sync with Alpaca's calendar.
+5.  **`metrics_worker`**: Computes account KPIs (Sharpe ratios, drawdowns, win rates) and persists them to `account_metrics`, ensuring dashboards see the latest calculated indicators.
+6.  **`cash_flows_worker`**: Bootstraps and ingests cash flow activities (dividends, journals, deposits) independently of equity updates so the ledger stays current even if equity rebuilding is paused.
+7.  **`equity_intraday_worker`**: Handles minute-resolution intraday equity backfills and incremental updates, keeping `account_equity_intraday` aligned with live trades without blocking the main state loop.
+8.  **`ui_heartbeat_worker`**: Emits a heartbeat signal over the PostgreSQL notification channel to let the frontend know the backend is alive.
+9.  **`market_schedule_worker`**: Keeps the local market schedule table in sync with Alpaca's calendar.
 
 ## Data Model
 
@@ -86,6 +89,8 @@ Configuration is managed via `_Config` in `config.py`. Key environment variables
 | `ZMQ_SIP_STREAM_ENDPOINT` | ZMQ Address for prices | `tcp://127.0.0.1:5558` |
 | `POS_CHANNEL` | Postgres NOTIFY channel for positions | `pos_channel` |
 | `ACCOUNT_LABEL` | Logical name for this account | Derived from config |
+| `POSTGRESQL_LIVE_LOCAL_CONN_STRING` | Direct Postgres DSN used by `manager_run.py` when bypassing Cloudflare tunnels in local/network-adjacent runs | (Optional; overrides the tunneled value) |
+| `UI_PUSH_PCT_THRESHOLD` | Minimum percentage swing before the UI push channel emits a refreshed row | `0.0` (push every update) |
 
 ## Runtime Behavior
 

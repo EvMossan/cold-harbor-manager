@@ -42,9 +42,11 @@ For *each* configured account, the Ingester runs three concurrent tasks:
 1.  **`stream_consumer`**: Connects to the Alpaca WebSocket
 (`trade_updates`) to ingest events in real-time. It provides low-latency
 visibility into order changes.
-2.  **`backfill_task`**: Runs once at startup. It checks the latest
-timestamp in the DB and pulls historical data from the API to fill gaps
-caused by downtime.
+2.  **`backfill_task`**: An asyncio background task executed once at
+startup, separate from the stream consumer. It inspects the latest
+timestamp in the DB and pulls historical orders/activities from the API
+to fill gaps caused by downtime before the stream listener begins
+processing live events.
 3.  **`healing_worker`**: A periodic background task (default: every 5
 mins) that polls the REST API for recent history. It ensures that any
 events dropped by the WebSocket connection are eventually captured and
@@ -84,11 +86,12 @@ Stores an append-only log of financial events (FILL, DIV, FEE, JNLC).
 A key challenge is reconciling WebSocket "Trade Updates" (which don't
 have standard Activity IDs) with REST "Account Activities".
 
-The `transform.py` module solves this by generating a **Synthetic ID** for
-stream events:
+`transform.py` explicitly solves this by generating a **Synthetic ID** for
+stream events so the ingester can insert data immediately and later
+overlap the REST payloads without duplicates:
 - Format: `YYYYMMDDHHMMSSmmm::execution_id`
-- Timezone: America/New_York (matching Alpaca's internal ID
-generation).
+- Timezone: `America/New_York`, the same zone Alpaca uses for its internal
+  identifiers (see `src/cold_harbour/services/activity_ingester/transform.py`).
 
 This allows the Ingester to insert data from the Stream immediately, and
 later safely "overlap" it with data fetched by the Healing worker without
