@@ -7,9 +7,9 @@
 # exposing the databases.
 set -e
 
-# Defaults for tunnel hostnames (override via env if needed)
-CF_PG_HOSTNAME="${CF_PG_HOSTNAME:-dbtunnel-pg.cold-harbor.org}"
-CF_TS_HOSTNAME="${CF_TS_HOSTNAME:-dbtunnel-ts.cold-harbor.org}"
+# Defaults for tunnel hostnames (must be provided via env in prod)
+CF_PG_HOSTNAME="${CF_PG_HOSTNAME:-postgres.example.com}"
+CF_TS_HOSTNAME="${CF_TS_HOSTNAME:-timescale.example.com}"
 
 # Start Cloudflare tunnels if credentials are provided
 if [ -n "$CF_ACCESS_CLIENT_ID" ] && [ -n "$CF_ACCESS_CLIENT_SECRET" ]; then

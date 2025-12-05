@@ -144,7 +144,7 @@ strategy so you get parity with Cloud Run.
   ```sh
   gcloud builds submit \
     --config cloudbuild.yaml \
-    --substitutions=_SERVICE_NAME=cold-harbour-web,_REGION=europe-north1,_PROJECT_NUMBER=471500379526,COMMIT_SHA=$(git rev-parse HEAD)
+    --substitutions=_SERVICE_NAME=cold-harbour-web,_REGION=europe-north1,_PROJECT_NUMBER=YOUR_REAL_PROJECT_NUMBER,COMMIT_SHA=$(git rev-parse HEAD)
   ```
 
   The pipeline builds the image, pushes to `gcr.io/$PROJECT_ID/<service>`, and deploys to Cloud Run. `_PROJECT_NUMBER` resolves the canonical secret resource names referenced in the file.

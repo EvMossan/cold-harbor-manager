@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 .DS_Store
 src/cold_harbour/core/destinations_local.py
+src/cold_harbour/core/destinations.py

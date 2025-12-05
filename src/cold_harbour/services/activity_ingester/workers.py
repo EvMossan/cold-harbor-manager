@@ -89,6 +89,18 @@ def _df_to_activity_records(
         net_amount = _safe_value("net_amount")
         if net_amount is None:
             net_amount = _safe_value("amount")
+
+        activity_type = str(_safe_value("activity_type") or "").upper()
+        if net_amount is None and activity_type == "FILL":
+            try:
+                qty = float(_safe_value("qty") or 0.0)
+                price = float(_safe_value("price") or 0.0)
+                side = str(_safe_value("side") or "").lower()
+                sign = -1.0 if side == "buy" else 1.0
+                net_amount = sign * qty * price
+            except Exception:  # pragma: no cover - best effort fallback
+                net_amount = 0.0
+
         if net_amount is None:
             net_amount = 0
 
@@ -97,6 +109,11 @@ def _df_to_activity_records(
             transaction_time = (
                 default_time or datetime.now(timezone.utc)
             )
+        raw_row = {
+            key: None if pd.isna(value) else value
+            for key, value in row.items()
+        }
+
         records.append(
             {
                 "id": row.get("id"),
@@ -109,7 +126,7 @@ def _df_to_activity_records(
                 "net_amount": net_amount,
                 "order_id": _safe_value("order_id"),
                 "execution_id": None,
-                "raw_json": None,
+                "raw_json": _json_dumper(raw_row),
                 "ingested_at": ingest_time,
             }
         )

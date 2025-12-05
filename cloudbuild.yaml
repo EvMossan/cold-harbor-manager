@@ -3,7 +3,7 @@ options:
 substitutions:
   _SERVICE_NAME: cold-harbour-web
   _REGION: europe-north1
-  _PROJECT_NUMBER: '471500379526'
+  _PROJECT_NUMBER: 'MUST_BE_SUPPLIED_AT_BUILD_TIME'
   # Secret Manager IDs must match the secret names shown in console:
   # CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, POSTGRESQL_LIVE_CONN_STRING, TIMESCALE_LIVE_CONN_STRING
   _DB_PG_SECRET: POSTGRESQL_LIVE_CONN_STRING
@@ -34,5 +34,8 @@ steps:
     - '--set-secrets=TIMESCALE_LIVE_CONN_STRING=projects/${_PROJECT_NUMBER}/secrets/${_DB_TS_SECRET}:latest'
     - '--set-secrets=CF_ACCESS_CLIENT_ID=projects/${_PROJECT_NUMBER}/secrets/${_CF_CLIENT_ID_SECRET}:latest'
     - '--set-secrets=CF_ACCESS_CLIENT_SECRET=projects/${_PROJECT_NUMBER}/secrets/${_CF_CLIENT_SECRET_SECRET}:latest'
+    - '--set-secrets=CF_PG_HOSTNAME=projects/${_PROJECT_NUMBER}/secrets/CF_PG_HOSTNAME:latest'
+    - '--set-secrets=CF_TS_HOSTNAME=projects/${_PROJECT_NUMBER}/secrets/CF_TS_HOSTNAME:latest'
+    - '--set-secrets=GCP_PROJECT_NUMBER=projects/${_PROJECT_NUMBER}/secrets/GCP_PROJECT_NUMBER:latest'
 images:
 - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$COMMIT_SHA'
