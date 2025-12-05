@@ -7,6 +7,7 @@ from alpaca_trade_api.rest import REST
 import numpy as np
 import pandas as pd
 import logging
+import asyncpg
 
 log = logging.getLogger("IngesterRuntime")
 
@@ -181,124 +182,88 @@ def fetch_orders(
     return df
 
 
-def fetch_orders_fast(api, days_back=365):
+async def load_orders_from_db(
+    conn_str: str,
+    slug: str = "live",
+    days_back: int = 365
+) -> pd.DataFrame:
     """
-    Downloads orders using the "Sliding Window" (Time Window) method.
-
-    Optimized with multithreading to perform parallel requests. Ignores
-    Alpaca cursors. Simply takes date intervals and downloads everything
-    within them.
+    Adapted function to load orders from DB directly in notebook.
+    Fixes UUID vs String type mismatch for compatibility with portfolio logic.
     """
-    # print(f">>> ROBUST ORDER DOWNLOAD (last {days_back} days)...")
-
-    # 1. Define time boundaries
-    # Set the end date to tomorrow for reliability.
-    end_date = pd.Timestamp.now(tz=timezone.utc) + timedelta(days=1)
-    start_date = end_date - timedelta(days=days_back)
-
-    # Window size in days (5 days is optimal for status='all')
-    window_size = timedelta(days=5)
-
-    # Pre-calculate time windows to fetch
-    time_windows = []
-    current_start = start_date
-    while current_start < end_date:
-        current_end = current_start + window_size
-        time_windows.append((current_start, current_end))
-        current_start += window_size
-
-    all_raw_orders = []
-
-    def _fetch_window(time_range):
-        """Helper function to fetch a single batch in a thread."""
-        t_start_obj, t_end_obj = time_range
-        t_start = t_start_obj.isoformat()
-        t_end = t_end_obj.isoformat()
-
+    if not conn_str:
+        raise ValueError("Connection string is empty!")
+    
+    # Secure table name formatting
+    safe_slug = slug.replace("-", "_").lower()
+    table_name = f"account_activities.raw_orders_{safe_slug}"
+    
+    # Cutoff date (UTC)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+    print(f"🔌 Connecting to DB to fetch orders for '{slug}' "
+          f"from table '{table_name}'...")
+    
+    # SQL Query
+    sql = f"""
+        SELECT 
+            id, client_order_id, parent_id, symbol, side, order_type, status,
+            qty, filled_qty, filled_avg_price, limit_price, stop_price,
+            created_at, updated_at, submitted_at, filled_at, replaces, 
+            replaced_by, expired_at, canceled_at
+        FROM {table_name}
+        WHERE created_at >= $1
+        ORDER BY created_at DESC
+    """
+    
+    try:
+        conn = await asyncpg.connect(conn_str)
         try:
-            return api.list_orders(
-                status='all',
-                limit=500,
-                nested=True,
-                after=t_start,
-                until=t_end,
-                direction='desc'
-            )
-        except Exception as e:
-            print(f"   [Error] In window {t_start}: {e}")
-            return []
-
-    # 2. Execute requests in parallel
-    # max_workers=10 is usually safe for Alpaca to avoid rate limits
-    print(f"   Spawning threads for {len(time_windows)} time windows...")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as exe:
-        future_to_window = {
-            exe.submit(_fetch_window, window): window
-            for window in time_windows
-        }
-
-        for future in concurrent.futures.as_completed(future_to_window):
-            batch = future.result()
-            if batch:
-                all_raw_orders.extend(batch)
-
-    # --- UNPACKING AND CLEANING ---
-    if not all_raw_orders:
-        print("No orders found.")
+            rows = await conn.fetch(sql, cutoff)
+        finally:
+            await conn.close()
+            
+    except Exception as e:
+        print(f"Error fetching data: {e}")
         return pd.DataFrame()
 
-    print(f"Total objects downloaded: {len(all_raw_orders)}. "
-          f"Starting unpacking...")
+    if not rows:
+        print("No rows returned.")
+        return pd.DataFrame()
 
-    flat_rows = []
-    seen_ids = set()
-
-    # Process downloaded objects
-    for order_obj in all_raw_orders:
-        root = getattr(order_obj, '_raw', order_obj)
-
-        if root['id'] in seen_ids:
-            continue
-        seen_ids.add(root['id'])
-
-        # Parent
-        parent_row = root.copy()
-        legs_data = parent_row.pop('legs', None)
-        parent_row['parent_id'] = None
-        flat_rows.append(parent_row)
-
-        # Children
-        if legs_data:
-            for leg in legs_data:
-                leg_row = leg.copy()
-                leg_row['parent_id'] = root['id']
-                flat_rows.append(leg_row)
-
-    df = pd.DataFrame(flat_rows)
-
-    # Type conversion
+    print(f"Loaded {len(rows)} rows. Processing DataFrame...")
+    
+    # Convert asyncpg Records to list of dicts
+    data = [dict(row) for row in rows]
+    df = pd.DataFrame(data)
+    
+    # --- Type Conversion ---
+    
+    # 1. Dates to UTC
     date_cols = [
-        'created_at',
-        'updated_at',
-        'filled_at',
-        'submitted_at',
-        'replaced_at',
+        "created_at", "updated_at", "submitted_at", 
+        "filled_at", "expired_at", "canceled_at"
     ]
     for col in date_cols:
         if col in df.columns:
-            df[col] = pd.to_datetime(df[col], utc=True, errors='coerce')
-
-    num_cols = ['qty', 'filled_qty', 'limit_price', 'stop_price']
+            df[col] = pd.to_datetime(df[col], utc=True)
+            
+    # 2. Numbers (Decimal to float)
+    num_cols = [
+        "qty", "filled_qty", "filled_avg_price", 
+        "limit_price", "stop_price"
+    ]
     for col in num_cols:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Sorting for aesthetics
-    if 'created_at' in df.columns:
-        df = df.sort_values('created_at', ascending=False)
+    # 3. UUIDs to Strings (CRITICAL FIX)
+    # asyncpg returns uuid.UUID objects, but portfolio logic expects strings.
+    # We explicitly cast them, preserving None values as None (not "None").
+    uuid_cols = ["id", "parent_id", "client_order_id"]
+    for col in uuid_cols:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: str(x) if x else None)
 
-    print(f"SUCCESS. Final table: {len(df)} rows. "
-          f"(Check for presence of 2025-10-23)")
     return df
 
 
@@ -1325,11 +1290,11 @@ def calculate_metrics(
                     'exit_class': major_type
                 })
             
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=DeprecationWarning)
-                # Fix for FutureWarning in groupby
-                calc_cols = ['qty', 'entry_price', 'exit_price', 'pnl_cash', 'pnl_cash_fifo', 'entry_time', 'exit_time', 'exit_class_raw']
-                collapsed = df.groupby('entry_lot_id')[calc_cols].apply(aggregate_lot).reset_index()
+            # with warnings.catch_warnings():
+            #     warnings.filterwarnings("ignore", category=DeprecationWarning)
+            # Fix for FutureWarning in groupby
+            calc_cols = ['qty', 'entry_price', 'exit_price', 'pnl_cash', 'pnl_cash_fifo', 'entry_time', 'exit_time', 'exit_class_raw']
+            collapsed = df.groupby('entry_lot_id')[calc_cols].apply(aggregate_lot).reset_index()
         else:
             collapsed = df.copy()
             collapsed.rename(columns={'exit_class_raw': 'exit_class'}, inplace=True)
@@ -1456,3 +1421,121 @@ def calculate_metrics(
     }
 
     return pd.DataFrame([result]).T.rename(columns={0: 'Value'})
+
+
+def check_sl_tp(api, symbols="RIG"):
+    """
+    Performs a summarized check of broker state (Open + Held orders)
+    for the given symbol or list of symbols.
+
+    Instead of printing a long report per symbol, this function
+    prints a single table with one row per symbol showing whether
+    the position is correctly protected by orders or has issues.
+
+    Args:
+        api: The Alpaca API instance.
+        symbols (str or list): Ticker symbol or list of symbols.
+    """
+    # Normalize symbols to a list
+    if isinstance(symbols, str):
+        symbols = [symbols]
+
+    summary_rows = []
+
+    for symbol in symbols:
+        # 1. Query open orders (live)
+        try:
+            active_orders = api.list_orders(
+                status="open",
+                symbols=[symbol],
+                limit=50,
+            )
+        except Exception as e:
+            print(f"Error fetching open orders for {symbol}: {e}")
+            active_orders = []
+
+        # 2. Query held orders (waiting)
+        try:
+            held_orders = api.list_orders(
+                status="held",
+                symbols=[symbol],
+                limit=50,
+            )
+        except Exception as e:
+            print(f"Error fetching held orders for {symbol}: {e}")
+            held_orders = []
+
+        # Compute sell-side quantities for protection
+        open_sell_qty = sum(
+            float(o.qty) for o in active_orders if o.side == "sell"
+        )
+        held_sell_qty = sum(
+            float(o.qty) for o in held_orders if o.side == "sell"
+        )
+
+        # 3. Get actual position
+        try:
+            pos = api.get_position(symbol)
+            pos_qty = float(pos.qty)
+        except Exception:
+            pos_qty = 0.0
+
+        # 4. Determine protection status
+        if pos_qty == 0 and open_sell_qty == 0 and held_sell_qty == 0:
+            status = "No position, no orders"
+            issue = False
+        elif pos_qty == 0 and (open_sell_qty > 0 or held_sell_qty > 0):
+            status = "No position, but exit orders exist"
+            issue = True
+        elif (
+            pos_qty > 0
+            and open_sell_qty == pos_qty
+            and held_sell_qty == pos_qty
+        ):
+            status = "OK (fully protected bracket)"
+            issue = False
+        elif pos_qty > 0 and open_sell_qty == 0 and held_sell_qty == 0:
+            status = "Unprotected (no exit orders)"
+            issue = True
+        else:
+            status = "Imbalance between position and exit orders"
+            issue = True
+
+        summary_rows.append(
+            {
+                "Symbol": symbol,
+                "PositionQty": pos_qty,
+                "OpenSellQty": open_sell_qty,
+                "HeldSellQty": held_sell_qty,
+                "Status": status,
+                "HasIssue": issue,
+            }
+        )
+
+    # 5. Print single summary table
+    if not summary_rows:
+        print("No symbols to check.")
+        return pd.DataFrame(columns=[
+            "Symbol",
+            "PositionQty",
+            "OpenSellQty",
+            "HeldSellQty",
+            "Status",
+            "HasIssue",
+        ])
+
+    df_summary = pd.DataFrame(summary_rows)
+
+    print("\n=== Broker Protection Summary ===")
+    print(df_summary.to_string(index=False))
+
+    total = len(df_summary)
+    issues = df_summary["HasIssue"].sum()
+    ok = total - issues
+
+    print("\nSummary:")
+    print(f"  Total symbols checked: {total}")
+    print(f"  OK (fully consistent): {ok}")
+    print(f"  With issues:           {issues}")
+
+    return df_summary
