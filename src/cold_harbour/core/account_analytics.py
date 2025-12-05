@@ -1028,7 +1028,7 @@ def build_closed_trades_df_lot(
             "exit_order_id": sell['id'],
             "exit_parent_id": sell.get('parent_id'),
             "symbol": sell['symbol'],
-            "side": "long",
+            "side": "Long",
             "qty": qty,
             "entry_time": buy['time'],
             "entry_price": buy['price'],
@@ -1198,7 +1198,7 @@ def build_closed_trades_df_fifo(
                         "exit_order_id": oid,
                         "exit_parent_id": curr_meta.get('parent_id'),
                         "symbol": symbol,
-                        "side": "long",
+                        "side": "Long",
                         "qty": matched_qty,
                         "entry_time": lot['time'],
                         "entry_price": lot['price'],
@@ -1231,11 +1231,6 @@ def build_closed_trades_df_fifo(
     
     return results_df.sort_values('exit_time', ascending=False).reset_index(drop=True)
 
-
-import pandas as pd
-import numpy as np
-import warnings
-from typing import Optional
 
 def calculate_metrics(
     trades_df: pd.DataFrame,
