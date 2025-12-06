@@ -43,16 +43,12 @@ def _df_to_ingest_records(df: pd.DataFrame) -> List[dict[str, Any]]:
     """Transform fetched order table into storage-ready records."""
     ingest_time = datetime.now(timezone.utc)
     records: List[dict[str, Any]] = []
-    for _, row in df.iterrows():
-        # Convert the row to a plain mapping for raw storage.
+    df_clean = df.astype(object).where(pd.notnull(df), None)
+    for _, row in df_clean.iterrows():
         raw_data = row.to_dict()
         legs_data = row.get("legs")
-        na_flag = pd.isna(legs_data)
-        if isinstance(na_flag, bool) and na_flag:
-            legs_data = None
-        legs_json = (
-            _json_dumper(legs_data) if legs_data is not None else None
-        )
+        legs_json = _json_dumper(legs_data) if legs_data else None
+
         records.append(
             {
                 "id": row.get("id"),
@@ -93,7 +89,8 @@ def _df_to_activity_records(
     """Transform fetched activity table into storage-ready records."""
     ingest_time = datetime.now(timezone.utc)
     records: List[dict[str, Any]] = []
-    for _, row in df.iterrows():
+    df_clean = df.astype(object).where(pd.notnull(df), None)
+    for _, row in df_clean.iterrows():
         def _safe_value(key: str) -> Any:
             value = row.get(key)
             return None if pd.isna(value) else value
@@ -121,10 +118,7 @@ def _df_to_activity_records(
             transaction_time = (
                 default_time or datetime.now(timezone.utc)
             )
-        raw_row = {
-            key: None if pd.isna(value) else value
-            for key, value in row.items()
-        }
+        raw_row = row.to_dict()
 
         records.append(
             {
@@ -173,60 +167,67 @@ async def run_backfill_task(
     One-off task on startup.
     Uses the latest order time as a watermark for fetch_orders.
     """
-    log.info(f"[{slug}] Starting Backfill/Catch-up check...")
-    rest = _get_rest_client(api_key, secret_key, base_url)
-    
-    last_update = await storage.get_latest_order_time(repo, slug)
-
-    if last_update:
-        order_start_date = last_update - timedelta(minutes=30)
-        activity_start_date = order_start_date
-        log.info(
-            f"[{slug}] Incremental backfill from {order_start_date}"
-        )
-    else:
-        log.info(
-            f"[{slug}] Detecting account history start dates via API..."
-        )
-        (
-            order_start_date,
-            activity_start_date,
-        ) = get_history_start_dates(rest)
-        log.info(
-            f"[{slug}] Dynamic Backfill Plan: Orders from "
-            f"{order_start_date}, Activities from {activity_start_date}"
-        )
-
     try:
-        df = fetch_orders(rest, start_date=order_start_date)
-    except Exception as exc:
-        log.error(f"[{slug}] fetch_orders failed: {exc}")
-        return
+        log.info(f"[{slug}] Starting Backfill/Catch-up check...")
+        rest = _get_rest_client(api_key, secret_key, base_url)
+        
+        last_update = await storage.get_latest_order_time(repo, slug)
 
-    if df.empty:
-        log.info(f"[{slug}] No orders returned; backfill is complete.")
-    else:
-        records = _df_to_ingest_records(df)
-        count = await storage.upsert_orders(repo, slug, records)
-        log.info(f"[{slug}] Upserted {count} orders from fetch_orders.")
+        if last_update:
+            order_start_date = last_update - timedelta(minutes=30)
+            activity_start_date = order_start_date
+            log.info(
+                f"[{slug}] Incremental backfill from {order_start_date}"
+            )
+        else:
+            log.info(
+                f"[{slug}] Detecting account history start dates via API..."
+            )
+            (
+                order_start_date,
+                activity_start_date,
+            ) = get_history_start_dates(rest)
+            log.info(
+                f"[{slug}] Dynamic Backfill Plan: Orders from "
+                f"{order_start_date}, Activities from {activity_start_date}"
+            )
 
-    log.info(
-        f"[{slug}] Starting Activities Backfill from {activity_start_date}"
-    )
-    try:
-        act_df = fetch_all_activities(
-            rest, start_date=activity_start_date
+        try:
+            df = await asyncio.to_thread(
+                fetch_orders, rest, start_date=order_start_date
+            )
+        except Exception as exc:
+            log.error(f"[{slug}] fetch_orders failed: {exc}")
+            return
+
+        if df.empty:
+            log.info(f"[{slug}] No orders returned; backfill is complete.")
+        else:
+            records = await asyncio.to_thread(_df_to_ingest_records, df)
+            count = await storage.upsert_orders(repo, slug, records)
+            log.info(f"[{slug}] Upserted {count} orders from fetch_orders.")
+
+        log.info(
+            f"[{slug}] Starting Activities Backfill from {activity_start_date}"
         )
-        if not act_df.empty:
-            act_records = _df_to_activity_records(
-                act_df, default_time=activity_start_date
+        try:
+            act_df = await asyncio.to_thread(
+                fetch_all_activities, rest, start_date=activity_start_date
             )
-            act_count = await storage.upsert_activities(
-                repo, slug, act_records
-            )
-            log.info(f"[{slug}] Upserted {act_count} activities.")
+            if not act_df.empty:
+                act_records = await asyncio.to_thread(
+                    _df_to_activity_records,
+                    act_df,
+                    default_time=activity_start_date
+                )
+                act_count = await storage.upsert_activities(
+                    repo, slug, act_records
+                )
+                log.info(f"[{slug}] Upserted {act_count} activities.")
+        except Exception as exc:
+            log.error(f"[{slug}] Activities backfill failed: {exc}")
     except Exception as exc:
-        log.error(f"[{slug}] Activities backfill failed: {exc}")
+        log.exception(f"[{slug}] CRITICAL: Backfill task crashed: {exc}")
 
 
 async def run_healing_worker(
@@ -250,18 +251,26 @@ async def run_healing_worker(
                 seconds=IngesterConfig.HEALING_LOOKBACK_SEC
             )
             # log.debug(f"[{slug}] Running healing cycle from {start_date}")
-            df = fetch_orders(rest, start_date=start_date)
+            df = await asyncio.to_thread(
+                fetch_orders, rest, start_date=start_date
+            )
             if not df.empty:
-                records = _df_to_ingest_records(df)
+                records = await asyncio.to_thread(
+                    _df_to_ingest_records, df
+                )
                 count = await storage.upsert_orders(repo, slug, records)
                 if count > 0:
                     log.info(f"[{slug}] Healing upserted {count} orders.")
 
             try:
-                act_df = fetch_all_activities(rest, start_date=start_date)
+                act_df = await asyncio.to_thread(
+                    fetch_all_activities, rest, start_date=start_date
+                )
                 if not act_df.empty:
-                    act_records = _df_to_activity_records(
-                        act_df, default_time=start_date
+                    act_records = await asyncio.to_thread(
+                        _df_to_activity_records,
+                        act_df,
+                        default_time=start_date
                     )
                     act_count = await storage.upsert_activities(
                         repo, slug, act_records
