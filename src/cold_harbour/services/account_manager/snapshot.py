@@ -17,6 +17,48 @@ from cold_harbour.services.account_manager.utils import (
     _utcnow,
 )
 
+
+def _aggregate_lots(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggregate build_lot_portfolio output so each parent_id appears once.
+    """
+    if df.empty or "Parent ID" not in df.columns:
+        return df
+
+    valid = df[
+        df["Parent ID"].notna() & (df["Parent ID"] != "")
+    ].copy()
+    if valid.empty:
+        return df
+
+    aggs = {
+        "Symbol": "first",
+        "Buy Date": "first",
+        "Buy Qty": "sum",
+        "Remaining Qty": "sum",
+        "Buy_Value": "sum",
+        "Current Market Value": "sum",
+        "Profit/Loss": "sum",
+        "Current_Price": "first",
+        "Take_Profit_Price": "first",
+        "Stop_Loss_Price": "first",
+        "Source": "first",
+        "_avg_px_symbol": "first",
+    }
+    actual_aggs = {k: v for k, v in aggs.items() if k in valid.columns}
+
+    grouped = valid.groupby("Parent ID", as_index=False).agg(actual_aggs)
+
+    if "Buy Price" in valid.columns and "Buy_Value" in grouped.columns:
+        grouped["Buy Price"] = grouped.apply(
+            lambda r: r["Buy_Value"] / r["Buy Qty"]
+            if r["Buy Qty"]
+            else 0.0,
+            axis=1,
+        )
+
+    return grouped
+
 if TYPE_CHECKING:
     from cold_harbour.services.account_manager.runtime import AccountManager
 
@@ -77,7 +119,7 @@ def _build_live_row(
         else None
     )
 
-    qty_val = _safe_float(entry.get("Buy Qty"))
+    qty_val = _safe_float(entry.get("Remaining Qty"))
     qty = qty_val if qty_val is not None else 0.0
 
     avg_fill = _safe_float(entry.get("Buy Price"))
@@ -220,6 +262,7 @@ async def initial_snapshot(mgr: "AccountManager") -> None:
         fills_df = pd.DataFrame()
 
     open_df = build_lot_portfolio(fills_df, orders_df, api=mgr.rest)
+    open_df = _aggregate_lots(open_df)
     if open_df is None or open_df.empty:
         for pid in list(prev_ids):
             await mgr._delete(pid, skip_closed=True)
@@ -340,6 +383,7 @@ async def refresh_symbol_snapshot(
             orders_df = orders_df.copy()
 
         open_df = build_lot_portfolio(fills_df, orders_df, api=mgr.rest)
+        open_df = _aggregate_lots(open_df)
         if open_df is None or open_df.empty:
             for pid in list(mgr.sym2pid.get(sym, set())):
                 await mgr._delete(pid, skip_closed=True)

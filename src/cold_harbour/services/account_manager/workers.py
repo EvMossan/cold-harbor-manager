@@ -241,9 +241,12 @@ async def _build_metrics_payload(
             "profit_loss": "Profit/Loss",
             "mkt_value": "Current Market Value",
             "avg_fill": "Buy Price",
-            "qty": "Buy Qty",
+            "qty": "Remaining Qty",
         },
     )
+
+    if "Remaining Qty" in open_df.columns:
+        open_df["Buy Qty"] = open_df["Remaining Qty"]
 
     activities_df = _rename_columns(
         activities_df,
