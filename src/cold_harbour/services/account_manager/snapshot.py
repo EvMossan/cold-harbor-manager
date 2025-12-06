@@ -20,23 +20,33 @@ from cold_harbour.services.account_manager.utils import (
 
 def _aggregate_lots(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Aggregate build_lot_portfolio output so each parent_id appears once.
+    Aggregate separate fill lots into a single parent row.
+    Necessary because the DB uses parent_id as PK, but build_lot_portfolio
+    returns one row per fill.
     """
     if df.empty or "Parent ID" not in df.columns:
         return df
 
-    valid = df[
-        df["Parent ID"].notna() & (df["Parent ID"] != "")
-    ].copy()
+    # Filter out rows without a Parent ID
+    valid = df[df["Parent ID"].notna() & (df["Parent ID"] != "")].copy()
     if valid.empty:
         return df
 
+    # Pre-calculate weighted value for accurate Avg Price reconstruction
+    # We use Remaining Qty because that represents the currently held portion.
+    # Ensure columns exist and fill NaNs to avoid math errors.
+    if "Buy Price" in valid.columns and "Remaining Qty" in valid.columns:
+        valid["_w_val"] = valid["Buy Price"].fillna(0.0) * valid["Remaining Qty"].fillna(0.0)
+    else:
+        valid["_w_val"] = 0.0
+
+    # Define aggregation rules
     aggs = {
         "Symbol": "first",
-        "Buy Date": "first",
-        "Buy Qty": "sum",
-        "Remaining Qty": "sum",
-        "Buy_Value": "sum",
+        "Buy Date": "first",      # Keep earliest date
+        "Buy Qty": "sum",         # Sum original size
+        "Remaining Qty": "sum",   # Sum active size
+        "_w_val": "sum",          # Sum weighted value for price calc
         "Current Market Value": "sum",
         "Profit/Loss": "sum",
         "Current_Price": "first",
@@ -44,18 +54,27 @@ def _aggregate_lots(df: pd.DataFrame) -> pd.DataFrame:
         "Stop_Loss_Price": "first",
         "Source": "first",
         "_avg_px_symbol": "first",
+        # Preserve TP_reach if possible (taking first isn't perfect but sufficient for summary)
+        "TP_reach, %": "first", 
     }
+    
+    # Only aggregate columns that actually exist in the DF
     actual_aggs = {k: v for k, v in aggs.items() if k in valid.columns}
 
+    # Group by Parent ID
     grouped = valid.groupby("Parent ID", as_index=False).agg(actual_aggs)
 
-    if "Buy Price" in valid.columns and "Buy_Value" in grouped.columns:
+    # Re-calculate weighted average Buy Price
+    if "_w_val" in grouped.columns and "Remaining Qty" in grouped.columns:
         grouped["Buy Price"] = grouped.apply(
-            lambda r: r["Buy_Value"] / r["Buy Qty"]
-            if r["Buy Qty"]
-            else 0.0,
-            axis=1,
+            lambda r: r["_w_val"] / r["Remaining Qty"] 
+            if r["Remaining Qty"] and r["Remaining Qty"] > 1e-9 else 0.0, 
+            axis=1
         )
+        # Drop temp column to keep it clean
+        grouped.drop(columns=["_w_val"], inplace=True)
+    else:
+        grouped["Buy Price"] = 0.0
 
     return grouped
 
@@ -167,13 +186,13 @@ def _build_live_row(
 
 def refresh_row_metrics(row: Dict[str, Any], now_ts: datetime) -> None:
     """Compute KPIs for a row: values, P&L, reach %, holding days."""
-    qty = row.get("qty", 0)
-    entry_px = row.get("avg_fill", 0.0)
-    basis_px = (
-        row.get("avg_px_symbol")
-        if row.get("avg_px_symbol") is not None
-        else entry_px
-    )
+    qty = _safe_float(row.get("qty")) or 0.0
+    entry_px = _safe_float(row.get("avg_fill")) or 0.0
+    basis_raw = row.get("avg_px_symbol")
+    basis_px = _safe_float(basis_raw)
+    if basis_px is None:
+        basis_px = entry_px
+
     mkt_px = row.get("mkt_px")
     tp_px = row.get("tp_px")
     sl_px = row.get("sl_px")

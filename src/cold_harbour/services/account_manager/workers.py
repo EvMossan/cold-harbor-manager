@@ -244,7 +244,6 @@ async def _build_metrics_payload(
             "qty": "Remaining Qty",
         },
     )
-
     if "Remaining Qty" in open_df.columns:
         open_df["Buy Qty"] = open_df["Remaining Qty"]
 
