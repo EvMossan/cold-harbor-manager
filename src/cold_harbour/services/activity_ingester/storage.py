@@ -65,6 +65,8 @@ async def ensure_schema_and_tables(
             expired_at TIMESTAMPTZ,
             canceled_at TIMESTAMPTZ,
             replaced_at TIMESTAMPTZ,
+            raw_json JSONB,
+            legs JSONB,
 
             ingested_at TIMESTAMPTZ DEFAULT NOW()
         );
@@ -143,7 +145,8 @@ async def upsert_orders(
         "replaces", "symbol", "side", "order_type", "status",
         "qty", "filled_qty", "filled_avg_price", "limit_price", "stop_price",
         "created_at", "updated_at", "submitted_at", "filled_at",
-        "expired_at", "canceled_at", "replaced_at", "ingested_at"
+        "expired_at", "canceled_at", "replaced_at", "raw_json", "legs",
+        "ingested_at"
     ]
     
     # Prepare values list
@@ -159,7 +162,7 @@ async def upsert_orders(
     update_cols = [
         "status", "filled_qty", "filled_avg_price", "updated_at",
         "filled_at", "expired_at", "canceled_at", "replaced_at",
-        "replaced_by"
+        "replaced_by", "raw_json", "legs"
     ]
     updates = ",".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
 

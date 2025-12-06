@@ -44,6 +44,15 @@ def _df_to_ingest_records(df: pd.DataFrame) -> List[dict[str, Any]]:
     ingest_time = datetime.now(timezone.utc)
     records: List[dict[str, Any]] = []
     for _, row in df.iterrows():
+        # Convert the row to a plain mapping for raw storage.
+        raw_data = row.to_dict()
+        legs_data = row.get("legs")
+        na_flag = pd.isna(legs_data)
+        if isinstance(na_flag, bool) and na_flag:
+            legs_data = None
+        legs_json = (
+            _json_dumper(legs_data) if legs_data is not None else None
+        )
         records.append(
             {
                 "id": row.get("id"),
@@ -68,6 +77,9 @@ def _df_to_ingest_records(df: pd.DataFrame) -> List[dict[str, Any]]:
                 "expired_at": _timestamp_to_datetime(row.get("expired_at")),
                 "canceled_at": _timestamp_to_datetime(row.get("canceled_at")),
                 "replaced_at": _timestamp_to_datetime(row.get("replaced_at")),
+                "raw_json": _json_dumper(raw_data),
+                "legs": legs_json,
+
                 "ingested_at": ingest_time,
             }
         )

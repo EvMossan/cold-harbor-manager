@@ -43,6 +43,8 @@ class OrderRecord(TypedDict, total=False):
     expired_at: Optional[datetime]
     canceled_at: Optional[datetime]
     replaced_at: Optional[datetime]
+    raw_json: Optional[str]
+    legs: Optional[str]
     ingested_at: datetime
 
 
@@ -157,6 +159,11 @@ def normalize_order(raw: Dict[str, Any]) -> OrderRecord:
         data.get("order_type") or data.get("type") or ""
     )
 
+    legs_raw = data.get("legs")
+    legs_json = (
+        _serialize_raw(legs_raw) if legs_raw is not None else None
+    )
+
     return {
         "id": data.get("id"),
         "client_order_id": data.get("client_order_id"),
@@ -182,6 +189,9 @@ def normalize_order(raw: Dict[str, Any]) -> OrderRecord:
         "expired_at": _parse_ts(data.get("expired_at")),
         "canceled_at": _parse_ts(data.get("canceled_at")),
         "replaced_at": _parse_ts(data.get("replaced_at")),
+
+        "raw_json": _serialize_raw(data),
+        "legs": legs_json,
 
         "ingested_at": datetime.now(timezone.utc),
     }
