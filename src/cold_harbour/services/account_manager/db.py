@@ -233,7 +233,7 @@ async def _ensure_tables(
                 parent_id        text PRIMARY KEY,
                 symbol           text,
                 filled_at        timestamptz,
-                qty              integer,
+                qty              real,
                 avg_fill         real,
                 avg_px_symbol    real,
                 sl_child         text,

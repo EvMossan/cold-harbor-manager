@@ -136,18 +136,22 @@ def refresh_row_metrics(row: Dict[str, Any], now_ts: datetime) -> None:
     tp_px = row.get("tp_px")
     sl_px = row.get("sl_px")
 
-    if mkt_px is None or qty == 0:
-        return
-
     row["buy_value"] = qty * entry_px
-    row["mkt_value"] = qty * mkt_px
-    row["profit_loss"] = qty * (mkt_px - basis_px)
-    row["profit_loss_lot"] = row["mkt_value"] - row["buy_value"]
-
     try:
         row["holding_days"] = (now_ts - row["filled_at"]).days
     except Exception:
         row["holding_days"] = None
+
+    if mkt_px is None or qty == 0:
+        row["mkt_value"] = None
+        row["profit_loss"] = None
+        row["profit_loss_lot"] = None
+        row["tp_sl_reach_pct"] = None
+        return
+
+    row["mkt_value"] = qty * mkt_px
+    row["profit_loss"] = qty * (mkt_px - basis_px)
+    row["profit_loss_lot"] = row["mkt_value"] - row["buy_value"]
 
     target_px = tp_px if row["profit_loss_lot"] >= 0 else sl_px
     if target_px and not math.isclose(target_px, entry_px):

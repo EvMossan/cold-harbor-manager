@@ -108,6 +108,11 @@ async def load_activities_from_db(
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
+    uuid_cols = ["id", "order_id", "execution_id"]
+    for col in uuid_cols:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: str(x) if x else None)
+
     if "symbol" in df.columns:
         df["symbol"] = df["symbol"].astype(str).str.upper()
     if "activity_type" in df.columns:
