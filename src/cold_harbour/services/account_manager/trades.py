@@ -404,12 +404,10 @@ async def _on_trade_update(mgr: "AccountManager", data: Any) -> None:
                         pass
                 return
 
-            fill_qty = int(
-                float(
-                    odict.get("filled_qty")
-                    or getattr(data, "qty", 0)
-                    or 0
-                )
+            fill_qty = float(
+                odict.get("filled_qty")
+                or getattr(data, "qty", 0)
+                or 0.0
             )
             fill_price = float(
                 odict.get("filled_avg_price")
@@ -469,12 +467,10 @@ async def _on_trade_update(mgr: "AccountManager", data: Any) -> None:
         if oid in mgr.state and event in {"fill", "partial_fill"}:
             row = mgr.state[oid]
             old = row.copy()
-            row["qty"] = int(
-                float(
-                    odict.get("filled_qty")
-                    or getattr(data, "qty", 0)
-                    or row["qty"]
-                )
+            row["qty"] = float(
+                odict.get("filled_qty")
+                or getattr(data, "qty", 0)
+                or row["qty"]
             )
             row["avg_fill"] = float(
                 odict.get("filled_avg_price")
@@ -534,12 +530,10 @@ async def _on_trade_update(mgr: "AccountManager", data: Any) -> None:
         and oid not in mgr.state
         and event in {"partial_fill", "fill"}
     ):
-        fill_qty = int(
-            float(
-                odict.get("filled_qty")
-                or getattr(data, "qty", 0)
-                or 0
-            )
+        fill_qty = float(
+            odict.get("filled_qty")
+            or getattr(data, "qty", 0)
+            or 0.0
         )
         fill_price = float(
             odict.get("filled_avg_price")
@@ -683,12 +677,10 @@ async def _on_trade_update(mgr: "AccountManager", data: Any) -> None:
         old = row.copy()
 
         if event in {"partial_fill", "fill"}:
-            row["qty"] = int(
-                float(
-                    odict.get("filled_qty")
-                    or getattr(data, "qty", 0)
-                    or row["qty"]
-                )
+            row["qty"] = float(
+                odict.get("filled_qty")
+                or getattr(data, "qty", 0)
+                or row["qty"]
             )
             row["avg_fill"] = float(
                 odict.get("filled_avg_price")

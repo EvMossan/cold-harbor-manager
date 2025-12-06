@@ -1,13 +1,15 @@
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Protocol, Sequence
-import concurrent.futures
+from typing import Any, Dict, Optional, Protocol, Sequence, List, Set
+import ast
 
 from alpaca_trade_api.rest import REST
 
 import numpy as np
 import pandas as pd
+from pandas import Timestamp
 import logging
 import asyncpg
+import json
 
 log = logging.getLogger("IngesterRuntime")
 
@@ -216,11 +218,12 @@ async def load_orders_from_db(
     
     # SQL Query
     sql = f"""
-        SELECT 
+        SELECT
             id, client_order_id, parent_id, symbol, side, order_type, status,
             qty, filled_qty, filled_avg_price, limit_price, stop_price,
-            created_at, updated_at, submitted_at, filled_at, replaces, 
-            replaced_by, expired_at, canceled_at
+            created_at, updated_at, submitted_at, filled_at,
+            expired_at, canceled_at, replaced_by, replaces,
+            legs, raw_json
         FROM {table_name}
         WHERE created_at >= $1
         ORDER BY created_at DESC
@@ -438,14 +441,6 @@ def fetch_all_activities(api, start_date=None, end_date=None):
     # print(f"Loaded {len(df)} account events.")
     return df
 
-import ast
-import json
-from datetime import timezone
-from typing import Any, Dict, List, Optional, Set
-
-import numpy as np
-import pandas as pd
-
 
 def build_lot_portfolio(
     fills_df: pd.DataFrame,
@@ -455,30 +450,19 @@ def build_lot_portfolio(
     rescue_orphans: bool = False,
 ) -> pd.DataFrame:
     """
-    Builds a portfolio using DEEP LEG EXTRACTION.
+    Builds a portfolio using deep leg extraction.
 
     Args:
-        rescue_orphans (bool): If True, enables 'Level 3' matching.
-            It links Stop Loss/Take Profit orders based on Exact Quantity
-            if the Broker ID chain is broken.
-            Default is False (relies 100% on Broker IDs).
+        fills_df: DataFrame containing fill/execution data.
+        orders_df: DataFrame containing raw order data.
+        api: Alpaca API instance for fetching current prices.
+        debug: If True, prints detailed logic logs.
+        rescue_orphans: If True, enables linking Stop/TP orders based on
+            quantity if the Broker ID chain is broken.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing active portfolio lots.
     """
-
-    # --- INTERNAL LOGGER ---
-    def _log(msg, level=0):
-        if debug:
-            indent = "   " * level
-            print(f"{indent}{msg}")
-
-    if debug:
-        mode = (
-            "STRICT CHAIN + ORPHAN RESCUE"
-            if rescue_orphans
-            else "STRICT CHAIN ONLY"
-        )
-        print(f"\n>>> [DEBUG] STARTING PORTFOLIO BUILD [{mode}] <<<")
-
-    # === 0. FETCH MARKET DATA ===
     pos_map: Dict[str, Dict[str, float]] = {}
     if api:
         try:
@@ -500,21 +484,22 @@ def build_lot_portfolio(
                     "avg_px": float(p.avg_entry_price),
                     "cur_px": cur_px,
                 }
-        except Exception as e:
-            _log(f"[!] Warning: list_positions failed: {e}")
+        except Exception:
+            pass
 
-    # === 1. PREPARE DATAFRAMES ===
     empty_cols = [
         "Parent ID",
         "Symbol",
         "Buy Date",
         "Buy Qty",
+        "Remaining Qty",
         "Buy Price",
         "Take_Profit_Price",
         "Stop_Loss_Price",
         "Source",
         "Holding_Period",
         "Current_Price",
+        "Current Market Value",
         "Profit/Loss",
         "TP_reach, %",
         "BrE",
@@ -528,8 +513,7 @@ def build_lot_portfolio(
         for alt in ["transaction_time", "timestamp", "created_at"]:
             if alt in fills_df.columns:
                 fills_df[time_col] = pd.to_datetime(
-                    fills_df[alt],
-                    utc=True,
+                    fills_df[alt], utc=True
                 )
                 break
 
@@ -538,7 +522,6 @@ def build_lot_portfolio(
 
     fills_df = fills_df.sort_values(time_col)
 
-    # === 2. BUILD ORDER UNIVERSE (DEEP EXTRACTION) ===
     orders_map: Dict[str, Dict] = {}
     children_map: Dict[str, List[str]] = {}
     chain_map: Dict[str, str] = {}
@@ -553,15 +536,18 @@ def build_lot_portfolio(
 
     if not orders_df.empty:
         if "updated_at" in orders_df.columns:
-            orders_df = orders_df.sort_values("updated_at", ascending=True)
+            orders_df = orders_df.sort_values(
+                "updated_at", ascending=True
+            )
 
-        for c in [
+        num_cols = [
             "limit_price",
             "stop_price",
             "leaves_qty",
             "qty",
             "filled_qty",
-        ]:
+        ]
+        for c in num_cols:
             if c in orders_df.columns:
                 orders_df[c] = (
                     pd.to_numeric(orders_df[c], errors="coerce")
@@ -569,7 +555,6 @@ def build_lot_portfolio(
                 )
 
         for _, row in orders_df.iterrows():
-            # 1. Main Order
             r_dict = row.to_dict()
             oid = str(r_dict.get("id"))
             orders_map[oid] = r_dict
@@ -588,13 +573,11 @@ def build_lot_portfolio(
             if rep_by and rep_by.lower() not in ["none", "nan", ""]:
                 chain_map[oid] = rep_by
 
-            # Index for Rescue
             if rescue_orphans and side == "sell":
                 if sym not in orphan_candidates:
                     orphan_candidates[sym] = []
                 orphan_candidates[sym].append(oid)
 
-            # 2. Deep Leg Parsing
             legs_raw = r_dict.get("legs")
             legs_to_process: List[Any] = []
 
@@ -622,11 +605,12 @@ def build_lot_portfolio(
                     l_id = str(get_val(leg, "id"))
                     leg_record = {
                         "id": l_id,
-                        "parent_id": oid,  # Force Parent Link
+                        "parent_id": oid,
                         "symbol": str(get_val(leg, "symbol") or sym),
                         "side": str(get_val(leg, "side")),
                         "order_type": str(
-                            get_val(leg, "order_type") or get_val(leg, "type")
+                            get_val(leg, "order_type")
+                            or get_val(leg, "type")
                         ),
                         "status": str(get_val(leg, "status")),
                         "limit_price": float(
@@ -659,7 +643,6 @@ def build_lot_portfolio(
                         if l_id not in orphan_candidates[sym]:
                             orphan_candidates[sym].append(l_id)
 
-    # === 3. TRAVERSAL HELPERS ===
     used_orders: Set[str] = set()
 
     def get_root_parent(oid: str) -> str:
@@ -700,7 +683,6 @@ def build_lot_portfolio(
         status = str(order.get("status", "")).lower()
         leaves = float(order.get("leaves_qty", 0.0))
 
-        # 3: Active
         if status in [
             "new",
             "open",
@@ -722,21 +704,18 @@ def build_lot_portfolio(
         ):
             return 3
 
-        # 2: Filled
         if status == "filled":
             return 2
 
-        # 1: Canceled
         if status in ["canceled", "expired", "done_for_day"]:
             return 1
 
         return 0
 
-    # === 4. PROCESS FILLS ===
     lots: List[Dict[str, Any]] = []
     fifo_queues: Dict[str, List[int]] = {}
 
-    for idx, row in fills_df.iterrows():
+    for _, row in fills_df.iterrows():
         side = str(row.get("side")).lower()
         symbol = str(row.get("symbol"))
         qty = float(row.get("qty", 0))
@@ -745,19 +724,14 @@ def build_lot_portfolio(
         fill_oid = str(row.get("order_id"))
 
         if side == "buy":
-            _log(
-                f"\n[+] BUY: {symbol} @ {price} | Order: {fill_oid}",
-                level=0,
-            )
-
             lot_data: Dict[str, Any] = {
                 "Parent ID": fill_oid,
                 "Symbol": symbol,
                 "Buy Date": exec_time,
                 "Buy Qty": qty,
+                "Remaining Qty": qty,
                 "Buy Price": price,
                 "Original Qty": qty,
-                "Remaining Qty": qty,
                 "Source": "Matched",
                 "Take_Profit_Price": None,
                 "Stop_Loss_Price": None,
@@ -768,7 +742,6 @@ def build_lot_portfolio(
                 fifo_queues[symbol] = []
             fifo_queues[symbol].append(len(lots) - 1)
 
-            # --- LEVEL 1 & 2: STRICT ID CHAIN ---
             root_id = get_root_parent(fill_oid)
             family_ids = get_all_descendants(root_id)
 
@@ -809,16 +782,15 @@ def build_lot_portfolio(
                 else:
                     suffix = f" ({c['status']})"
 
-                if c["type"] == "limit" and not lot_data["Take_Profit_Price"]:
+                if (
+                    c["type"] == "limit"
+                    and not lot_data["Take_Profit_Price"]
+                ):
                     if c["limit"] > 0:
                         lot_data["Take_Profit_Price"] = c["limit"]
                         lot_data["Source"] = "Chain" + suffix
                         used_orders.add(c["id"])
-                        _log(
-                            f"-> TP (Chain): {c['limit']}"
-                            f"{suffix} [ID:{c['id']}]",
-                            level=2,
-                        )
+
                 elif c["type"] in ["stop", "stop_limit", "trailing_stop"]:
                     if not lot_data["Stop_Loss_Price"]:
                         px = c["stop"] if c["stop"] > 0 else c["limit"]
@@ -826,13 +798,7 @@ def build_lot_portfolio(
                             lot_data["Stop_Loss_Price"] = px
                             lot_data["Source"] = "Chain" + suffix
                             used_orders.add(c["id"])
-                            _log(
-                                f"-> SL (Chain): {px}"
-                                f"{suffix} [ID:{c['id']}]",
-                                level=2,
-                            )
 
-            # --- LEVEL 3: ORPHAN RESCUE (IF ENABLED) ---
             if (
                 rescue_orphans
                 and (
@@ -857,14 +823,10 @@ def build_lot_portfolio(
                     o_qty = float(o.get("qty", 0))
                     if not (
                         np.isclose(
-                            o_qty,
-                            lot_data["Remaining Qty"],
-                            atol=0.01,
+                            o_qty, lot_data["Remaining Qty"], atol=0.01
                         )
                         or np.isclose(
-                            o_qty,
-                            lot_data["Original Qty"],
-                            atol=0.01,
+                            o_qty, lot_data["Original Qty"], atol=0.01
                         )
                     ):
                         continue
@@ -902,10 +864,6 @@ def build_lot_portfolio(
                         lot_data["Take_Profit_Price"] = c["limit"]
                         lot_data["Source"] = "Orphan" + suffix
                         used_orders.add(c["id"])
-                        _log(
-                            f"-> TP (Orphan): {c['limit']}{suffix}",
-                            level=2,
-                        )
                     elif (
                         c["type"]
                         in ["stop", "stop_limit", "trailing_stop"]
@@ -915,10 +873,6 @@ def build_lot_portfolio(
                         lot_data["Stop_Loss_Price"] = px
                         lot_data["Source"] = "Orphan" + suffix
                         used_orders.add(c["id"])
-                        _log(
-                            f"-> SL (Orphan): {px}{suffix}",
-                            level=2,
-                        )
 
         elif side == "sell":
             q_sell = qty
@@ -935,13 +889,6 @@ def build_lot_portfolio(
                     tgt["Remaining Qty"] -= deduct
                     q_sell -= deduct
 
-                    if tgt["Remaining Qty"] <= 1e-9:
-                        _log(
-                            f"Lot {tgt['Parent ID']} closed by FIFO",
-                            level=1,
-                        )
-
-    # --- LEVEL 3: AGGREGATED ORPHAN RESCUE (IF ENABLED) ---
     if rescue_orphans:
         unprotected_lots: Dict[str, List[Dict[str, Any]]] = {}
         for lot in lots:
@@ -959,9 +906,7 @@ def build_lot_portfolio(
                 l for l in lot_list if not l["Stop_Loss_Price"]
             ]
             if no_sl_lots:
-                total_req = sum(
-                    l["Remaining Qty"] for l in no_sl_lots
-                )
+                total_req = sum(l["Remaining Qty"] for l in no_sl_lots)
                 for oid in orphan_candidates[sym]:
                     if oid in used_orders:
                         continue
@@ -971,17 +916,11 @@ def build_lot_portfolio(
                         continue
 
                     if (
-                        np.isclose(
-                            float(o["qty"]),
-                            total_req,
-                            atol=1.0,
-                        )
+                        np.isclose(float(o["qty"]), total_req, atol=1.0)
                         and get_order_priority(o) > 0
                     ):
                         used_orders.add(str(o["id"]))
-                        o_type = str(
-                            o.get("order_type", "")
-                        ).lower()
+                        o_type = str(o.get("order_type", "")).lower()
                         if o_type in [
                             "stop",
                             "stop_limit",
@@ -993,20 +932,13 @@ def build_lot_portfolio(
                             for lot in no_sl_lots:
                                 lot["Stop_Loss_Price"] = px
                                 lot["Source"] = "Orphan (Agg)"
-                                _log(
-                                    f"-> SL (Aggregated): {px} "
-                                    f"for Lot {lot['Parent ID']}",
-                                    level=2,
-                                )
                         break
 
             no_tp_lots = [
                 l for l in lot_list if not l["Take_Profit_Price"]
             ]
             if no_tp_lots:
-                total_req = sum(
-                    l["Remaining Qty"] for l in no_tp_lots
-                )
+                total_req = sum(l["Remaining Qty"] for l in no_tp_lots)
                 for oid in orphan_candidates[sym]:
                     if oid in used_orders:
                         continue
@@ -1016,48 +948,35 @@ def build_lot_portfolio(
                         continue
 
                     if (
-                        np.isclose(
-                            float(o["qty"]),
-                            total_req,
-                            atol=1.0,
-                        )
+                        np.isclose(float(o["qty"]), total_req, atol=1.0)
                         and get_order_priority(o) > 0
                     ):
                         used_orders.add(str(o["id"]))
-                        o_type = str(
-                            o.get("order_type", "")
-                        ).lower()
+                        o_type = str(o.get("order_type", "")).lower()
                         if o_type == "limit":
                             px = float(o.get("limit_price", 0))
                             for lot in no_tp_lots:
                                 lot["Take_Profit_Price"] = px
                                 lot["Source"] = "Orphan (Agg)"
-                                _log(
-                                    f"-> TP (Aggregated): {px} "
-                                    f"for Lot {lot['Parent ID']}",
-                                    level=2,
-                                )
                         break
 
-    # === 6. FINALIZE ===
-    active_lots = [
-        l for l in lots if l["Remaining Qty"] > 1e-6
-    ]
+    active_lots = [l for l in lots if l["Remaining Qty"] > 1e-6]
     df = pd.DataFrame(active_lots)
+
     if df.empty:
         return pd.DataFrame(columns=empty_cols)
 
-    now = pd.Timestamp.now(tz=timezone.utc)
+    now = pd.Timestamp.now(tz=Timestamp.utcnow().tz)
 
     def get_market_px(row):
-        return pos_map.get(
-            row["Symbol"].lower(),
-            {},
-        ).get("cur_px", np.nan)
+        return pos_map.get(row["Symbol"].lower(), {}).get(
+            "cur_px", np.nan
+        )
 
     df["Current_Price"] = df.apply(get_market_px, axis=1)
     df["Buy Date Obj"] = pd.to_datetime(df["Buy Date"])
     df["Holding_Period"] = (now - df["Buy Date Obj"]).dt.days
+
     df["Current Market Value"] = (
         df["Remaining Qty"] * df["Current_Price"]
     )
@@ -1074,6 +993,7 @@ def build_lot_portfolio(
     df.loc[mask_profit, "TP_reach, %"] = (
         diff / tp_dist * 100
     ).round(2)
+
     mask_loss = (diff < 0) & (sl_dist > 0)
     df.loc[mask_loss, "TP_reach, %"] = (
         diff / sl_dist * 100
@@ -1083,6 +1003,7 @@ def build_lot_portfolio(
         lambda r: 1
         if (
             pd.notna(r["Stop_Loss_Price"])
+            and r["Buy Price"] != 0
             and abs(r["Stop_Loss_Price"] - r["Buy Price"])
             < (0.01 * r["Buy Price"])
         )
@@ -1090,18 +1011,12 @@ def build_lot_portfolio(
         axis=1,
     )
 
-    df.rename(columns={"Remaining Qty": "Buy Qty"}, inplace=True)
-    df["Buy Date"] = df["Buy Date Obj"].dt.strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    df["Buy Date"] = df["Buy Date Obj"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    if debug:
-        print(">>> PORTFOLIO BUILD COMPLETE <<<")
+    final_cols = [c for c in empty_cols if c in df.columns]
 
     return (
-        df[
-            [c for c in empty_cols if c in df.columns]
-        ]
+        df[final_cols]
         .sort_values(["Symbol", "Buy Date"], ascending=[True, False])
         .reset_index(drop=True)
     )
@@ -1434,219 +1349,322 @@ def calculate_metrics(
 
     Args:
         trades_df: DataFrame with `qty`, `entry_price`, `exit_price`,
-            `pnl_cash`, `pnl_cash_fifo`, `entry_time`, `exit_time`,
-            `exit_type`, `entry_lot_id`, and `exit_order_id`.
-        open_trades_df: Optional DataFrame with columns like `Profit/Loss`,
-            `Buy Price`, `Buy Qty`, and `Current Market Value`.
-        activities_df: Optional DataFrame of activities with `activity_type`
-            and `net_amount`.
+            `pnl_cash`, `pnl_cash_fifo`, etc.
+        open_trades_df: Optional DataFrame with open positions.
+        activities_df: Optional DataFrame of account activities.
         value_weighted: Whether to weight averages by invested volume.
 
     Returns:
-        Transposed DataFrame containing equity totals, ratios, fees, and
-        volume counters for the dashboard.
-
-    Raises:
-        Exception: Propagates any arithmetic failures raised while
-            aggregating PV/flows.
+        pd.DataFrame: Transposed DataFrame containing equity totals and
+        performance metrics.
     """
-    
-    # Initialize all variables to safe defaults to avoid UnboundLocalError
-    # This ensures that even if trades_df is empty, the final report generation works.
     total_buy_closed = 0.0
     total_sell_closed = 0.0
     total_pnl_lot = 0.0
     total_pnl_fifo = 0.0
-    
+
     rr_ratio = np.nan
     breakeven = np.nan
     pl_ratio = np.nan
-    
+
     avg_take = 0.0
     avg_stop = 0.0
     avg_hold_take = 0.0
     avg_hold_stop = 0.0
-    
+
     closed_trades_count = 0
 
-    # ==========================================
-    # 1. PROCESS CLOSED TRADES
-    # ==========================================
     if not trades_df.empty:
         df = trades_df.copy()
 
-        # Conversions
-        if 'pnl_cash_fifo' not in df.columns: df['pnl_cash_fifo'] = 0.0
-        cols_num = ['qty', 'entry_price', 'exit_price', 'pnl_cash', 'pnl_cash_fifo']
-        for c in cols_num:
-            if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-        for c in ['entry_time', 'exit_time']:
-            if c in df.columns: df[c] = pd.to_datetime(df[c], utc=True)
+        if "pnl_cash_fifo" not in df.columns:
+            df["pnl_cash_fifo"] = 0.0
 
-        # Identify Exit Class
+        cols_num = [
+            "qty",
+            "entry_price",
+            "exit_price",
+            "pnl_cash",
+            "pnl_cash_fifo",
+        ]
+        for c in cols_num:
+            if c in df.columns:
+                df[c] = (
+                    pd.to_numeric(df[c], errors="coerce").fillna(0)
+                )
+
+        for c in ["entry_time", "exit_time"]:
+            if c in df.columns:
+                df[c] = pd.to_datetime(df[c], utc=True)
+
         def identify_exit_class(val):
             s = str(val).lower()
-            if 'limit' in s: return 'TP'
-            if 'stop' in s: return 'SL'
-            return 'MANUAL'
+            if "limit" in s:
+                return "TP"
+            if "stop" in s:
+                return "SL"
+            return "MANUAL"
 
-        if 'exit_type' in df.columns:
-            df['exit_class_raw'] = df['exit_type'].apply(identify_exit_class)
+        if "exit_type" in df.columns:
+            df["exit_class_raw"] = df["exit_type"].apply(
+                identify_exit_class
+            )
         else:
-            df['exit_class_raw'] = 'MANUAL'
+            df["exit_class_raw"] = "MANUAL"
 
-        # COLLAPSE BY LOT
-        if 'entry_lot_id' in df.columns:
+        if "entry_lot_id" in df.columns:
+
             def aggregate_lot(sub):
-                qty_total = sub['qty'].sum()
-                type_counts = sub.groupby('exit_class_raw')['qty'].sum().sort_values(ascending=False)
-                major_type = type_counts.index[0] if not type_counts.empty else 'MANUAL'
-                
-                w_entry = np.average(sub['entry_price'], weights=sub['qty']) if qty_total > 0 else 0
-                w_exit = np.average(sub['exit_price'], weights=sub['qty']) if qty_total > 0 else 0
-                
-                return pd.Series({
-                    'qty': qty_total,
-                    'entry_price': w_entry,
-                    'exit_price': w_exit,
-                    'pnl_cash': sub['pnl_cash'].sum(),
-                    'pnl_cash_fifo': sub['pnl_cash_fifo'].sum(),
-                    'entry_time': sub['entry_time'].min(),
-                    'exit_time': sub['exit_time'].max(),
-                    'exit_class': major_type
-                })
-            
-            # with warnings.catch_warnings():
-            #     warnings.filterwarnings("ignore", category=DeprecationWarning)
-            # Fix for FutureWarning in groupby
-            calc_cols = ['qty', 'entry_price', 'exit_price', 'pnl_cash', 'pnl_cash_fifo', 'entry_time', 'exit_time', 'exit_class_raw']
-            collapsed = df.groupby('entry_lot_id')[calc_cols].apply(aggregate_lot).reset_index()
+                qty_total = sub["qty"].sum()
+                type_counts = (
+                    sub.groupby("exit_class_raw")["qty"]
+                    .sum()
+                    .sort_values(ascending=False)
+                )
+                major_type = (
+                    type_counts.index[0]
+                    if not type_counts.empty
+                    else "MANUAL"
+                )
+
+                w_entry = (
+                    np.average(
+                        sub["entry_price"], weights=sub["qty"]
+                    )
+                    if qty_total > 0
+                    else 0
+                )
+                w_exit = (
+                    np.average(
+                        sub["exit_price"], weights=sub["qty"]
+                    )
+                    if qty_total > 0
+                    else 0
+                )
+
+                return pd.Series(
+                    {
+                        "qty": qty_total,
+                        "entry_price": w_entry,
+                        "exit_price": w_exit,
+                        "pnl_cash": sub["pnl_cash"].sum(),
+                        "pnl_cash_fifo": sub["pnl_cash_fifo"].sum(),
+                        "entry_time": sub["entry_time"].min(),
+                        "exit_time": sub["exit_time"].max(),
+                        "exit_class": major_type,
+                    }
+                )
+
+            calc_cols = [
+                "qty",
+                "entry_price",
+                "exit_price",
+                "pnl_cash",
+                "pnl_cash_fifo",
+                "entry_time",
+                "exit_time",
+                "exit_class_raw",
+            ]
+            collapsed = (
+                df.groupby("entry_lot_id")[calc_cols]
+                .apply(aggregate_lot)
+                .reset_index()
+            )
         else:
             collapsed = df.copy()
-            collapsed.rename(columns={'exit_class_raw': 'exit_class'}, inplace=True)
+            collapsed.rename(
+                columns={"exit_class_raw": "exit_class"}, inplace=True
+            )
 
-        # Set count
         closed_trades_count = len(collapsed)
 
-        # Volumes & Averages
-        collapsed['duration_days'] = (collapsed['exit_time'] - collapsed['entry_time']).dt.total_seconds() / 86400.0
-        # Calculate volume for weighting
-        collapsed['invested_vol'] = collapsed['qty'] * collapsed['entry_price']
+        collapsed["duration_days"] = (
+            collapsed["exit_time"] - collapsed["entry_time"]
+        ).dt.total_seconds() / 86400.0
+        collapsed["invested_vol"] = (
+            collapsed["qty"] * collapsed["entry_price"]
+        )
 
-        tp_wins = collapsed[(collapsed['exit_class'] == 'TP') & (collapsed['pnl_cash'] > 0)]
-        sl_losses = collapsed[(collapsed['exit_class'] == 'SL') & (collapsed['pnl_cash'] < 0)]
+        tp_wins = collapsed[
+            (collapsed["exit_class"] == "TP")
+            & (collapsed["pnl_cash"] > 0)
+        ]
+        sl_losses = collapsed[
+            (collapsed["exit_class"] == "SL")
+            & (collapsed["pnl_cash"] < 0)
+        ]
 
         def get_w_avg(data, col):
-            if data.empty or data['invested_vol'].sum() == 0: return 0.0
+            if data.empty or data["invested_vol"].sum() == 0:
+                return 0.0
             if value_weighted:
-                return np.average(data[col], weights=data['invested_vol'])
+                return np.average(data[col], weights=data["invested_vol"])
             return data[col].mean()
 
-        # Update variables with calculated values
-        avg_take = get_w_avg(tp_wins, 'pnl_cash')
-        avg_stop = abs(get_w_avg(sl_losses, 'pnl_cash'))
-        avg_hold_take = get_w_avg(tp_wins, 'duration_days')
-        avg_hold_stop = get_w_avg(sl_losses, 'duration_days')
-        
+        avg_take = get_w_avg(tp_wins, "pnl_cash")
+        avg_stop = abs(get_w_avg(sl_losses, "pnl_cash"))
+        avg_hold_take = get_w_avg(tp_wins, "duration_days")
+        avg_hold_stop = get_w_avg(sl_losses, "duration_days")
+
         rr_ratio = (avg_take / avg_stop) if avg_stop > 0 else 0.0
-        breakeven = (100 / (1 + rr_ratio)) if rr_ratio > 0 else 0.0
+        breakeven = (
+            (100 / (1 + rr_ratio)) if rr_ratio > 0 else 0.0
+        )
         denom = len(tp_wins) + len(sl_losses)
-        pl_ratio = (len(tp_wins) / denom * 100) if denom > 0 else 0.0
+        pl_ratio = (
+            (len(tp_wins) / denom * 100) if denom > 0 else 0.0
+        )
 
-        # Volume (Closed Portion)
-        total_buy_closed = (collapsed['qty'] * collapsed['entry_price']).sum()
-        total_sell_closed = (collapsed['qty'] * collapsed['exit_price']).sum()
-        
-        total_pnl_lot = collapsed['pnl_cash'].sum()
-        total_pnl_fifo = collapsed['pnl_cash_fifo'].sum()
+        total_buy_closed = (
+            collapsed["qty"] * collapsed["entry_price"]
+        ).sum()
+        total_sell_closed = (
+            collapsed["qty"] * collapsed["exit_price"]
+        ).sum()
 
-    # ==========================================
-    # 2. ANALYZE OPEN TRADES
-    # ==========================================
+        total_pnl_lot = collapsed["pnl_cash"].sum()
+        total_pnl_fifo = collapsed["pnl_cash_fifo"].sum()
+
     total_unrealized_pnl = 0.0
     count_open = 0
     total_open_val = 0.0
     total_buy_open = 0.0
 
     if open_trades_df is not None and not open_trades_df.empty:
-        # Check standard columns
-        pnl_col = next((col for col in ['Profit/Loss', 'Unrealized PnL', 'pnl'] if col in open_trades_df.columns), None)
-        val_col = next((col for col in ['Current Market Value', 'Market Value', 'value'] if col in open_trades_df.columns), None)
-        price_col = next((col for col in ['Buy Price', 'entry_price'] if col in open_trades_df.columns), None)
-        qty_col = next((col for col in ['Buy Qty', 'qty'] if col in open_trades_df.columns), None)
+        # PnL Column
+        pnl_col = next(
+            (
+                col
+                for col in ["Profit/Loss", "Unrealized PnL", "pnl"]
+                if col in open_trades_df.columns
+            ),
+            None,
+        )
+        # Market Value Column
+        val_col = next(
+            (
+                col
+                for col in [
+                    "Current Market Value",
+                    "Market Value",
+                    "value",
+                ]
+                if col in open_trades_df.columns
+            ),
+            None,
+        )
+        # Price Column
+        price_col = next(
+            (
+                col
+                for col in ["Buy Price", "entry_price"]
+                if col in open_trades_df.columns
+            ),
+            None,
+        )
+        # Quantity Column (Priority: Remaining -> Buy -> qty)
+        qty_col = next(
+            (
+                col
+                for col in ["Remaining Qty", "Buy Qty", "qty"]
+                if col in open_trades_df.columns
+            ),
+            None,
+        )
 
         if pnl_col:
-            total_unrealized_pnl = pd.to_numeric(open_trades_df[pnl_col], errors='coerce').fillna(0).sum()
-        
+            total_unrealized_pnl = (
+                pd.to_numeric(
+                    open_trades_df[pnl_col], errors="coerce"
+                )
+                .fillna(0)
+                .sum()
+            )
+
         if val_col:
-            total_open_val = pd.to_numeric(open_trades_df[val_col], errors='coerce').fillna(0).sum()
-            
+            total_open_val = (
+                pd.to_numeric(
+                    open_trades_df[val_col], errors="coerce"
+                )
+                .fillna(0)
+                .sum()
+            )
+
         if price_col and qty_col:
-            op_p = pd.to_numeric(open_trades_df[price_col], errors='coerce').fillna(0)
-            op_q = pd.to_numeric(open_trades_df[qty_col], errors='coerce').fillna(0)
+            op_p = pd.to_numeric(
+                open_trades_df[price_col], errors="coerce"
+            ).fillna(0)
+            op_q = pd.to_numeric(
+                open_trades_df[qty_col], errors="coerce"
+            ).fillna(0)
             total_buy_open = (op_p * op_q).sum()
 
         count_open = len(open_trades_df)
 
-    # ==========================================
-    # 3. ANALYZE ACTIVITIES
-    # ==========================================
     total_fees = 0.0
     total_divs = 0.0
     total_int = 0.0
 
     if activities_df is not None and not activities_df.empty:
         act = activities_df.copy()
-        if 'net_amount' not in act.columns and 'qty' in act.columns: act['net_amount'] = act['qty']
-        act['net_amount'] = pd.to_numeric(act['net_amount'], errors='coerce').fillna(0)
-        
-        total_fees = act[act['activity_type'] == 'FEE']['net_amount'].sum()
-        total_divs = act[act['activity_type'].isin(['DIV', 'DIVNRA'])]['net_amount'].sum()
-        total_int = act[act['activity_type'] == 'INT']['net_amount'].sum()
+        if (
+            "net_amount" not in act.columns
+            and "qty" in act.columns
+        ):
+            act["net_amount"] = act["qty"]
+        act["net_amount"] = (
+            pd.to_numeric(act["net_amount"], errors="coerce")
+            .fillna(0)
+        )
 
-    # --- FINAL CALCULATIONS ---
-    net_realized_fifo = total_pnl_fifo + total_fees + total_divs + total_int
+        total_fees = act[act["activity_type"] == "FEE"][
+            "net_amount"
+        ].sum()
+        total_divs = act[
+            act["activity_type"].isin(["DIV", "DIVNRA"])
+        ]["net_amount"].sum()
+        total_int = act[act["activity_type"] == "INT"][
+            "net_amount"
+        ].sum()
+
+    net_realized_fifo = (
+        total_pnl_fifo + total_fees + total_divs + total_int
+    )
     total_account_result = net_realized_fifo + total_unrealized_pnl
     grand_total_buy = total_buy_closed + total_buy_open
 
-    # ==========================================
-    # 4. CONSTRUCT RESULT
-    # ==========================================
     result = {
-        # --- 1. ACCOUNT OVERVIEW ---
         "TOTAL ACCOUNT RESULT (Equity)": round(total_account_result, 2),
         "NET REALIZED CASH (FIFO)": round(net_realized_fifo, 2),
         "Unrealized P/L (Open)": round(total_unrealized_pnl, 2),
         "Current Open Value": f"{total_open_val:,.2f}",
-        
-        # --- 2. PERFORMANCE (RATIOS) ---
         "------------------": "",
-        "Breakeven %": f"%{breakeven:.1f}" if not pd.isna(breakeven) else "N/A",
-        "Win Rate %": f"%{pl_ratio:.1f}" if not pd.isna(pl_ratio) else "N/A",
-        "Risk-Reward Ratio": round(rr_ratio, 2) if not pd.isna(rr_ratio) else "N/A",
-        
-        # --- 3. AVERAGE METRICS ---
+        "Breakeven %": (
+            f"%{breakeven:.1f}" if not pd.isna(breakeven) else "N/A"
+        ),
+        "Win Rate %": (
+            f"%{pl_ratio:.1f}" if not pd.isna(pl_ratio) else "N/A"
+        ),
+        "Risk-Reward Ratio": (
+            round(rr_ratio, 2) if not pd.isna(rr_ratio) else "N/A"
+        ),
         "Mean Take ($)": round(avg_take, 2),
         "Mean Stop ($)": round(avg_stop, 2),
         "Mean Holding Take (Days)": round(avg_hold_take, 2),
         "Mean Holding Stop (Days)": round(avg_hold_stop, 2),
-        
-        # --- 4. PnL BREAKDOWN ---
         "------------------ ": "",
         "Realized P/L (Broker/FIFO)": round(total_pnl_fifo, 2),
         "Realized P/L (Strategy Only)": round(total_pnl_lot, 2),
         "Total Fees": round(total_fees, 2),
         "Net Dividends": round(total_divs, 2),
         "Net Interest": round(total_int, 2),
-        
-        # --- 5. VOLUMES ---
         "Total Buy Volume": f"{grand_total_buy:,.2f}",
         "Total Sell Volume": f"{total_sell_closed:,.2f}",
         "Closed Trades (n)": closed_trades_count,
         "Open Trades (n)": count_open,
     }
 
-    return pd.DataFrame([result]).T.rename(columns={0: 'Value'})
+    return pd.DataFrame([result]).T.rename(columns={0: "Value"})
 
 
 def check_sl_tp(api, symbols="RIG"):
