@@ -14,7 +14,6 @@ DESTINATIONS: List[Dict[str, Any]] = [
         "risk_factor": 0.1,
         "dry_run": False,
         "orders_table": "placed_orders_live",
-        "initial_deposit": 0.0,
         "trained_classifier_path": (
             "/home/tradingbot/proxima/airflow_docer/trained_models/ensemble/"
             "ensemble_202501.joblib"

@@ -99,14 +99,6 @@ def _cfg_for(dest: Dict[str, Any]) -> Dict[str, Any]:
         "ENABLE_TRADE_STREAM": dest.get("trade_stream_enabled", False),
     }
 
-    # Pass initial deposit from Destinations.
-    # This keeps DAG and AccountManager in sync and ensures that when
-    # the equity table is recreated, the first row uses the configured
-    # starting capital.
-    init_deposit = dest.get("initial_deposit")
-    if init_deposit is not None:
-        cfg["EQUITY_INIT_CASH"] = init_deposit
-
     # Ensure schema-qualification – AccountManager will re-qualify if needed
     # but we keep full names here for clarity across helpers.
     if schema:

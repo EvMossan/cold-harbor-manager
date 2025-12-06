@@ -328,6 +328,7 @@ def rebuild_equity_series(
         where_types = (
             " OR ".join([f"type ILIKE '{p}%'" for p in pats]) or "FALSE"
         )
+        # Fetch ALL flows for strict ledger accuracy
         flows_df = pd.read_sql(
             text(
                 f"""
@@ -414,8 +415,9 @@ def rebuild_equity_series(
     flows_idxed = flows_s.reindex(idx, fill_value=0.0)
     flows_cum = flows_idxed.cumsum()
     df["net_flows"] = flows_idxed
-    # Deposit is built strictly from flows and P/L (no overrides).
-    df["deposit"] = realised_cum + df["unrealised_pl"] + flows_cum
+    # Equity = cumulative cash flows + cumulative realised P/L
+    #           + unrealised.
+    df["deposit"] = flows_cum + realised_cum + df["unrealised_pl"]
 
     # Denominator for returns: previous day's deposit. For the first
     # available day fall back to today's deposit (or 1.0 to avoid 0/0).
@@ -989,6 +991,7 @@ async def rebuild_equity_series_async(
 
         async def flows_series(idx: pd.DatetimeIndex) -> pd.Series:
             try:
+                # Fetch ALL flows for strict ledger accuracy
                 rows = await repo.fetch(
                     f"""
                     SELECT ts::date AS date,
@@ -1133,9 +1136,9 @@ async def rebuild_equity_series_async(
         flows_idxed = flows_s.reindex(idx, fill_value=0.0)
         flows_cum = flows_idxed.cumsum()
         df["net_flows"] = flows_idxed
-        df["deposit"] = (
-            realised_cum + df["unrealised_pl"] + flows_cum
-        )
+        # Equity = cumulative cash flows + cumulative realised P/L
+        #           + unrealised.
+        df["deposit"] = flows_cum + realised_cum + df["unrealised_pl"]
 
         cap_prev = df["deposit"].shift(1)
         cap_prev = cap_prev.fillna(df["deposit"]).replace(0.0, 1.0)

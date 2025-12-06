@@ -1039,7 +1039,11 @@
       }
       if (meta.live_deposit != null) {
         const live = Number(meta.live_deposit);
-        if (Number.isFinite(live)) pfHeader.latestLiveDeposit = live;
+        if (Number.isFinite(live)) {
+          pfHeader.latestLiveDeposit = live;
+          // Force immediate update
+          syncPortfolioHeaderState();
+        }
       }
       if (meta.live_ts) pfHeader.latestLiveTimestamp = meta.live_ts;
 
@@ -1075,49 +1079,38 @@
     }
 
     function syncPortfolioHeaderState() {
-      const dailyMs = _tsMillis(pfHeader.dailyTimestamp);
-      const intraMs = _tsMillis(pfHeader.intradayTimestamp);
-
-      if (pfHeader.source === 'intraday') {
-        if (pfHeader.intradayDeposit != null) {
-          renderPortfolioHeaderValue(
-            pfHeader.intradayDeposit,
-            pfHeader.intradayTimestamp
-          );
-          return;
-        }
-        if (pfHeader.dailyDeposit != null) {
-          renderPortfolioHeaderValue(
-            pfHeader.dailyDeposit,
-            pfHeader.dailyTimestamp
-          );
-          return;
-        }
-      } else {
-        if (
-          pfHeader.dailyDeposit != null &&
-          dailyMs >= intraMs
-        ) {
-          renderPortfolioHeaderValue(
-            pfHeader.dailyDeposit,
-            pfHeader.dailyTimestamp
-          );
-          return;
-        }
-        if (pfHeader.intradayDeposit != null) {
-          renderPortfolioHeaderValue(
-            pfHeader.intradayDeposit,
-            pfHeader.intradayTimestamp
-          );
-          return;
-        }
-        if (pfHeader.dailyDeposit != null) {
-          renderPortfolioHeaderValue(
-            pfHeader.dailyDeposit,
-            pfHeader.dailyTimestamp
-          );
-          return;
-        }
+      // 1. Always prioritize LIVE push data (The "Truth")
+      if (
+        pfHeader.latestLiveDeposit != null &&
+        Number.isFinite(pfHeader.latestLiveDeposit)
+      ) {
+        renderPortfolioHeaderValue(
+          pfHeader.latestLiveDeposit,
+          pfHeader.latestLiveTimestamp
+        );
+        return;
+      }
+      // 2. Fallback to Intraday Snapshot (from API load)
+      if (
+        pfHeader.intradayDeposit != null &&
+        Number.isFinite(pfHeader.intradayDeposit)
+      ) {
+        renderPortfolioHeaderValue(
+          pfHeader.intradayDeposit,
+          pfHeader.intradayTimestamp
+        );
+        return;
+      }
+      // 3. Last Resort: Daily Close (Historical)
+      if (
+        pfHeader.dailyDeposit != null &&
+        Number.isFinite(pfHeader.dailyDeposit)
+      ) {
+        renderPortfolioHeaderValue(
+          pfHeader.dailyDeposit,
+          pfHeader.dailyTimestamp
+        );
+        return;
       }
     }
     window.syncPortfolioHeaderState = syncPortfolioHeaderState;

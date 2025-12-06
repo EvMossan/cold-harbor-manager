@@ -221,8 +221,9 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
         if not prev_row:
             return
 
-        prev_deposit = float(prev_row.get("deposit") or 0.0)
-        prev_unreal = float(prev_row.get("unrealised_pl") or 0.0)
+        prev_equity = float(prev_row.get("deposit") or 0.0)
+        prev_unreal_val = float(prev_row.get("unrealised_pl") or 0.0)
+        prev_cash_balance = prev_equity - prev_unreal_val
         try:
             prev_cum_ret = float(prev_row.get("cumulative_return") or 0.0)
             if not math.isfinite(prev_cum_ret):
@@ -426,6 +427,10 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                     diff.where(mask, 0.0) * signed, fill_value=0.0
                 )
 
+        # 1. Get Yesterday's Closing Cash (Equity - Unrealized).
+        # 2. Calculate Today's Total Cash (Prev Cash + Today Realized +
+        #    Today Flows).
+        # 3. Calculate Live Equity (Total Cash + Live Unrealized).
         if flows is not None and not flows.empty:
             flow_floor = pd.to_datetime(flows["ts"], utc=True).dt.floor(
                 "min"
@@ -440,9 +445,10 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
         else:
             fser = pd.Series(0.0, index=idx)
 
-        deposit_series = (
-            prev_deposit + rcum + (upl - prev_unreal) + fser
+        total_cash_series = (
+            prev_cash_balance + rcum + fser
         ).astype(float)
+        deposit_series = (total_cash_series + upl).astype(float)
 
         step = max(1, int(mgr.EQUITY_INTRADAY_SEC))
         tick_idx = pd.date_range(
@@ -453,7 +459,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
 
         dep_ticks = deposit_series.reindex(tick_idx, method="ffill")
         dep_ticks = dep_ticks.ffill().astype(float)
-        base_cap = prev_deposit if prev_deposit != 0.0 else 1.0
+        base_cap = prev_equity if prev_equity != 0.0 else 1.0
         daily_ret = dep_ticks / base_cap - 1.0
         cum_ticks = (1.0 + prev_cum_ret) * (1.0 + daily_ret) - 1.0
         peak_ticks = dep_ticks.cummax().replace(0.0, np.nan)
