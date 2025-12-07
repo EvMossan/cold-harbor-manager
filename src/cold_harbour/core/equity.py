@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 from cold_harbour.core.account_utils import trading_session_date
 from cold_harbour.core.account_start import earliest_activity_date, earliest_activity_date_async
 from cold_harbour.infrastructure.db import AsyncAccountRepository
+import asyncio
+
 
 # ────────────────────────────────────────────────────────────────
 # Helpers that need no config
@@ -117,6 +119,106 @@ def _trading_index_from_schedule(
     return pd.DatetimeIndex(dates, name="date")
 
 
+def _calculate_daily_ledger(
+    activities_df: pd.DataFrame,
+    price_df: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Reconstruct daily equity using a strict Ledger Replay method.
+    Equity(t) = Cash(t) + Sum(Qty(t) * Price(t))
+    """
+    if activities_df.empty:
+        return pd.DataFrame()
+
+    # 1. Prepare Data
+    df = activities_df.copy()
+    # Normalize to NY date
+    df['date'] = df['transaction_time'].dt.tz_convert(
+        'America/New_York'
+    ).dt.normalize()
+    df = df.sort_values('transaction_time')
+
+    # 2. Initialize State
+    current_cash = 0.0
+    inventory = {}  # { 'AAPL': 10.0 }
+    daily_snapshots = {}
+
+    min_date = df['date'].min()
+    max_date = dt.date.today() # Replay up to today
+    
+    # Use business days
+    all_dates = pd.date_range(min_date, max_date, freq='B')
+
+    activities_by_day = df.groupby('date')
+
+    # 3. Replay Loop
+    for day in all_dates:
+        # A. Apply Cash and Inventory Changes
+        if day in activities_by_day.groups:
+            day_acts = activities_by_day.get_group(day)
+
+            for _, row in day_acts.iterrows():
+                # Update Cash (Net Amount includes fees, fills cost, etc.)
+                net_amt = float(row.get('net_amount') or 0.0)
+                current_cash += net_amt
+
+                # Update Inventory (Only for Fills)
+                act_type = str(row.get('activity_type', '')).upper()
+                if act_type in ('FILL', 'PARTIAL_FILL'):
+                    symbol = str(row.get('symbol', '')).upper()
+                    qty = float(row.get('qty') or 0.0)
+                    side = str(row.get('side', '')).lower()
+
+                    if symbol:
+                        current_qty = inventory.get(symbol, 0.0)
+                        if side == 'buy':
+                            current_qty += qty
+                        elif side in ('sell', 'sell_short'):
+                            current_qty -= qty
+
+                        if abs(current_qty) < 1e-9:
+                            if symbol in inventory:
+                                del inventory[symbol]
+                        else:
+                            inventory[symbol] = current_qty
+
+        # B. Calculate Mark-to-Market Value
+        market_value = 0.0
+        # Find latest available price (ffill)
+        price_date = day
+        # Lookback up to 5 days for prices if missing
+        for _ in range(5):
+            if price_date in price_df.index:
+                break
+            price_date -= pd.Timedelta(days=1)
+
+        if price_date in price_df.index:
+            daily_prices = price_df.loc[price_date]
+            for symbol, qty in inventory.items():
+                price = 0.0
+                try:
+                    val = daily_prices.get(symbol)
+                    if pd.notna(val):
+                        price = float(val)
+                except Exception:
+                    pass
+                market_value += qty * price
+
+        # C. Record Snapshot
+        total_equity = current_cash + market_value
+        daily_snapshots[day] = {
+            'deposit': total_equity,
+            'realised_pl': 0.0,
+            'unrealised_pl': 0.0,
+            'cumulative_return': 0.0,
+            'daily_return': 0.0,
+            'drawdown': 0.0,
+            'net_flows': 0.0
+        }
+
+    return pd.DataFrame.from_dict(daily_snapshots, orient='index')
+
+
 # ────────────────────────────────────────────────────────────────
 # DDL
 # ────────────────────────────────────────────────────────────────
@@ -178,6 +280,48 @@ def _ensure_table(engine,
         )
 
 
+async def _ensure_table_async(repo: AsyncAccountRepository,
+                              tbl: str,
+                              windows: List[int]) -> None:
+    base_cols = [
+        "date               date PRIMARY KEY",
+        "deposit            double precision",
+        "realised_pl        double precision",
+        "unrealised_pl      double precision",
+        "realised_return    double precision",
+        "unrealised_return  double precision",
+        "daily_return       double precision",
+        "cumulative_return  double precision",
+        "drawdown           double precision",
+        "net_flows          double precision",
+        "updated_at         timestamptz DEFAULT now()",
+    ]
+    sharpe_cols = []
+    for w in windows:
+        sharpe_cols += [
+            f"sharpe_{w}                 double precision",
+            f"smart_sharpe_{w}           double precision",
+            f"realised_sharpe_{w}        double precision",
+            f"realised_smart_sharpe_{w}  double precision",
+            f"unrealised_sharpe_{w}      double precision",
+            f"unrealised_smart_sharpe_{w} double precision",
+        ]
+
+    schema = tbl.split(".", 1)[0] if "." in tbl else None
+    ddl = (
+        f"CREATE TABLE IF NOT EXISTS {tbl} (\n    "
+        + ",\n    ".join(base_cols + sharpe_cols)
+        + "\n);"
+    )
+
+    async with repo.pool.acquire() as conn:
+        async with conn.transaction():
+            if schema:
+                await conn.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+            await conn.execute(ddl)
+            await conn.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS net_flows double precision")
+            await conn.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS drawdown double precision")
+
 # ────────────────────────────────────────────────────────────────
 # Main heavy builder
 # ────────────────────────────────────────────────────────────────
@@ -190,20 +334,12 @@ def rebuild_equity_series(
     periods: int = 252,
 ) -> pd.DataFrame:
     """
-    Recompute the **entire** equity curve + all Sharpe variants and
-    up-sert into Postgres.
-
-    This is the slow path – call once per day (e.g. after market close).
+    Recompute the entire equity curve by replaying the ledger history.
     """
-    # ---------- cfg essentials --------------------------------------
-    engine  = create_engine(cfg["CONN_STRING_POSTGRESQL"])
-    rest    = REST(cfg["API_KEY"], cfg["SECRET_KEY"], cfg["ALPACA_BASE_URL"])
-    t_closed = cfg["TABLE_ACCOUNT_CLOSED"]
-    t_open   = cfg["TABLE_ACCOUNT_POSITIONS"]
-    t_eq     = cfg.get("TABLE_ACCOUNT_EQUITY_FULL", "account_equity_full")
-    t_schedule = cfg.get("TABLE_MARKET_SCHEDULE")
-    # Derive cash_flows table from equity name when not provided
-    t_flows  = cfg.get("TABLE_ACCOUNT_CASH_FLOWS")
+    engine = create_engine(cfg["CONN_STRING_POSTGRESQL"])
+    rest = REST(cfg["API_KEY"], cfg["SECRET_KEY"], cfg["ALPACA_BASE_URL"])
+    t_eq = cfg.get("TABLE_ACCOUNT_EQUITY_FULL", "account_equity_full")
+    t_flows = cfg.get("TABLE_ACCOUNT_CASH_FLOWS")
     if not t_flows:
         try:
             if "." in t_eq:
@@ -219,242 +355,133 @@ def rebuild_equity_series(
         except Exception:
             t_flows = "cash_flows"
 
-    windows = sorted(set(windows or cfg.get("EQUITY_WINDOWS",
-                                            [10, 21, 63, 126, 252])))
-    _ensure_table(engine, t_eq, windows)              # DDL (noop if exists)
-    today   = dt.date.today()
-
-    # ---------- helper sql pulls -----------------------------------
-    def realised_pl_by_day(since: dt.date) -> pd.Series:
-        sql = f"""
-        SELECT exit_time::date AS date,
-               SUM(pnl_cash_fifo)   AS realised_pl
-        FROM   {t_closed}
-        WHERE  exit_time::date >= :start
-        GROUP  BY 1
-        ORDER  BY 1"""
-        ser = (
-            pd.read_sql(text(sql), engine, params={"start": since})
-            .set_index("date")["realised_pl"]
-        )
-        return ser
-
-    def open_positions_snapshot() -> pd.DataFrame:
-        sql = f"""
-        SELECT symbol,
-               qty,
-               avg_fill,
-               avg_px_symbol,
-               filled_at,
-               mkt_px,
-               'open' AS status,
-               filled_at AS entry_time,
-               NULL      AS exit_time,
-               CASE WHEN qty > 0 THEN 1 ELSE -1 END AS side
-        FROM   {t_open}
-        WHERE  qty <> 0"""
-        return pd.read_sql(text(sql), engine)
-
-    def closed_trades_since(since: dt.date) -> pd.DataFrame:
-        sql = f"""
-        SELECT symbol, qty, entry_price AS avg_fill,
-               pnl_cash_fifo, exit_price,
-               entry_time, exit_time,
-               'closed'     AS status,
-               CASE WHEN side='long' THEN 1 ELSE -1 END AS side
-        FROM   {t_closed}
-        WHERE  exit_time::date >= :start"""
-        return pd.read_sql(text(sql), engine,
-                           params={"start": since})
-
-    # ---------- starting capital policy ---------------------------------
-    # The equity curve no longer uses any explicit initial deposit
-    # overrides. The starting value is derived solely from historical net
-    # cash flows and P/L. Keep an explicit 0.0 here for clarity.
-    init_cash = 0.0
-
-    # ---------- gather trades --------------------------------------
-    closed_df = closed_trades_since(start or dt.date.min)
-    if not closed_df.empty:
-        side_sign = closed_df["side"].astype(float)
-        qty = closed_df["qty"].astype(float)
-        pnl = closed_df["pnl_cash_fifo"].astype(float).fillna(0.0)
-        exit_px = closed_df["exit_price"].astype(float).fillna(0.0)
-        denominator = qty * side_sign
-        mask = abs(denominator) > 1e-9
-        closed_df.loc[mask, "avg_fill"] = exit_px - (pnl / denominator)
-    open_df   = open_positions_snapshot()
-
-    frames = [df for df in (closed_df, open_df) if not df.empty]
-    if not frames:
-        trades_df = pd.DataFrame(columns=[
-            "symbol", "qty", "avg_fill", "entry_time", "exit_time", "side"])
-    elif len(frames) == 1:
-        trades_df = frames[0].copy()
-    else:
-        common = set.intersection(*(set(f.columns) for f in frames))
-        trades_df = pd.concat([f[list(common)].dropna(axis=1, how="all")
-                               for f in frames],
-                               ignore_index=True)
-
-    raw_types = cfg.get(
-        "CASH_FLOW_TYPES",
-        (
-            "CSD,CSW,JNLC,ACATC,ACATS,FEE,CFEE,DIV,DIVCGL,DIVCGS,"
-            "DIVNRA,DIVROC,DIVTXEX,DIVWH,INT,INTPNL"
-        ),
+    windows = sorted(
+        set(windows or cfg.get("EQUITY_WINDOWS", [10, 21, 63, 126, 252]))
     )
-    earliest = earliest_activity_date(
-        engine,
-        {"closed": t_closed, "cash_flows": t_flows, "open": t_open},
-        cash_flow_types=raw_types,
-        fallback_years=5,
-    )
-    realised_s = realised_pl_by_day(start or earliest)
-    start_date = start or earliest
+    _ensure_table(engine, t_eq, windows)
+    today = dt.date.today()
 
-    idx = _trading_index_from_schedule(
-        engine,
-        t_schedule,
-        start_date,
+    print("Fetching raw activities ledger...")
+    flow_columns = _fetch_flow_columns(engine, t_flows)
+    select_clause, order_col = _build_activity_select_columns(flow_columns)
+    raw_activities_query = text(
+        f"""
+        SELECT
+            {select_clause}
+          FROM {t_flows}
+         ORDER BY {order_col} ASC
+        """
+    )
+    activities_df = pd.read_sql(raw_activities_query, engine)
+    if activities_df.empty:
+        return pd.DataFrame()
+    activities_df["transaction_time"] = pd.to_datetime(
+        activities_df["transaction_time"], utc=True, errors="coerce"
+    )
+    activities_df = activities_df.dropna(subset=["transaction_time"])
+    if activities_df.empty:
+        return pd.DataFrame()
+
+    activity_start = activities_df["transaction_time"].dt.date.min()
+    if pd.isna(activity_start):
+        activity_start = today
+    start_date = start or activity_start or today
+
+    all_symbols = [
+        str(symbol).upper()
+        for symbol in activities_df["symbol"].dropna().unique()
+        if str(symbol).strip()
+    ]
+
+    print(f"Fetching price history for {len(all_symbols)} symbols...")
+    price_df = _fetch_daily_closes(
+        rest,
+        all_symbols,
+        activity_start,
         today,
     )
 
-    # ---------- cash flows (external) by day ------------------------
-    try:
-        raw_types = cfg.get(
-            "CASH_FLOW_TYPES",
-            (
-                "CSD,CSW,JNLC,ACATC,ACATS,FEE,CFEE,DIV,DIVCGL,DIVCGS,"
-                "DIVNRA,DIVROC,DIVTXEX,DIVWH,INT,INTPNL"
-            ),
-        )
-        pats = [
-            t.strip().upper()
-            for t in str(raw_types).split(",")
-            if t.strip()
-        ]
-        where_types = (
-            " OR ".join([f"type ILIKE '{p}%'" for p in pats]) or "FALSE"
-        )
-        exclusion_clause = "AND type NOT IN ('FILL', 'PARTIAL_FILL')"
-        # Fetch ALL flows for strict ledger accuracy
-        flows_df = pd.read_sql(
-            text(
-                f"""
-                SELECT ts::date AS date,
-                       SUM(amount) AS net_flows
-                  FROM {t_flows}
-                     WHERE {where_types}
-                       {exclusion_clause}
-                  GROUP BY 1
-                  ORDER BY 1
-                """
-            ),
-            engine,
-        )
-        flows_series = flows_df.set_index("date")["net_flows"].astype(float)
-        flows_s = _align_flows_to_business_days(flows_series, idx)
-    except Exception:
-        flows_s = pd.Series(0.0, index=idx, dtype=float)
+    print("Replaying ledger state...")
+    equity_df = _calculate_daily_ledger(activities_df, price_df)
+    if equity_df.empty:
+        return pd.DataFrame()
 
-    # ---------- unrealised P/L up to yesterday ----------------------
-    def unrealised_pl_series(all_trades: pd.DataFrame,
-                             start_: dt.date,
-                             end_: dt.date) -> pd.Series:
-        if all_trades.empty:
-            return pd.Series(0.0,
-                             index=pd.bdate_range(start_, end_),
-                             name="unrealised_pl")
-        prices = _fetch_daily_closes(rest,
-                                     all_trades["symbol"].unique().tolist(),
-                                     start_, end_)
-        total = pd.Series(0.0, index=prices.index)
-        for _, t in all_trades.iterrows():
-            signed_qty = abs(t.qty) * (1 if t.side > 0 else -1)
-            entry_px   = t.avg_fill
-            open_from  = t.entry_time.date()
-            open_to    = (t.exit_time.date() - dt.timedelta(days=1)
-                          if pd.notna(t.exit_time) else end_)
-            pnl = signed_qty * (prices[t.symbol] - entry_px)
-            pnl.loc[: open_from - dt.timedelta(days=1)] = 0.0
-            pnl.loc[open_to + dt.timedelta(days=1):]    = 0.0
-            total += pnl
-        return total.reindex(pd.bdate_range(start_, end_),
-                             fill_value=0.0).rename("unrealised_pl")
+    if start_date:
+        start_ts = pd.Timestamp(start_date)
+        equity_df = equity_df.loc[equity_df.index >= start_ts]
+    if equity_df.empty:
+        return pd.DataFrame()
 
-    unreal_total = unrealised_pl_series(trades_df,
-                                        start_date,
-                                        today - dt.timedelta(days=1))\
-                   .reindex(idx, fill_value=0.0)
-
-    realised_full = _align_flows_to_business_days(realised_s, idx)
-    realised_cum  = realised_full.cumsum()
-
-    live_upl = 0.0
-    if not open_df.empty:
-        basis = open_df.get("avg_fill", 0.0)
-        live_upl = (open_df["qty"] * (open_df["mkt_px"] - basis)).sum()
-
-    df = pd.DataFrame(index=idx)
-    df["realised_pl"]   = realised_full
-    df["unrealised_pl"] = unreal_total
-
-    # Use live unrealised P/L only while the current session is active
-    last_session = idx[-1].date()
-    now_utc = dt.datetime.now(tz=dt.timezone.utc)
-    now_ny = now_utc.astimezone(ZoneInfo("America/New_York"))
-    session_today = trading_session_date(now_utc)
-    in_session = (
-        session_today == last_session
-        and now_ny.date() == session_today
-        and 4 <= now_ny.hour < 20
+    equity_df["deposit"] = equity_df["deposit"].astype(float)
+    equity_df["prev_deposit"] = equity_df["deposit"].shift(1)
+    equity_df["daily_return"] = np.where(
+        equity_df["prev_deposit"] > 0.0,
+        (equity_df["deposit"] - equity_df["prev_deposit"])
+        / equity_df["prev_deposit"],
+        0.0,
     )
-    if in_session:
-        df.at[idx[-1], "unrealised_pl"] = live_upl
-
-    # flows cumulative aligned to idx
-    flows_idxed = flows_s.reindex(idx, fill_value=0.0)
-    flows_cum = flows_idxed.cumsum()
-    df["net_flows"] = flows_idxed
-    # Equity = cumulative cash flows + cumulative realised P/L
-    #           + unrealised.
-    df["deposit"] = flows_cum + realised_cum + df["unrealised_pl"]
-
-    # Denominator for returns: previous day's deposit. For the first
-    # available day fall back to today's deposit (or 1.0 to avoid 0/0).
-    cap_prev = df["deposit"].shift(1)
-    cap_prev = cap_prev.fillna(df["deposit"]).replace(0.0, 1.0)
-
-    df["realised_return"]   = df["realised_pl"] / cap_prev
-    delta_unreal            = df["unrealised_pl"].diff().fillna(0.0)
-    df["unrealised_return"] = delta_unreal / cap_prev
-    df["daily_return"]      = df["realised_return"] + df["unrealised_return"]
-    df["cumulative_return"] = (1.0 + df["daily_return"]).cumprod() - 1.0
-
-    # Persistent drawdown (% as fraction, ≤ 0): deposit/peak - 1
-    peak = df["deposit"].cummax().replace(0.0, np.nan)
-    df["drawdown"] = (df["deposit"] / peak) - 1.0
-    df["drawdown"] = df["drawdown"].fillna(0.0)
+    equity_df["realised_return"] = equity_df["daily_return"]
+    equity_df["unrealised_return"] = 0.0
+    equity_df["cumulative_return"] = (
+        (1.0 + equity_df["daily_return"]).cumprod() - 1.0
+    )
+    equity_df["peak"] = equity_df["deposit"].cummax()
+    equity_df["drawdown"] = (
+        (equity_df["deposit"] / equity_df["peak"]) - 1.0
+    )
+    equity_df["drawdown"] = equity_df["drawdown"].fillna(0.0)
 
     rf_daily = (rf_pct / 100.0) / periods if rf_pct else 0.0
     for w in windows:
-        df[f"realised_sharpe_{w}"]         = _rolling_sharpe(
-            df["realised_return"],   w, rf_daily, periods, False)
-        df[f"realised_smart_sharpe_{w}"]   = _rolling_sharpe(
-            df["realised_return"],   w, rf_daily, periods, True)
-        df[f"unrealised_sharpe_{w}"]       = _rolling_sharpe(
-            df["unrealised_return"], w, rf_daily, periods, False)
-        df[f"unrealised_smart_sharpe_{w}"] = _rolling_sharpe(
-            df["unrealised_return"], w, rf_daily, periods, True)
-        df[f"sharpe_{w}"]                  = _rolling_sharpe(
-            df["daily_return"],      w, rf_daily, periods, False)
-        df[f"smart_sharpe_{w}"]            = _rolling_sharpe(
-            df["daily_return"],      w, rf_daily, periods, True)
+        equity_df[f"realised_sharpe_{w}"] = _rolling_sharpe(
+            equity_df["realised_return"],
+            w,
+            rf_daily,
+            periods,
+            False,
+        )
+        equity_df[f"realised_smart_sharpe_{w}"] = _rolling_sharpe(
+            equity_df["realised_return"],
+            w,
+            rf_daily,
+            periods,
+            True,
+        )
+        equity_df[f"unrealised_sharpe_{w}"] = _rolling_sharpe(
+            equity_df["unrealised_return"],
+            w,
+            rf_daily,
+            periods,
+            False,
+        )
+        equity_df[f"unrealised_smart_sharpe_{w}"] = _rolling_sharpe(
+            equity_df["unrealised_return"],
+            w,
+            rf_daily,
+            periods,
+            True,
+        )
+        equity_df[f"sharpe_{w}"] = _rolling_sharpe(
+            equity_df["daily_return"],
+            w,
+            rf_daily,
+            periods,
+            False,
+        )
+        equity_df[f"smart_sharpe_{w}"] = _rolling_sharpe(
+            equity_df["daily_return"],
+            w,
+            rf_daily,
+            periods,
+            True,
+        )
 
-    # ---------- bulk up-sert ----------------------------------------
-    _snapshot_to_db(engine, t_eq, df.reset_index(names="date"), windows)
-    return df.reset_index(names="date")
+    equity_df.index.name = "date"
+    drop_cols = ["prev_deposit", "peak", "cash_balance", "market_value"]
+    db_df = equity_df.drop(columns=drop_cols, errors="ignore")
+    db_df = db_df.reset_index()
+    _snapshot_to_db(engine, t_eq, db_df, windows)
+    return db_df
 
 
 # ────────────────────────────────────────────────────────────────
@@ -803,30 +830,66 @@ async def _snapshot_to_db_async(repo: AsyncAccountRepository,
                                 table: str,
                                 df: pd.DataFrame,
                                 windows: List[int]) -> None:
-    """Async bulk upsert for equity series."""
     await _ensure_table_async(repo, table, windows)
-
     records = df.to_dict(orient="records")
     if not records:
         return
 
     cols = list(df.columns)
-    placeholders = ", ".join(
-        f"${i}" for i in range(1, len(cols) + 1)
-    )
-    sets = ", ".join(
-        f"{c}=EXCLUDED.{c}" for c in cols if c != "date"
-    )
+    placeholders = ", ".join(f"${i}" for i in range(1, len(cols) + 1))
+    sets = ", ".join(f"{c}=EXCLUDED.{c}" for c in cols if c != "date")
     sql = (
         f"INSERT INTO {table} ({','.join(cols)}) "
         f"VALUES ({placeholders}) "
         f"ON CONFLICT (date) DO UPDATE SET {sets}"
     )
-    params = [
-        tuple(rec[c] for c in cols)
-        for rec in records
-    ]
+    # Convert pandas Timestamp to python date/datetime for asyncpg
+    params = []
+    for rec in records:
+        row = []
+        for c in cols:
+            val = rec[c]
+            if isinstance(val, (pd.Timestamp, np.datetime64)):
+                val = val.to_pydatetime()
+            if pd.isna(val):
+                val = None
+            row.append(val)
+        params.append(tuple(row))
+        
     await repo.executemany(sql, params)
+
+def _fetch_daily_closes(rest: REST,
+                        symbols: list[str],
+                        start: dt.date,
+                        end: dt.date) -> pd.DataFrame:
+    if not symbols:
+        return pd.DataFrame()
+    # Chunking to avoid URL length issues
+    chunk_size = 50
+    all_closes = []
+    
+    for i in range(0, len(symbols), chunk_size):
+        chunk = symbols[i:i+chunk_size]
+        try:
+            bars = rest.get_bars(chunk, TimeFrame.Day,
+                                 start=start.isoformat(),
+                                 end=(end + dt.timedelta(days=1)).isoformat()).df
+            if not bars.empty:
+                if "symbol" in bars.columns:
+                    closes = bars.pivot_table(index="timestamp", columns="symbol", values="close")
+                else:
+                    # Single symbol case
+                    closes = bars[["close"]].rename(columns={"close": chunk[0]})
+                all_closes.append(closes)
+        except Exception:
+            continue
+            
+    if not all_closes:
+        return pd.DataFrame()
+        
+    final = pd.concat(all_closes, axis=1)
+    final.index = final.index.tz_convert('America/New_York').normalize()
+    return final
 
 
 async def _ensure_repo(
@@ -879,6 +942,7 @@ async def _trading_index_from_schedule_async(
     return pd.DatetimeIndex(pd.to_datetime(dates), name="date")
 
 
+
 async def rebuild_equity_series_async(
     cfg: Dict,
     *,
@@ -889,337 +953,120 @@ async def rebuild_equity_series_async(
     repo: Optional[AsyncAccountRepository] = None,
 ) -> pd.DataFrame:
     """
-    Async recompute of the full equity curve using asyncpg.
+    Async recompute of equity using Ledger Replay (Cash + Assets).
     """
-    repo, own_repo = await _ensure_repo(cfg, repo)
+    # 1. Setup
+    if repo is None:
+        repo = await AsyncAccountRepository.create(cfg["CONN_STRING_POSTGRESQL"])
+        own_repo = True
+    else:
+        own_repo = False
+
     try:
-        rest = REST(cfg["API_KEY"], cfg["SECRET_KEY"],
-                    cfg["ALPACA_BASE_URL"])
-        t_closed = cfg["TABLE_ACCOUNT_CLOSED"]
-        t_open = cfg["TABLE_ACCOUNT_POSITIONS"]
-        t_eq = cfg.get("TABLE_ACCOUNT_EQUITY_FULL",
-                       "account_equity_full")
-        t_schedule = cfg.get("TABLE_MARKET_SCHEDULE")
-        t_flows = cfg.get("TABLE_ACCOUNT_CASH_FLOWS")
-        if not t_flows:
-            try:
-                if "." in t_eq:
-                    sch, base = t_eq.split(".", 1)
-                    base2 = (
-                        base.replace("equity_full_", "cash_flows_", 1)
-                        if base.startswith("equity_full_")
-                        else f"cash_flows_{base}"
-                    )
-                    t_flows = f"{sch}.{base2}"
-                else:
-                    t_flows = t_eq.replace("equity_full_", "cash_flows_", 1)
-            except Exception:
-                t_flows = "cash_flows"
+        rest = REST(cfg["API_KEY"], cfg["SECRET_KEY"], cfg["ALPACA_BASE_URL"])
+        t_eq = cfg.get("TABLE_ACCOUNT_EQUITY_FULL", "account_equity_full")
+        windows = sorted(set(windows or cfg.get("EQUITY_WINDOWS", [10, 21, 63, 126, 252])))
 
-        windows = sorted(set(windows or cfg.get(
-            "EQUITY_WINDOWS",
-            [10, 21, 63, 126, 252],
-        )))
-        await _ensure_table_async(repo, t_eq, windows)
-        today = dt.date.today()
+        # 2. Determine Raw Activity Table Name
+        # We derive this from the equity table name (e.g., 'accounts.equity_full_live' -> 'live')
+        slug = "default"
+        if "equity_full_" in t_eq:
+            slug = t_eq.split("equity_full_")[-1]
+        
+        # NOTE: This is the critical fix. We point to the Ingester's raw table.
+        raw_table = f"account_activities.raw_activities_{slug}"
+        print(f"Rebuilding equity from raw ledger: {raw_table}")
 
-        async def realised_pl_by_day(since: dt.date) -> pd.Series:
-            sql = f"""
-            SELECT exit_time::date AS date,
-                   SUM(pnl_cash_fifo)   AS realised_pl
-              FROM {t_closed}
-             WHERE exit_time::date >= $1
-          GROUP BY 1
-          ORDER  BY 1
-            """
-            rows = await repo.fetch(sql, since)
-            if not rows:
-                return pd.Series(dtype=float)
-            ser = (
-                pd.DataFrame(rows)
-                .set_index("date")["realised_pl"]
-                .astype(float)
-            )
-            return ser
-
-        async def open_positions_snapshot() -> pd.DataFrame:
-            sql = f"""
-            SELECT symbol,
-                   qty,
-                   avg_fill,
-                   avg_px_symbol,
-                   filled_at,
-                   mkt_px,
-                   'open' AS status,
-                   filled_at AS entry_time,
-                   NULL      AS exit_time,
-                   CASE WHEN qty > 0 THEN 1 ELSE -1 END AS side
-              FROM {t_open}
-             WHERE qty <> 0
-            """
+        # 3. Fetch Raw Activities
+        sql = f"""
+            SELECT
+                transaction_time,
+                activity_type,
+                net_amount,
+                symbol,
+                qty,
+                side
+            FROM {raw_table}
+            ORDER BY transaction_time ASC
+        """
+        try:
             rows = await repo.fetch(sql)
-            return pd.DataFrame(rows)
+        except Exception as e:
+            print(f"Failed to fetch raw activities: {e}")
+            return pd.DataFrame()
 
-        async def closed_trades_since(
-            since: dt.date,
-        ) -> pd.DataFrame:
-            sql = f"""
-            SELECT symbol,
-                   qty,
-                   entry_price AS avg_fill,
-                   pnl_cash_fifo,
-                   exit_price,
-                   entry_time,
-                   exit_time,
-                   'closed'     AS status,
-                   CASE WHEN side='long' THEN 1 ELSE -1 END AS side
-              FROM {t_closed}
-             WHERE exit_time::date >= $1
-            """
-            rows = await repo.fetch(sql, since)
-            return pd.DataFrame(rows)
+        if not rows:
+            print("No activities found.")
+            return pd.DataFrame()
 
-        raw_types = cfg.get(
-            "CASH_FLOW_TYPES",
-            (
-                "CSD,CSW,JNLC,ACATC,ACATS,FEE,CFEE,DIV,DIVCGL,"
-                "DIVCGS,DIVNRA,DIVROC,DIVTXEX,DIVWH,INT,INTPNL"
-            ),
-        )
-        pats = [
-            t.strip().upper()
-            for t in str(raw_types).split(",")
-            if t.strip()
-        ]
-        where_types = (
-            " OR ".join([f"type ILIKE '{p}%'" for p in pats]) or "FALSE"
-        )
-        exclusion_clause = "AND type NOT IN ('FILL', 'PARTIAL_FILL')"
+        activities_df = pd.DataFrame(rows)
+        # Ensure UTC and numeric types
+        activities_df['transaction_time'] = pd.to_datetime(activities_df['transaction_time'], utc=True)
+        activities_df['net_amount'] = pd.to_numeric(activities_df['net_amount']).fillna(0.0)
+        activities_df['qty'] = pd.to_numeric(activities_df['qty']).fillna(0.0)
 
-        async def flows_series(idx: pd.DatetimeIndex) -> pd.Series:
-            try:
-                # Fetch ALL flows for strict ledger accuracy
-                rows = await repo.fetch(
-                    f"""
-                    SELECT ts::date AS date,
-                           SUM(amount) AS net_flows
-                      FROM {t_flows}
-                     WHERE {where_types}
-                        {exclusion_clause}
-                 GROUP BY 1
-                     ORDER BY 1
-                    """
-                )
-                if not rows:
-                    return pd.Series(0.0, index=idx, dtype=float)
-                flows_df = pd.DataFrame(rows)
-                flows_s = (
-                    flows_df.set_index("date")["net_flows"].astype(float)
-                )
-                return _align_flows_to_business_days(flows_s, idx)
-            except Exception:
-                return pd.Series(0.0, index=idx, dtype=float)
-
-        closed_df = await closed_trades_since(start or dt.date.min)
-        if not closed_df.empty:
-            side_sign = closed_df["side"].astype(float)
-            qty = closed_df["qty"].astype(float)
-            pnl = closed_df["pnl_cash_fifo"].astype(float).fillna(0.0)
-            exit_px = closed_df["exit_price"].astype(float).fillna(0.0)
-            denominator = qty * side_sign
-            mask = abs(denominator) > 1e-9
-            closed_df.loc[mask, "avg_fill"] = exit_px - (pnl / denominator)
-        open_df = await open_positions_snapshot()
-
-        frames = [df for df in (closed_df, open_df) if not df.empty]
-        if not frames:
-            trades_df = pd.DataFrame(
-                columns=[
-                    "symbol",
-                    "qty",
-                    "avg_fill",
-                    "entry_time",
-                    "exit_time",
-                    "side",
-                ]
-            )
-        elif len(frames) == 1:
-            trades_df = frames[0].copy()
-        else:
-            common = set.intersection(*(set(f.columns) for f in frames))
-            trades_df = pd.concat(
-                [
-                    f[list(common)].dropna(axis=1, how="all")
-                    for f in frames
-                ],
-                ignore_index=True,
-            )
-
-        earliest = await earliest_activity_date_async(
-            repo,
-            {"closed": t_closed, "cash_flows": t_flows, "open": t_open},
-            cash_flow_types=raw_types,
-            fallback_years=5,
-        )
-        realised_s = await realised_pl_by_day(start or earliest)
-        start_date = start or earliest
-
-        idx = await _trading_index_from_schedule_async(
-            repo,
-            t_schedule,
-            start_date,
-            today,
-        )
-        flows_s = await flows_series(idx)
-
-        def unrealised_pl_series(
-            all_trades: pd.DataFrame,
-            start_: dt.date,
-            end_: dt.date,
-        ) -> pd.Series:
-            if all_trades.empty:
-                return pd.Series(
-                    0.0,
-                    index=pd.bdate_range(start_, end_),
-                    name="unrealised_pl",
-                )
-            prices = _fetch_daily_closes(
-                rest,
-                all_trades["symbol"].unique().tolist(),
-                start_,
-                end_,
-            )
-            total = pd.Series(0.0, index=prices.index)
-            for _, t in all_trades.iterrows():
-                signed_qty = abs(t.qty) * (1 if t.side > 0 else -1)
-                entry_px = t.avg_fill
-                open_from = t.entry_time.date()
-                open_to = (
-                    t.exit_time.date() - dt.timedelta(days=1)
-                    if pd.notna(t.exit_time)
-                    else end_
-                )
-                pnl = signed_qty * (prices[t.symbol] - entry_px)
-                pnl.loc[: open_from - dt.timedelta(days=1)] = 0.0
-                pnl.loc[open_to + dt.timedelta(days=1):] = 0.0
-                total += pnl
-            return total.reindex(
-                pd.bdate_range(start_, end_),
-                fill_value=0.0,
-            ).rename("unrealised_pl")
-
-        unreal_total = unrealised_pl_series(
-            trades_df,
-            start_date,
-            today - dt.timedelta(days=1),
-        ).reindex(idx, fill_value=0.0)
-
-        realised_full = _align_flows_to_business_days(realised_s, idx)
-        realised_cum = realised_full.cumsum()
-
-        live_upl = 0.0
-        if not open_df.empty:
-            # Force use of avg_fill, matching the intraday curve basis.
-            basis = open_df.get("avg_fill", 0.0)
-            live_upl = (
-                open_df["qty"] * (open_df["mkt_px"] - basis)
-            ).sum()
-
-        df = pd.DataFrame(index=idx)
-        df["realised_pl"] = realised_full
-        df["unrealised_pl"] = unreal_total
-
-        last_session = idx[-1].date()
-        now_utc = dt.datetime.now(tz=dt.timezone.utc)
-        now_ny = now_utc.astimezone(ZoneInfo("America/New_York"))
-        session_today = trading_session_date(now_utc)
-        in_session = (
-            session_today == last_session
-            and now_ny.date() == session_today
-            and 4 <= now_ny.hour < 20
-        )
-        if in_session:
-            df.at[idx[-1], "unrealised_pl"] = live_upl
-
-        flows_idxed = flows_s.reindex(idx, fill_value=0.0)
-        flows_cum = flows_idxed.cumsum()
-        df["net_flows"] = flows_idxed
-        # Equity = cumulative cash flows + cumulative realised P/L
-        #           + unrealised.
-        df["deposit"] = flows_cum + realised_cum + df["unrealised_pl"]
-
-        cap_prev = df["deposit"].shift(1)
-        cap_prev = cap_prev.fillna(df["deposit"]).replace(0.0, 1.0)
-
-        df["realised_return"] = df["realised_pl"] / cap_prev
-        delta_unreal = df["unrealised_pl"].diff().fillna(0.0)
-        df["unrealised_return"] = delta_unreal / cap_prev
-        df["daily_return"] = (
-            df["realised_return"] + df["unrealised_return"]
-        )
-        df["cumulative_return"] = (
-            (1.0 + df["daily_return"]).cumprod() - 1.0
+        # 4. Fetch History Prices
+        all_symbols = activities_df['symbol'].dropna().unique().tolist()
+        all_symbols = [s for s in all_symbols if s] # filter empty
+        
+        print(f"Fetching price history for {len(all_symbols)} symbols...")
+        start_date = activities_df['transaction_time'].min().date()
+        end_date = dt.date.today()
+        
+        price_df = await asyncio.to_thread(
+            _fetch_daily_closes, rest, all_symbols, start_date, end_date
         )
 
-        peak = df["deposit"].cummax().replace(0.0, np.nan)
-        df["drawdown"] = (df["deposit"] / peak) - 1.0
-        df["drawdown"] = df["drawdown"].fillna(0.0)
+        # 5. Calculate Ledger
+        print("Replaying ledger...")
+        equity_df = await asyncio.to_thread(
+            _calculate_daily_ledger, activities_df, price_df
+        )
 
-        rf_daily = (rf_pct / 100.0) / periods if rf_pct else 0.0
-        for w in windows:
-            df[f"realised_sharpe_{w}"] = _rolling_sharpe(
-                df["realised_return"],
-                w,
-                rf_daily,
-                periods,
-                False,
-            )
-            df[f"realised_smart_sharpe_{w}"] = _rolling_sharpe(
-                df["realised_return"],
-                w,
-                rf_daily,
-                periods,
-                True,
-            )
-            df[f"unrealised_sharpe_{w}"] = _rolling_sharpe(
-                df["unrealised_return"],
-                w,
-                rf_daily,
-                periods,
-                False,
-            )
-            df[f"unrealised_smart_sharpe_{w}"] = _rolling_sharpe(
-                df["unrealised_return"],
-                w,
-                rf_daily,
-                periods,
-                True,
-            )
-            df[f"sharpe_{w}"] = _rolling_sharpe(
-                df["daily_return"],
-                w,
-                rf_daily,
-                periods,
-                False,
-            )
-            df[f"smart_sharpe_{w}"] = _rolling_sharpe(
-                df["daily_return"],
-                w,
-                rf_daily,
-                periods,
-                True,
-            )
+        if equity_df.empty:
+            return equity_df
 
+        # 6. Calc Metrics
+        equity_df['deposit'] = equity_df['deposit'].astype(float)
+        equity_df['prev_deposit'] = equity_df['deposit'].shift(1)
+        equity_df['daily_return'] = np.where(
+            equity_df['prev_deposit'] > 0,
+            (equity_df['deposit'] - equity_df['prev_deposit']) / equity_df['prev_deposit'],
+            0.0
+        )
+        equity_df['cumulative_return'] = (1 + equity_df['daily_return']).cumprod() - 1
+        
+        peak = equity_df['deposit'].cummax()
+        equity_df['drawdown'] = (equity_df['deposit'] / peak) - 1.0
+        equity_df['drawdown'] = equity_df['drawdown'].fillna(0.0)
+
+        # 7. Save
+        equity_df.index.name = 'date'
         await _snapshot_to_db_async(
             repo,
             t_eq,
-            df.reset_index(names="date"),
-            windows,
+            equity_df.reset_index(),
+            windows
         )
-        return df.reset_index(names="date")
+        
+        return equity_df.reset_index()
+
     finally:
         if own_repo:
             await repo.close()
+
+# Stub for synchronous support if needed elsewhere (wraps async)
+def rebuild_equity_series(cfg: Dict, **kwargs) -> pd.DataFrame:
+    return asyncio.run(rebuild_equity_series_async(cfg, **kwargs))
+
+# Stub for update_today (can be left as is or updated similarly)
+async def update_today_row_async(cfg: Dict, repo: Optional[AsyncAccountRepository] = None) -> None:
+    # For now, just trigger a full rebuild to keep it consistent
+    await rebuild_equity_series_async(cfg, repo=repo)
+
+def update_today_row(cfg: Dict) -> None:
+    asyncio.run(update_today_row_async(cfg))
+
 
 
 async def update_today_row_async(
