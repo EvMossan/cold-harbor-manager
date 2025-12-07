@@ -102,9 +102,11 @@ async def _bootstrap_cash_flows(
             if raw_type not in (None, "")
             else ""
         )
-        if activity_type in ("FILL", "PARTIAL_FILL"):
-            continue
-
+        
+        # Note: We keep all activities including Fills for the Ledger logic if needed later,
+        # but typically cash_flows table is for UI display of non-trade flows.
+        # Ideally, core equity reads from raw_activities, so this is just for UI.
+        
         ts_val = None
         for col in time_cols:
             if col not in activities.columns:
@@ -160,15 +162,14 @@ async def _bootstrap_cash_flows(
         records,
     )
     mgr.log.info(
-        "flows bootstrap upserted %d rows (%d pages)",
-        len(records),
-        1,
+        "flows bootstrap upserted %d rows",
+        len(records)
     )
     return len(records)
 
 
 async def _rebuild_equity_full(mgr: "AccountManager") -> None:
-    """Rebuild daily equity using full cash-flows history."""
+    """Rebuild daily equity using full ledger replay."""
     cfg = {
         "CONN_STRING_POSTGRESQL": mgr.c.POSTGRESQL_LIVE_SQLALCHEMY,
         "API_KEY": mgr.c.API_KEY,
@@ -178,6 +179,8 @@ async def _rebuild_equity_full(mgr: "AccountManager") -> None:
         "TABLE_ACCOUNT_POSITIONS": mgr.tbl_live,
         "TABLE_ACCOUNT_EQUITY_FULL": mgr.tbl_equity,
         "TABLE_MARKET_SCHEDULE": mgr.tbl_market_schedule,
+        # [FIX] Pass account slug so Core Logic can find the correct raw table
+        "ACCOUNT_SLUG": mgr.c.ACCOUNT_SLUG,
         "CASH_FLOW_TYPES": os.getenv(
             "CASH_FLOW_TYPES",
             (
@@ -188,19 +191,15 @@ async def _rebuild_equity_full(mgr: "AccountManager") -> None:
     }
     try:
         df = await rebuild_equity_series_async(cfg, repo=mgr.repo)
+        
+        start_date = str(df["date"].min()) if df is not None and not df.empty else "-"
+        end_date = str(df["date"].max()) if df is not None and not df.empty else "-"
+        
         mgr.log.info(
             "equity rebuild: %d days from %s to %s",
             len(df.index) if df is not None else 0,
-            (
-                str(df["date"].min())
-                if df is not None and not df.empty
-                else "-"
-            ),
-            (
-                str(df["date"].max())
-                if df is not None and not df.empty
-                else "-"
-            ),
+            start_date,
+            end_date,
         )
     except Exception as exc:
         mgr.log.warning("equity rebuild failed: %s", exc)
@@ -425,7 +424,6 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                 signed = -qty if side.startswith("short") else qty
                 exit_px = float(row.get("exit_price") or 0.0)
                 pnl_fifo = float(row.get("pnl_cash_fifo") or 0.0)
-                # Derive FIFO entry so the chart matches realised PnL exactly.
                 if abs(signed) > 1e-9:
                     basis = exit_px - (pnl_fifo / signed)
                 else:
@@ -442,10 +440,6 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                     diff.where(mask, 0.0) * signed, fill_value=0.0
                 )
 
-        # 1. Get Yesterday's Closing Cash (Equity - Unrealized).
-        # 2. Calculate Today's Total Cash (Prev Cash + Today Realized +
-        #    Today Flows).
-        # 3. Calculate Live Equity (Total Cash + Live Unrealized).
         if flows is not None and not flows.empty:
             flow_floor = pd.to_datetime(flows["ts"], utc=True).dt.floor(
                 "min"
@@ -475,7 +469,6 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
         dep_ticks = deposit_series.reindex(tick_idx, method="ffill")
         dep_ticks = dep_ticks.ffill().astype(float)
 
-        # --- HYBRID TAIL SNAP: Force last point to match Live ZMQ ---
         if not open_df.empty and not dep_ticks.empty:
             live_unrealized_total = float(
                 open_df["profit_loss"].fillna(0.0).sum()
@@ -489,7 +482,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                 + live_unrealized_total
             )
             dep_ticks.iat[-1] = live_deposit
-        # ------------------------------------------------------------
+
         base_cap = prev_equity if prev_equity != 0.0 else 1.0
         daily_ret = dep_ticks / base_cap - 1.0
         cum_ticks = (1.0 + prev_cum_ret) * (1.0 + daily_ret) - 1.0
@@ -539,7 +532,8 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
 async def _equity_worker(mgr: "AccountManager") -> None:
     while True:
         try:
-            await update_today_row_async(mgr.cfg, repo=mgr.repo)
+            # [FIX] Force full rebuild to ensure Ledger Replay consistency
+            await _rebuild_equity_full(mgr)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
