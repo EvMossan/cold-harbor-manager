@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Blueprint-based web layer for the account dashboards.
-
-This file mirrors the old ``account_web.py`` but exposes a blueprint factory
-instead of a module-level Flask app. The actual Flask app will be created in
-``cold_harbour.__init__.py`` via ``create_app``.
-"""
+"""Blueprint-based web layer for the account dashboards."""
 
 from __future__ import annotations
 
@@ -14,7 +9,7 @@ import math
 import os
 import select
 import sys
-import time  # used for SSE keep-alive comments
+import time
 import uuid
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Any
@@ -70,13 +65,7 @@ HEARTBEAT_SEC = _heartbeat_sec()
 
 # ----- DSN / URL helper -----------------------------------------
 def _make_sa_engine():
-    """Return SQLAlchemy engine created from a URL or libpq-style DSN.
-
-    The environment variable ``POSTGRESQL_LIVE_CONN_STRING`` can be either a
-    SQLAlchemy URL (``postgresql+psycopg2://…``) or a space-separated libpq
-    DSN (``host=… user=…``). We support both forms to match the rest of the
-    codebase.
-    """
+    """Return SQLAlchemy engine created from a URL or libpq-style DSN."""
     raw = os.getenv("POSTGRESQL_LIVE_CONN_STRING", "")
     if "://" in raw:
         return create_engine(
@@ -109,17 +98,12 @@ def _make_sa_engine():
 
 engine = _make_sa_engine()
 
-# Timescale connection (use SQLAlchemy engine to avoid pandas warnings)
+# Timescale connection
 TS_DSN = os.getenv("TIMESCALE_LIVE_CONN_STRING", "")
 
 
 def _make_ts_engine():
-    """Return SQLAlchemy engine for Timescale from URL or libpq DSN.
-
-    Prefers ``TIMESCALE_LIVE_SQLALCHEMY`` if present; otherwise parses the
-    libpq-style DSN in ``TIMESCALE_LIVE_CONN_STRING``. Falls back to the
-    primary ``engine`` when nothing is configured.
-    """
+    """Return SQLAlchemy engine for Timescale from URL or libpq DSN."""
     raw = os.getenv("TIMESCALE_LIVE_SQLALCHEMY") or TS_DSN
     if not raw:
         return engine
@@ -176,10 +160,7 @@ if not log.handlers:
     log.addHandler(handler)
     log.propagate = False
 
-# Hardcoded bars table per requirement
 BARS_TABLE = "public.alpaca_bars_1min"
-
-# Toggle SSE streams; set to False to enable live updates.
 DISABLE_SSE = False
 
 accounts_bp = Blueprint("accounts", __name__)
@@ -260,7 +241,6 @@ def _end_request_timer(resp: Response) -> Response:
 
 
 def relax_csp(resp: Response) -> Response:
-    """Install a permissive CSP that works with CDN assets and inline JS."""
     resp.headers.pop("Content-Security-Policy", None)
     resp.headers["Content-Security-Policy"] = (
         "default-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com "
@@ -274,23 +254,16 @@ def relax_csp(resp: Response) -> Response:
 
 
 def register_request_hooks(app) -> None:
-    """Attach common request/response hooks to the Flask app."""
     app.before_request(_start_request_timer)
     app.after_request(_end_request_timer)
     app.after_request(relax_csp)
 
 
 def _make_blueprint_for_dest(dest: dict) -> Blueprint:
-    """Create a per-destination blueprint mounted at ``/<slug>``.
-
-    All routes use relative URLs inside the template so the same HTML
-    works for every account without changes.
-    """
     schema = os.getenv("ACCOUNT_SCHEMA", "accounts")
     tables = account_table_names(dest, schema=schema)
     if "schedule" in tables and "market_schedule" not in tables:
         tables["market_schedule"] = tables["schedule"]
-    # Derive intraday equity and cash_flows table names from full equity table
     try:
         eq_full = tables.get("equity")
         if eq_full:
@@ -312,7 +285,6 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
     bp = Blueprint(f"acct_{slug}", __name__, url_prefix=f"/{slug}")
 
-    # In-memory TTL caches per destination to avoid heavy recompute on tab open
     common_ttl = HEARTBEAT_SEC
     _cache = {
         "metrics": {"ts": None, "data": None, "ttl": common_ttl},
@@ -340,35 +312,10 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         _log_timing("open_version", start_ts, int(row["cnt"] or 0))
         max_upd = row["max_upd"]
         cnt = int(row["cnt"] or 0)
-        # ETag must be a string; include count to detect row adds/removes
         return f"{pd.to_datetime(max_upd, utc=True).isoformat()}-{cnt}"
-
-    def _fetch_closed_df() -> pd.DataFrame:
-        start_ts = _now()
-        with engine.begin() as conn:
-            sql = text(
-                f"""
-                SELECT symbol, side, qty,
-                       entry_time AT TIME ZONE 'UTC'  AS entry_time,
-                       exit_time  AT TIME ZONE 'UTC'  AS exit_time,
-                       entry_price, exit_price,
-                       exit_type, exit_order_id,
-                       pnl_cash, return_pct
-                  FROM {tables['closed']}
-                 ORDER BY exit_time DESC
-                """
-            )
-            df = pd.read_sql(sql, conn)
-        _log_timing("closed_sql_full", start_ts, len(df.index))
-        return df
 
     @bp.route("/")
     def home() -> str:
-        """Render dashboard with a simple account tab bar.
-
-        Pass the list of available destinations (slug + display name) and
-        the current slug so the template can highlight the active tab.
-        """
         tabs = [
             {"slug": slug_for(d), "name": d.get("name", "account")}
             for d in DESTINATIONS
@@ -381,12 +328,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         )
 
     @bp.route("/api/positions")
-    def api_positions() -> Response:  # type: ignore[override]
-        """Return the current open-trades table as JSON records.
-
-        Each list item mirrors `tables['open']` and emits keys such as
-        `symbol`, `qty`, `avg_entry_price`, `entry_time`, and `side`.
-        """
+    def api_positions() -> Response:
         start_ts = _now()
         df = _fetch_open_df()
         safe = json.loads(
@@ -396,14 +338,8 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         return jsonify(safe)
 
     @bp.route("/api/closed")
-    def api_closed() -> Response:  # type: ignore[override]
-        """Return the most-recent closed trades (limit 300) as JSON.
-
-        Each row includes entry/exit prices/dates, `pnl_cash`, and
-        `return_pct` so the UI can render closed trades and KPIs.
-        """
+    def api_closed() -> Response:
         start_ts = _now()
-        # Return only the most recent 300 rows for UI speed.
         with engine.begin() as conn:
             sql = text(
                 f"""
@@ -425,14 +361,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         )
 
     @bp.route("/api/positions_cached")
-    def api_positions_cached() -> Response:  # type: ignore[override]
-        """Return cached open positions with ETag/304 semantics.
-
-        The JSON payload is identical to `/api/positions`. If the
-        client's `If-None-Match` matches the current ETag, the handler
-        replies with `304` and no body.
-        """
-        # Build ETag from DB version (max(updated_at) + count)
+    def api_positions_cached() -> Response:
         etag = _open_version()
         inm = request.headers.get("If-None-Match")
         if inm == etag:
@@ -448,14 +377,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         return resp
 
     @bp.route("/api/closed_cached")
-    def api_closed_cached() -> Response:  # type: ignore[override]
-        """Return cached closed trades along with an exit-time ETag.
-
-        The payload is an array of `symbol`, `entry_time`, `exit_time`,
-        `qty`, `entry_price`, `exit_price`, `pnl_cash`, and `return_pct`.
-        Clients can reuse the provided `ETag` for polling.
-        """
-        # Compute a lightweight ETag based on latest exit_time and limited count
+    def api_closed_cached() -> Response:
         with engine.begin() as conn:
             ver_row = conn.execute(
                 text(
@@ -491,9 +413,8 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         return resp
 
     @bp.route("/stream/closed")
-    def stream_closed() -> Response:  # type: ignore[override]
+    def stream_closed() -> Response:
         if DISABLE_SSE:
-            log.debug("SSE closed disabled; returning 204")
             return Response(status=204)
 
         def event_stream():
@@ -537,13 +458,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         )
 
     @bp.route("/api/metrics")
-    def api_metrics() -> Response:  # type: ignore[override]
-        """Return the latest KPI payload from `tables['metrics']`.
-
-        The response is either a single dict or a list of dicts containing
-        vendor metrics such as `net_pnl`, `drawdown`, and `sharpe`,
-        matching the structure stored in `account_metrics_*`.
-        """
+    def api_metrics() -> Response:
         payload: dict[str, Any] | list[Any] = {}
         with engine.begin() as conn:
             row = conn.execute(
@@ -561,15 +476,13 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 payload = json.loads(row)
             except json.JSONDecodeError:
                 payload = {}
-        # Keep compatibility: frontend accepts either [{…}] or {…}
         if isinstance(payload, dict):
             return jsonify([payload])
         return jsonify(payload)
 
     @bp.route("/stream/positions")
-    def stream_positions() -> Response:  # type: ignore[override]
+    def stream_positions() -> Response:
         if DISABLE_SSE:
-            log.debug("SSE positions disabled; returning 204")
             return Response(status=204)
 
         def event_stream():
@@ -583,7 +496,6 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             try:
                 yield ": connected\n\n"
                 while True:
-                    # shorter timeout for quicker disconnect detection
                     if select.select([conn], [], [], 5) == ([], [], []):
                         yield ": ping\n\n"
                         continue
@@ -615,9 +527,8 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         )
 
     @bp.route("/stream/events")
-    def stream_events() -> Response:  # type: ignore[override]
+    def stream_events() -> Response:
         if DISABLE_SSE:
-            log.debug("SSE events disabled; returning 204")
             return Response(status=204)
 
         def event_stream():
@@ -673,21 +584,10 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         )
 
     @bp.route("/api/equity")
-    def api_equity() -> Response:  # type: ignore[override]
-        """Return equity history rows filtered by the `window` query.
-
-        Each row exposes `date`, `deposit`, `cumulative_return`,
-        `realised_return`, and `drawdown`. Supported windows:
-        `all`, `first_trade` (default), or `<Nd>` to limit to the last
-        N days.
-        """
+    def api_equity() -> Response:
         start_ts = _now()
-        # Optional window parameter.
-        # Defaults to 'first_trade' to avoid long flat periods before trading
-        # actually started. Other accepted values: 'all', '<Nd>' (e.g. 365d).
         window = (request.args.get("window") or "first_trade").strip().lower()
 
-        # TTL cache per window mode
         cache_key = f"equity:{window}"
         try:
             now = pd.Timestamp.utcnow()
@@ -699,7 +599,6 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         except Exception:
             pass
 
-        # Build WHERE clause
         where = ""
         params: dict[str, Any] = {}
         if window == "all":
@@ -708,7 +607,6 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             days = int(window[:-1])
             where = f"WHERE date >= (CURRENT_DATE - INTERVAL '{days} days')"
         else:
-            # 'first_trade' behaviour: start from earliest trade fill
             with engine.begin() as conn:
                 try:
                     cut = conn.execute(
@@ -726,14 +624,13 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 where = "WHERE date >= :cut"
                 params["cut"] = cut
             else:
-                # fallback: last 365 days
                 where = "WHERE date >= (CURRENT_DATE - INTERVAL '365 days')"
 
         with engine.begin() as conn:
             df = pd.read_sql(
                 text(
                     f"""
-                    SELECT date, deposit, cumulative_return, realised_return, drawdown
+                    SELECT date, deposit, cumulative_return, drawdown
                       FROM {tables['equity']}
                       {where}
                      ORDER BY date
@@ -752,23 +649,8 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         return jsonify(payload)
 
     @bp.route("/api/equity_intraday")
-    def api_equity_intraday() -> Response:  # type: ignore[override]
-        """Return minute-level intraday equity and metadata.
-
-        Response format: `{ "series": [ { "ts": "...", "deposit": n,
-        "pl_cash": n, "drawdown_cash": n } ], "meta": { ... } }`. The
-        TTL is capped at `min(HEARTBEAT_SEC, 10)` seconds.
-        """
-        """Return intraday equity as cash P/L relative to yesterday.
-
-        Option A: read precomputed points from the manager's
-        ``equity_intraday`` table and compute ``pl_cash = deposit -
-        prev_deposit``. This eliminates duplicated math and keeps the UI
-        aligned with the daily series. Falls back to a zero series when
-        the table is empty.
-        """
+    def api_equity_intraday() -> Response:
         start_ts = _now()
-        # TTL cache ~30s
         def _to_float(value, default=None):
             try:
                 if value is None:
@@ -907,13 +789,11 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 last_complete = start_utc
             end_utc = last_complete if last_complete <= post_close_ts else post_close_ts
 
-        # Anchor deposit: strictly before the session date (base for this session)
         with engine.begin() as conn:
             prev_row = conn.execute(
                 text(
                     f"""
-                    SELECT deposit,
-                           COALESCE(unrealised_pl, 0) AS unrealised_pl
+                    SELECT deposit, cash_balance
                       FROM {tables['equity']}
                      WHERE date < :d
                   ORDER BY date DESC
@@ -923,13 +803,9 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 {"d": sess_date},
             ).mappings().first()
             prev_deposit = float(prev_row["deposit"]) if prev_row else 0.0
-            prev_unreal = float(prev_row.get("unrealised_pl") or 0.0) if prev_row else 0.0
-        prev_cash_balance = prev_deposit - prev_unreal
 
-        # Use minute frequency (alias 'T' is deprecated)
         idx = pd.date_range(start_utc, end_utc, freq="min", tz="UTC")
 
-        # Pull precomputed deposits from intraday table
         with engine.begin() as conn:
             df = pd.read_sql(
                 text(
@@ -947,7 +823,6 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 },
             )
 
-        # Compose flows cumulative time series over idx
         with engine.begin() as conn:
             try:
                 raw_types = os.getenv(
@@ -977,6 +852,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 )
             except Exception:
                 fdf = pd.DataFrame(columns=["ts", "amount"])
+
         with engine.begin() as conn:
             closed_df = pd.read_sql(
                 text(
@@ -1045,10 +921,8 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             .reindex(idx)
             .ffill()
         )
-        # Drawdown in dollars (dep - rolling peak)
         dd_series = series - series.cummax()
 
-        # Flows cumulative series on the same index
         if not fdf.empty:
             fmin = pd.to_datetime(fdf["ts"], utc=True).dt.floor("min")
             fser = (
@@ -1072,31 +946,14 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         )
 
         out = out.sort_values("ts").reset_index(drop=True)
-        open_df = _fetch_open_df()
-        live_unrealized_zmq = 0.0
-        if not open_df.empty and "profit_loss" in open_df.columns:
-            live_unrealized_zmq = float(
-                open_df["profit_loss"].fillna(0.0).sum()
-            )
         current_realized = (
             float(rcum.iloc[-1]) if not rcum.empty else 0.0
         )
         current_flows = float(fser.iloc[-1]) if not fser.empty else 0.0
-        true_live_deposit = (
-            prev_cash_balance
-            + current_realized
-            + current_flows
-            + live_unrealized_zmq
-        )
-        if not out.empty:
-            dep_idx = out.columns.get_loc("deposit")
-            dd_idx = out.columns.get_loc("drawdown_cash")
-            out.iloc[-1, dep_idx] = true_live_deposit
-            peak = out["deposit"].max()
-            current_dd = (
-                (true_live_deposit / peak) - 1.0 if peak > 0.0 else 0.0
-            )
-            out.iloc[-1, dd_idx] = current_dd
+        
+        latest_val = out["deposit"].iloc[-1] if not out.empty else 0.0
+        true_live_deposit = float(latest_val)
+
         series_payload = json.loads(
             out.to_json(orient="records", date_format="iso")
         )
@@ -1147,11 +1004,6 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
 
 @accounts_bp.route("/")
 def index() -> str:
-    """Render a simple index linking all account dashboards.
-
-    Kept intentionally minimal to avoid adding templates/routes beyond the
-    scope. Users can bookmark their preferred ``/<slug>/`` address.
-    """
     links = [
         (slug_for(d), d.get("name", "account")) for d in DESTINATIONS
     ]
@@ -1164,5 +1016,4 @@ def index() -> str:
     )
 
 
-# Pre-build the per-destination blueprints so create_app can register them.
 ACCOUNT_BLUEPRINTS = [_make_blueprint_for_dest(d) for d in DESTINATIONS]
