@@ -7,6 +7,7 @@ Equity(t) = Cash(t) + Sum(Qty(t) * Price(t)).
 Data Sources:
   - Activities: account_activities.raw_activities_{slug} (Source of Truth)
   - Prices: Alpaca Historical API
+  - Schedule: market_schedule (Trading days source of truth)
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import asyncio
 import datetime as dt
 import logging
 import math
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -80,15 +81,15 @@ def _rolling_sharpe(
 
 def _calculate_daily_ledger_utc(
     activities_df: pd.DataFrame,
-    price_df: pd.DataFrame
+    price_df: pd.DataFrame,
+    valid_sessions: Optional[Set[dt.date]] = None
 ) -> pd.DataFrame:
     """
     Reconstruct daily equity using Ledger Replay in UTC.
     
-    CRITICAL LOGIC FIX:
-    - For FILLs: Explicitly calculate Cash Flow as -(Qty * Price) for Buys
-      and +(Qty * Price) for Sells. Do NOT trust 'net_amount' from DB for fills.
-    - For OTHERS (CSD, DIV, FEE): Trust 'net_amount'.
+    Uses 'valid_sessions' (from market_schedule) to determine calculation days.
+    If a day is a holiday (not in valid_sessions), it is skipped entirely,
+    preventing zero-price valuation crashes.
     """
     if activities_df.empty:
         return pd.DataFrame()
@@ -108,38 +109,60 @@ def _calculate_daily_ledger_utc(
     # 2. Setup Loop Range (UTC)
     min_date = activities_df['ledger_date'].min()
     today = dt.datetime.now(dt.timezone.utc).date()
-    all_dates = pd.date_range(min_date, today, freq='B').date
+    
+    # [FIX] Use market_schedule to filter processing days
+    if valid_sessions:
+        # Create a range, then intersect with valid trading sessions
+        raw_range = pd.date_range(min_date, today, freq='D').date
+        all_dates = sorted([d for d in raw_range if d in valid_sessions])
+    else:
+        # Fallback to Business Days if schedule is missing (Legacy behavior)
+        log.warning("No market schedule provided; falling back to Business Days (freq='B').")
+        all_dates = pd.date_range(min_date, today, freq='B').date
     
     # 3. State
     current_cash = 0.0
     inventory: Dict[str, float] = {}
     daily_snapshots = {}
     
-    # Pre-group
+    # Pre-group activities by day to avoid full scan inside loop
+    # We include ALL activities, even those on weekends/holidays, 
+    # by iterating through the activity groups as well.
+    # However, the Ledger Replay requires applying them sequentially.
+    
+    # Strategy: We iterate through the *trading days*. 
+    # Before processing "Day T", we must apply all activities that happened 
+    # after "Day T-1" and up to (and including) "Day T".
+    
+    # Group activities by date
     acts_by_day = activities_df.groupby('ledger_date')
+    
+    # To handle weekends/holidays correctly (e.g. deposit on Sunday),
+    # we need a sorted list of all days that have activities
+    activity_days = sorted(acts_by_day.groups.keys())
+    act_day_idx = 0
     
     # 4. Replay
     for day in all_dates:
-        # A. Update State from Activities
-        if day in acts_by_day.groups:
-            day_acts = acts_by_day.get_group(day)
+        # A. Apply all activities that happened since the last processed trading day
+        #    up to the current trading 'day'.
+        while act_day_idx < len(activity_days):
+            act_date = activity_days[act_day_idx]
+            if act_date > day:
+                break
             
+            # Process this batch (could be a weekend or the trading day itself)
+            day_acts = acts_by_day.get_group(act_date)
             for _, row in day_acts.iterrows():
                 act_type = str(row.get('activity_type', '')).upper()
                 symbol = str(row.get('symbol', '')).upper()
-                
-                # Safe float conversion
                 qty = float(row.get('qty') or 0.0)
                 price = float(row.get('price') or 0.0)
                 net_amt_db = float(row.get('net_amount') or 0.0)
                 
                 if act_type in ('FILL', 'PARTIAL_FILL'):
-                    # --- FILL LOGIC ---
-                    # We recalculate cash flow manually to ensure 
-                    # Cash decreases on Buy and increases on Sell.
                     side = str(row.get('side', '')).lower()
                     trade_val = abs(qty * price)
-                    
                     if side == 'buy':
                         current_cash -= trade_val
                         if symbol: 
@@ -148,26 +171,27 @@ def _calculate_daily_ledger_utc(
                         current_cash += trade_val
                         if symbol:
                             inventory[symbol] = inventory.get(symbol, 0.0) - qty
-                            
-                    # Clean dust
                     if symbol and abs(inventory[symbol]) < 1e-9:
                         inventory.pop(symbol, None)
                 else:
-                    # --- NON-FILL LOGIC (Deposit, Div, Fee) ---
-                    # Trust the net_amount from the broker
                     current_cash += net_amt_db
+            
+            act_day_idx += 1
 
-        # B. Mark to Market
+        # B. Mark to Market (Only on this valid trading day)
         market_value = 0.0
         
-        # Try to find prices for 'day'.
+        # Look up prices for 'day'
         if day in price_df.index:
             day_prices = price_df.loc[day]
             for sym, qty in inventory.items():
+                # If price is missing for a symbol on a trading day, 
+                # we try to check if there is a price. If not, it defaults to 0.
+                # In a robust system, we might forward-fill prices outside this func.
                 if sym in day_prices and pd.notna(day_prices[sym]):
                     market_value += qty * float(day_prices[sym])
         
-        # C. Record
+        # C. Record Snapshot
         daily_snapshots[day] = {
             'deposit': current_cash + market_value,
             'cash_balance': current_cash,
@@ -211,7 +235,6 @@ def _fetch_daily_closes_utc(
                 continue
                 
             # Normalize index to UTC Date
-            # Alpaca returns index as Timestamp(UTC)
             bars.index = bars.index.normalize().date
             
             if 'symbol' in bars.columns:
@@ -236,7 +259,7 @@ def _fetch_daily_closes_utc(
         return pd.DataFrame()
         
     final = pd.concat(all_closes, axis=1)
-    # Forward fill to handle gaps
+    # Forward fill to handle gaps (e.g. suspended trading for specific ticker)
     return final.sort_index().ffill()
 
 
@@ -386,6 +409,7 @@ async def rebuild_equity_series_async(
 ) -> pd.DataFrame:
     """
     Async recompute of equity using Ledger Replay.
+    Consults 'market_schedule' to avoid calculation on holidays.
     """
     if repo is None:
         repo = await AsyncAccountRepository.create(
@@ -399,6 +423,7 @@ async def rebuild_equity_series_async(
         rest = REST(cfg["API_KEY"], cfg["SECRET_KEY"], cfg["ALPACA_BASE_URL"])
         t_eq = cfg.get("TABLE_ACCOUNT_EQUITY_FULL", "account_equity_full")
         slug = cfg.get("ACCOUNT_SLUG", "default")
+        t_sched = cfg.get("TABLE_MARKET_SCHEDULE", "market_schedule")
         
         windows = sorted(
             set(windows or cfg.get("EQUITY_WINDOWS", [10, 21, 63, 126, 252]))
@@ -408,7 +433,24 @@ async def rebuild_equity_series_async(
         raw_table_name = f"account_activities.raw_activities_{slug}".replace("-", "_")
         log.info(f"[{slug}] Rebuilding equity from: {raw_table_name}")
 
-        # Fetch Raw Activities: WE NEED PRICE AND QTY
+        # 1. Fetch Market Schedule (The fix for holidays)
+        # We need the set of valid trading dates to prevent zero-price valuation on holidays
+        valid_sessions: Set[dt.date] = set()
+        try:
+            # Query the schedule table. Assuming standard schema from market_schedule.py
+            # If the table is missing or empty, valid_sessions stays empty, triggering fallback
+            sched_rows = await repo.fetch(
+                f"SELECT session_date FROM {t_sched}"
+            )
+            for r in sched_rows:
+                d = r.get("session_date")
+                if d:
+                    valid_sessions.add(d)
+            log.info(f"[{slug}] Loaded {len(valid_sessions)} valid trading sessions.")
+        except Exception as e:
+            log.warning(f"[{slug}] Could not load market schedule ({e}). Holidays may cause equity dips.")
+
+        # 2. Fetch Raw Activities
         sql = f"""
             SELECT
                 transaction_time,
@@ -438,7 +480,7 @@ async def rebuild_equity_series_async(
         activities_df['qty'] = pd.to_numeric(activities_df['qty']).fillna(0.0)
         activities_df['price'] = pd.to_numeric(activities_df['price']).fillna(0.0)
         
-        # Fetch Prices
+        # 3. Fetch Prices
         all_symbols = activities_df['symbol'].dropna().unique().tolist()
         all_symbols = [s for s in all_symbols if s and len(s) < 12]
         
@@ -450,16 +492,19 @@ async def rebuild_equity_series_async(
             _fetch_daily_closes_utc, rest, all_symbols, start_date, end_date
         )
 
-        # Ledger Replay
+        # 4. Ledger Replay (Passing valid_sessions)
         log.info(f"[{slug}] Replaying ledger...")
         equity_df = await asyncio.to_thread(
-            _calculate_daily_ledger_utc, activities_df, price_df
+            _calculate_daily_ledger_utc, 
+            activities_df, 
+            price_df,
+            valid_sessions  # <--- Injected here
         )
 
         if equity_df.empty:
             return equity_df
 
-        # Metrics
+        # 5. Metrics Calculation
         equity_df['deposit'] = equity_df['deposit'].astype(float)
         equity_df['prev_deposit'] = equity_df['deposit'].shift(1)
         equity_df['daily_return'] = np.where(
