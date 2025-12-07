@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import math
 import os
-from typing import TYPE_CHECKING, Optional, Any
+from typing import TYPE_CHECKING, Optional, Any, Set
 
 import numpy as np
 import pandas as pd
+import datetime as dt
 
 from cold_harbour.core.equity import (
     rebuild_equity_series_async,
@@ -184,8 +185,17 @@ async def _rebuild_equity_full(mgr: "AccountManager") -> None:
 
 async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
     """
-    DEBUG MODE: Rebuild intraday deposits.
-    Logs critical variables to identify discrepancies between Daily and Intraday.
+    Rebuild intraday deposits using strict 'Mark-to-Market' Delta from Yesterday Close.
+    
+    Logic:
+    Intraday Equity(t) = Prev_Equity + PnL(t) + Flows(t)
+    
+    Where PnL(t) is calculated differently for Old vs New positions:
+    1. Held from yesterday: (Price(t) - Yesterday_Close) * Qty
+    2. Opened today:        (Price(t) - Entry_Price) * Qty
+    
+    Flows(t) now includes ALL non-trade activities (Fees, Divs, etc.) 
+    to match the Daily Ledger logic.
     """
     try:
         now_dt = _utcnow()
@@ -196,12 +206,10 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
         cutoff = last_complete if last_complete >= start_utc else start_utc
         now_pydt = now_ts.to_pydatetime()
 
-        mgr.log.info(f"[DEBUG_INTRA] 1. Session: {session_date} | Start UTC: {start_utc}")
-
         # 1. Fetch Previous Close Equity (Anchor)
         prev_row = await mgr._db_fetchrow(
             f"""
-                SELECT deposit, cumulative_return, cash_balance
+                SELECT deposit, cumulative_return
                   FROM {mgr.tbl_equity}
                  WHERE date < $1
               ORDER BY date DESC
@@ -209,36 +217,63 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                 """,
             session_date,
         )
-        if not prev_row:
-            mgr.log.warning("[DEBUG_INTRA] No previous daily equity row found! Starting from 0.")
-            prev_equity = 0.0
-            prev_cum_ret = 0.0
-        else:
-            prev_equity = float(prev_row.get("deposit") or 0.0)
-            prev_cash = float(prev_row.get("cash_balance") or 0.0)
+        prev_equity = float(prev_row.get("deposit") or 0.0) if prev_row else 0.0
+        
+        try:
             prev_cum_ret = float(prev_row.get("cumulative_return") or 0.0)
-            
-            mgr.log.info(
-                f"[DEBUG_INTRA] 2. Anchor Found. Date: {prev_row.get('date', 'N/A')} "
-                f"| Deposit (Equity): {prev_equity} | Cash Balance: {prev_cash}"
-            )
+            if not math.isfinite(prev_cum_ret): prev_cum_ret = 0.0
+        except Exception:
+            prev_cum_ret = 0.0
 
         idx = pd.date_range(start_utc, cutoff, freq="min", tz="UTC")
         if idx.empty: idx = pd.DatetimeIndex([start_utc])
 
-        # 2. Fetch Data (Closed, Open, Flows)
+        # 2. Fetch Closed Trades (Today)
         closed_rows = await mgr._db_fetch(
-            f"SELECT symbol, qty, side, entry_time AT TIME ZONE 'UTC' AS entry_time, exit_time AT TIME ZONE 'UTC' AS exit_time, entry_price, exit_price FROM {mgr.tbl_closed} WHERE exit_time::date = $1",
+            f"""
+                SELECT symbol, qty, side,
+                       entry_time AT TIME ZONE 'UTC' AS entry_time,
+                       exit_time  AT TIME ZONE 'UTC' AS exit_time,
+                       entry_price, exit_price
+                  FROM {mgr.tbl_closed}
+                 WHERE exit_time::date = $1
+                """,
             session_date,
         )
         closed_today = pd.DataFrame(closed_rows)
 
+        # 3. Fetch Open Positions
         open_rows = await mgr._db_fetch(
-            f"SELECT symbol, qty, filled_at AT TIME ZONE 'UTC' AS filled_at, avg_fill AS basis FROM {mgr.tbl_live} WHERE qty <> 0"
+            f"""
+                SELECT symbol, qty,
+                       filled_at AT TIME ZONE 'UTC' AS filled_at,
+                       avg_fill AS basis
+                  FROM {mgr.tbl_live}
+                 WHERE qty <> 0
+                """
         )
         open_df = pd.DataFrame(open_rows)
 
-        # 3. Fetch Prices & Reference Map
+        # 4. Fetch Flows (ALL non-fill activities: Fees, Divs, Journals, etc.)
+        try:
+            # We exclude FILL and PARTIAL_FILL to get everything else.
+            # This ensures Fees (-$) and Dividends (+$) are captured in Intraday Equity.
+            flow_rows = await mgr._db_fetch(
+                f"""
+                    SELECT ts AT TIME ZONE 'UTC' AS ts, amount
+                      FROM {mgr.tbl_cash_flows}
+                     WHERE ts >= $1 AND ts <= $2
+                       AND (type NOT ILIKE 'FILL%' AND type NOT ILIKE 'PARTIAL_FILL%')
+                  ORDER BY ts
+                    """,
+                start_utc.to_pydatetime(),
+                now_pydt,
+            )
+            flows = pd.DataFrame(flow_rows)
+        except Exception:
+            flows = pd.DataFrame(columns=["ts", "amount"])
+
+        # 5. Fetch Prices & Build Reference Map
         cutoff_ts = cutoff.to_pydatetime()
         syms = sorted(
             set(open_df.get("symbol", pd.Series(dtype=str)).dropna().unique())
@@ -249,25 +284,45 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
         ref_prices: dict[str, float] = {}
 
         if syms:
-            mgr.log.info(f"[DEBUG_INTRA] 3. Fetching pricing for {len(syms)} symbols...")
             for sym in syms:
-                # A. Get Yesterday's Close
+                # A. Get Yesterday's Close (Reference for held positions)
+                # Look strictly BEFORE start_utc
                 pre_px_row = await mgr._ts_fetchrow(
-                    "SELECT close FROM public.alpaca_bars_1min WHERE symbol = $1 AND timestamp < $2 ORDER BY timestamp DESC LIMIT 1",
-                    sym, start_utc.to_pydatetime(),
+                    """
+                        SELECT close
+                          FROM public.alpaca_bars_1min
+                         WHERE symbol = $1 AND timestamp < $2
+                      ORDER BY timestamp DESC
+                         LIMIT 1
+                        """,
+                    sym,
+                    start_utc.to_pydatetime(),
                 )
-                pre_px = float(pre_px_row.get("close")) if pre_px_row else None
-                
+                pre_px = (
+                    float(pre_px_row.get("close"))
+                    if pre_px_row and pre_px_row.get("close") is not None
+                    else None
+                )
                 if pre_px:
                     ref_prices[sym] = pre_px
-                
+
                 # B. Get Intraday Bars
                 bars_rows = await mgr._ts_fetch(
-                    "SELECT timestamp AT TIME ZONE 'UTC' AS ts, close FROM public.alpaca_bars_1min WHERE symbol = $1 AND timestamp >= $2 AND timestamp <= $3 ORDER BY timestamp",
-                    sym, start_utc.to_pydatetime(), cutoff_ts,
+                    """
+                        SELECT timestamp AT TIME ZONE 'UTC' AS ts, close
+                          FROM public.alpaca_bars_1min
+                        WHERE symbol = $1
+                          AND timestamp >= $2
+                          AND timestamp <= $3
+                      ORDER BY timestamp
+                        """,
+                    sym,
+                    start_utc.to_pydatetime(),
+                    cutoff_ts,
                 )
                 bars = pd.DataFrame(bars_rows)
                 
+                # Fill gaps correctly
                 if not bars.empty:
                     series = (
                         bars.assign(ts=pd.to_datetime(bars["ts"], utc=True))
@@ -283,27 +338,19 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                         series = series.fillna(method='bfill')
                         
                     px_cols[sym] = series
-                    
-                    # LOGGING: Check gap for this symbol
-                    first_bar = series.iloc[0] if not series.empty else 0
-                    mgr.log.info(
-                        f"[DEBUG_INTRA]   SYM: {sym:<6} | Ref(Yest): {pre_px} | FirstBar: {first_bar} "
-                        f"| Gap: {first_bar - (pre_px or 0):.2f}"
-                    )
                 elif pre_px:
                     px_cols[sym] = pd.Series(pre_px, index=idx)
-                    mgr.log.info(f"[DEBUG_INTRA]   SYM: {sym:<6} | No bars today, using Ref: {pre_px}")
-                else:
-                    mgr.log.warning(f"[DEBUG_INTRA]   SYM: {sym:<6} | NO DATA (No Ref, No Bars)")
 
-        # 4. Calculate Delta Series
+        # 6. Calculate PnL Delta Series
         delta_series = pd.Series(0.0, index=idx)
 
-        # Open Positions Delta
+        # A. Open Positions
         for _, row in open_df.iterrows():
             sym = str(row.get("symbol") or "")
+            if not sym or sym not in px_cols: continue
+            
             qty = float(row.get("qty") or 0.0)
-            if sym not in px_cols or qty == 0: continue
+            if qty == 0: continue
             
             basis = float(row.get("basis") or 0.0)
             filled_at = pd.to_datetime(row.get("filled_at"), utc=True)
@@ -311,88 +358,114 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
             if filled_at < start_utc:
                 if sym in ref_prices:
                     ref_px = ref_prices[sym]
-                    src = "YEST_CLOSE"
                 else:
-                    ref_px = px_cols[sym].iloc[0]
-                    src = "FIRST_BAR (Missing Ref)"
+                    ref_px = px_cols[sym].iloc[0] if not px_cols[sym].empty else basis
             else:
-                ref_px = basis
-                src = "INTRA_ENTRY"
+                ref_px = basis # Intraday entry
                 
-            # Log significant positions
-            first_val = px_cols[sym].iloc[0]
-            start_pnl_impact = (first_val - ref_px) * qty
-            if abs(start_pnl_impact) > 10:
-                mgr.log.info(
-                    f"[DEBUG_INTRA]   POS: {sym:<6} | Qty: {qty} | Ref: {ref_px} ({src}) "
-                    f"| Start Delta: {start_pnl_impact:.2f}"
-                )
-
             filled_floor = max(filled_at.floor("min"), start_utc)
+            
             diff = px_cols[sym] - ref_px
             mask = idx >= filled_floor
             delta_series = delta_series.add(diff.where(mask, 0.0) * qty, fill_value=0.0)
 
-        # Closed Positions Delta
+        # B. Closed Positions
         if not closed_today.empty:
             for _, row in closed_today.iterrows():
                 sym = str(row.get("symbol") or "")
                 if not sym or sym not in px_cols: continue
+                
                 qty = float(row.get("qty") or 0.0)
-                signed = -qty if str(row.get("side")).lower().startswith('short') else qty
+                if qty == 0: continue
+                
+                side = str(row.get("side") or "long").lower()
+                signed = -qty if side.startswith("short") else qty
+                
+                entry_px = float(row.get("entry_price") or 0.0)
+                exit_px = float(row.get("exit_price") or 0.0)
                 
                 entry_time = pd.to_datetime(row.get("entry_time"), utc=True)
                 exit_time = pd.to_datetime(row.get("exit_time"), utc=True)
-                exit_px = float(row.get("exit_price") or 0.0)
-                entry_px = float(row.get("entry_price") or 0.0)
-
+                
                 if entry_time < start_utc:
-                    ref_px = ref_prices.get(sym, entry_px)
+                    if sym in ref_prices:
+                        ref_px = ref_prices[sym]
+                    else:
+                        ref_px = entry_px 
                 else:
-                    ref_px = entry_px
+                    ref_px = entry_px 
                 
                 entry_floor = max(entry_time.floor("min"), start_utc)
                 exit_floor = min(exit_time.floor("min"), cutoff_ts)
                 
-                # Open Phase
+                # 1. While Open
                 if entry_floor < exit_floor:
                     diff = px_cols[sym] - ref_px
                     mask_open = (idx >= entry_floor) & (idx < exit_floor)
-                    delta_series = delta_series.add(diff.where(mask_open, 0.0) * signed, fill_value=0.0)
+                    delta_series = delta_series.add(
+                        diff.where(mask_open, 0.0) * signed, fill_value=0.0
+                    )
                 
-                # Closed Phase (Realized Fixed)
+                # 2. After Close
                 realized_amt = (exit_px - ref_px) * signed
                 mask_closed = idx >= exit_floor
-                delta_series = delta_series.add(pd.Series(realized_amt, index=idx).where(mask_closed, 0.0), fill_value=0.0)
+                delta_series = delta_series.add(
+                    pd.Series(realized_amt, index=idx).where(mask_closed, 0.0), 
+                    fill_value=0.0
+                )
 
-        # 5. Final Series
+        # 7. Add Flows (Now includes Fees, Divs, etc.)
+        if flows is not None and not flows.empty:
+            flow_floor = pd.to_datetime(flows["ts"], utc=True).dt.floor("min")
+            fser = (
+                flows.assign(_m=flow_floor)
+                .groupby("_m")["amount"]
+                .sum()
+                .reindex(idx, fill_value=0.0)
+                .cumsum()
+            )
+            delta_series = delta_series.add(fser, fill_value=0.0)
+
+        # 8. Final Series Construction
         deposit_series = (prev_equity + delta_series).astype(float)
-        
-        final_val = deposit_series.iloc[-1] if not deposit_series.empty else 0
-        mgr.log.info(
-            f"[DEBUG_INTRA] 4. Result | Start Equity: {prev_equity} | End Delta: {delta_series.iloc[-1]:.2f} "
-            f"| Final Equity: {final_val:.2f}"
-        )
 
         step = max(1, int(mgr.EQUITY_INTRADAY_SEC))
-        tick_idx = pd.date_range(start_utc, cutoff, freq=f"{step}s", tz="UTC")
-        if tick_idx.empty: tick_idx = pd.DatetimeIndex([cutoff])
+        tick_idx = pd.date_range(
+            start_utc, cutoff, freq=f"{step}s", tz="UTC"
+        )
+        if tick_idx.empty:
+            tick_idx = pd.DatetimeIndex([cutoff])
 
-        dep_ticks = deposit_series.reindex(tick_idx, method="ffill").ffill().astype(float)
-        
-        # Recalculate metrics for storage
-        daily_ret = dep_ticks / (prev_equity if prev_equity != 0 else 1.0) - 1.0
+        dep_ticks = deposit_series.reindex(tick_idx, method="ffill")
+        dep_ticks = dep_ticks.ffill().astype(float)
+
+        base_cap = prev_equity if prev_equity != 0.0 else 1.0
+        daily_ret = dep_ticks / base_cap - 1.0
         cum_ticks = (1.0 + prev_cum_ret) * (1.0 + daily_ret) - 1.0
         peak_ticks = dep_ticks.cummax().replace(0.0, np.nan)
         dd_ticks = (dep_ticks / peak_ticks) - 1.0
         dd_ticks = dd_ticks.fillna(0.0)
 
         records = [
-            (ts.to_pydatetime(), float(dep_ticks.iat[i]), float(cum_ticks.iat[i]), float(dd_ticks.iat[i]), 0.0)
+            {
+                "ts": ts.to_pydatetime(),
+                "dep": float(dep_ticks.iat[i]),
+                "cum": float(cum_ticks.iat[i]),
+                "dd": (
+                    float(dd_ticks.iat[i])
+                    if math.isfinite(dd_ticks.iat[i])
+                    else 0.0
+                ),
+                "rr": 0.0,
+            }
             for i, ts in enumerate(tick_idx)
         ]
 
         await mgr._ensure_intraday_table()
+        params = [
+            (r["ts"], r["dep"], r["cum"], r["dd"], r["rr"])
+            for r in records
+        ]
         await mgr._db_executemany(
             f"""
                 INSERT INTO {mgr.tbl_equity_intraday}
@@ -405,7 +478,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                     realised_return = EXCLUDED.realised_return,
                     updated_at = now()
                 """,
-            records,
+            params,
         )
 
     except Exception as exc:

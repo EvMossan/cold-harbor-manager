@@ -50,7 +50,7 @@ class _Config:
 
     ACCOUNT_SCHEMA: Optional[str] = "accounts"
 
-    DISABLE_SESSION_SLEEP: bool = False
+    DISABLE_SESSION_SLEEP: bool = True
 
     LOG_LEVEL: Optional[str] = None
 
