@@ -258,6 +258,7 @@ def rebuild_equity_series(
     def closed_trades_since(since: dt.date) -> pd.DataFrame:
         sql = f"""
         SELECT symbol, qty, entry_price AS avg_fill,
+               pnl_cash_fifo, exit_price,
                entry_time, exit_time,
                'closed'     AS status,
                CASE WHEN side='long' THEN 1 ELSE -1 END AS side
@@ -274,6 +275,14 @@ def rebuild_equity_series(
 
     # ---------- gather trades --------------------------------------
     closed_df = closed_trades_since(start or dt.date.min)
+    if not closed_df.empty:
+        side_sign = closed_df["side"].astype(float)
+        qty = closed_df["qty"].astype(float)
+        pnl = closed_df["pnl_cash_fifo"].astype(float).fillna(0.0)
+        exit_px = closed_df["exit_price"].astype(float).fillna(0.0)
+        denominator = qty * side_sign
+        mask = abs(denominator) > 1e-9
+        closed_df.loc[mask, "avg_fill"] = exit_px - (pnl / denominator)
     open_df   = open_positions_snapshot()
 
     frames = [df for df in (closed_df, open_df) if not df.empty]
@@ -384,16 +393,7 @@ def rebuild_equity_series(
 
     live_upl = 0.0
     if not open_df.empty:
-        try:
-            basis = (
-                open_df["avg_px_symbol"]
-                .where(
-                    open_df["avg_px_symbol"].notna(),
-                    open_df["avg_fill"],
-                )
-            )
-        except Exception:
-            basis = open_df.get("avg_fill", 0.0)
+        basis = open_df.get("avg_fill", 0.0)
         live_upl = (open_df["qty"] * (open_df["mkt_px"] - basis)).sum()
 
     df = pd.DataFrame(index=idx)
@@ -967,6 +967,8 @@ async def rebuild_equity_series_async(
             SELECT symbol,
                    qty,
                    entry_price AS avg_fill,
+                   pnl_cash_fifo,
+                   exit_price,
                    entry_time,
                    exit_time,
                    'closed'     AS status,
@@ -1019,6 +1021,14 @@ async def rebuild_equity_series_async(
                 return pd.Series(0.0, index=idx, dtype=float)
 
         closed_df = await closed_trades_since(start or dt.date.min)
+        if not closed_df.empty:
+            side_sign = closed_df["side"].astype(float)
+            qty = closed_df["qty"].astype(float)
+            pnl = closed_df["pnl_cash_fifo"].astype(float).fillna(0.0)
+            exit_px = closed_df["exit_price"].astype(float).fillna(0.0)
+            denominator = qty * side_sign
+            mask = abs(denominator) > 1e-9
+            closed_df.loc[mask, "avg_fill"] = exit_px - (pnl / denominator)
         open_df = await open_positions_snapshot()
 
         frames = [df for df in (closed_df, open_df) if not df.empty]
@@ -1109,16 +1119,8 @@ async def rebuild_equity_series_async(
 
         live_upl = 0.0
         if not open_df.empty:
-            try:
-                basis = (
-                    open_df["avg_px_symbol"]
-                    .where(
-                        open_df["avg_px_symbol"].notna(),
-                        open_df["avg_fill"],
-                    )
-                )
-            except Exception:
-                basis = open_df.get("avg_fill", 0.0)
+            # Force use of avg_fill, matching the intraday curve basis.
+            basis = open_df.get("avg_fill", 0.0)
             live_upl = (
                 open_df["qty"] * (open_df["mkt_px"] - basis)
             ).sum()
@@ -1330,9 +1332,12 @@ async def update_today_row_async(
         open_df = pd.DataFrame(open_rows)
         live_upl = 0.0
         if not open_df.empty:
+            basis = open_df.get("avg_fill", 0.0)
             live_upl = float(
-                (open_df["qty"] * (open_df["mkt_px"]
-                                   - open_df["basis"])).sum()
+                (
+                    open_df["qty"]
+                    * (open_df["mkt_px"] - basis)
+                ).sum()
             )
 
         try:

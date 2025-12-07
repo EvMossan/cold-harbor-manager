@@ -249,7 +249,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                 SELECT symbol, qty, side,
                        entry_time AT TIME ZONE 'UTC' AS entry_time,
                        exit_time  AT TIME ZONE 'UTC' AS exit_time,
-                       entry_price, pnl_cash_fifo
+                       entry_price, exit_price, pnl_cash_fifo
                   FROM {mgr.tbl_closed}
                  WHERE exit_time::date = $1
                 """,
@@ -261,7 +261,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
             f"""
                 SELECT symbol, qty,
                        filled_at AT TIME ZONE 'UTC' AS filled_at,
-                       COALESCE(avg_px_symbol, avg_fill) AS basis,
+                       avg_fill AS basis,
                        profit_loss,
                        profit_loss_lot
                   FROM {mgr.tbl_live}
@@ -423,7 +423,13 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                     continue
                 side = str(row.get("side") or "long").lower()
                 signed = -qty if side.startswith("short") else qty
-                basis = float(row.get("entry_price") or 0.0)
+                exit_px = float(row.get("exit_price") or 0.0)
+                pnl_fifo = float(row.get("pnl_cash_fifo") or 0.0)
+                # Derive FIFO entry so the chart matches realised PnL exactly.
+                if abs(signed) > 1e-9:
+                    basis = exit_px - (pnl_fifo / signed)
+                else:
+                    basis = float(row.get("entry_price") or 0.0)
                 entry = pd.to_datetime(row.get("entry_time"), utc=True)
                 exit_ = pd.to_datetime(row.get("exit_time"), utc=True)
                 entry_floor = max(entry.floor("min"), start_utc)
@@ -468,6 +474,22 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
 
         dep_ticks = deposit_series.reindex(tick_idx, method="ffill")
         dep_ticks = dep_ticks.ffill().astype(float)
+
+        # --- HYBRID TAIL SNAP: Force last point to match Live ZMQ ---
+        if not open_df.empty and not dep_ticks.empty:
+            live_unrealized_total = float(
+                open_df["profit_loss"].fillna(0.0).sum()
+            )
+            current_flows = float(fser.iat[-1]) if not fser.empty else 0.0
+            realised_today_total = float(rcum.iat[-1]) if not rcum.empty else 0.0
+            live_deposit = (
+                prev_cash_balance
+                + realised_today_total
+                + current_flows
+                + live_unrealized_total
+            )
+            dep_ticks.iat[-1] = live_deposit
+        # ------------------------------------------------------------
         base_cap = prev_equity if prev_equity != 0.0 else 1.0
         daily_ret = dep_ticks / base_cap - 1.0
         cum_ticks = (1.0 + prev_cum_ret) * (1.0 + daily_ret) - 1.0

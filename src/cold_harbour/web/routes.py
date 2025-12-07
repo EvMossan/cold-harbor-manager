@@ -912,7 +912,8 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
             prev_row = conn.execute(
                 text(
                     f"""
-                    SELECT deposit
+                    SELECT deposit,
+                           COALESCE(unrealised_pl, 0) AS unrealised_pl
                       FROM {tables['equity']}
                      WHERE date < :d
                   ORDER BY date DESC
@@ -922,6 +923,8 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 {"d": sess_date},
             ).mappings().first()
             prev_deposit = float(prev_row["deposit"]) if prev_row else 0.0
+            prev_unreal = float(prev_row.get("unrealised_pl") or 0.0) if prev_row else 0.0
+        prev_cash_balance = prev_deposit - prev_unreal
 
         # Use minute frequency (alias 'T' is deprecated)
         idx = pd.date_range(start_utc, end_utc, freq="min", tz="UTC")
@@ -974,6 +977,33 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
                 )
             except Exception:
                 fdf = pd.DataFrame(columns=["ts", "amount"])
+        with engine.begin() as conn:
+            closed_df = pd.read_sql(
+                text(
+                    f"""
+                    SELECT exit_time AT TIME ZONE 'UTC' AS exit_time,
+                           pnl_cash_fifo
+                      FROM {tables['closed']}
+                     WHERE exit_time::date = :d
+                    """
+                ),
+                conn,
+                params={"d": sess_date},
+            )
+
+        if not closed_df.empty:
+            exit_floor = pd.to_datetime(
+                closed_df["exit_time"], utc=True
+            ).dt.floor("min")
+            rcum = (
+                closed_df.assign(_m=exit_floor)
+                .groupby("_m")["pnl_cash_fifo"]
+                .sum()
+                .reindex(idx, fill_value=0.0)
+                .cumsum()
+            )
+        else:
+            rcum = pd.Series(0.0, index=idx)
 
         if df.empty:
             empty_series = pd.DataFrame({
@@ -1042,13 +1072,35 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         )
 
         out = out.sort_values("ts").reset_index(drop=True)
+        open_df = _fetch_open_df()
+        live_unrealized_zmq = 0.0
+        if not open_df.empty and "profit_loss" in open_df.columns:
+            live_unrealized_zmq = float(
+                open_df["profit_loss"].fillna(0.0).sum()
+            )
+        current_realized = (
+            float(rcum.iloc[-1]) if not rcum.empty else 0.0
+        )
+        current_flows = float(fser.iloc[-1]) if not fser.empty else 0.0
+        true_live_deposit = (
+            prev_cash_balance
+            + current_realized
+            + current_flows
+            + live_unrealized_zmq
+        )
+        if not out.empty:
+            dep_idx = out.columns.get_loc("deposit")
+            dd_idx = out.columns.get_loc("drawdown_cash")
+            out.iloc[-1, dep_idx] = true_live_deposit
+            peak = out["deposit"].max()
+            current_dd = (
+                (true_live_deposit / peak) - 1.0 if peak > 0.0 else 0.0
+            )
+            out.iloc[-1, dd_idx] = current_dd
         series_payload = json.loads(
             out.to_json(orient="records", date_format="iso")
         )
-        latest_dep = _to_float(
-            out.iloc[-1]["deposit"] if not out.empty else None,
-            None,
-        )
+        latest_dep = _to_float(true_live_deposit, None)
         latest_ts = _to_iso(
             out.iloc[-1]["ts"] if not out.empty else None
         )
@@ -1057,7 +1109,7 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         session_flows = _to_float(
             fser.iloc[-1] if not fser.empty else 0.0, 0.0
         )
-        session_realised = None
+        session_realised = _to_float(current_realized, 0.0)
         live_dep = latest_dep
         live_ts = latest_ts
         meta = {
