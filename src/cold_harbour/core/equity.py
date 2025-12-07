@@ -228,7 +228,7 @@ def rebuild_equity_series(
     def realised_pl_by_day(since: dt.date) -> pd.Series:
         sql = f"""
         SELECT exit_time::date AS date,
-               SUM(pnl_cash)   AS realised_pl
+               SUM(pnl_cash_fifo)   AS realised_pl
         FROM   {t_closed}
         WHERE  exit_time::date >= :start
         GROUP  BY 1
@@ -379,7 +379,7 @@ def rebuild_equity_series(
                                         today - dt.timedelta(days=1))\
                    .reindex(idx, fill_value=0.0)
 
-    realised_full = realised_s.reindex(idx, fill_value=0.0)
+    realised_full = _align_flows_to_business_days(realised_s, idx)
     realised_cum  = realised_full.cumsum()
 
     live_upl = 0.0
@@ -543,7 +543,7 @@ def update_today_row(cfg: Dict) -> None:
         pd.read_sql(
             text(
                 f"""
-                SELECT COALESCE(SUM(pnl_cash), 0) AS pl
+        SELECT COALESCE(SUM(pnl_cash_fifo), 0) AS pl
                   FROM {t_closed}
                  WHERE exit_time::date = :d
                 """
@@ -926,7 +926,7 @@ async def rebuild_equity_series_async(
         async def realised_pl_by_day(since: dt.date) -> pd.Series:
             sql = f"""
             SELECT exit_time::date AS date,
-                   SUM(pnl_cash)   AS realised_pl
+                   SUM(pnl_cash_fifo)   AS realised_pl
               FROM {t_closed}
              WHERE exit_time::date >= $1
           GROUP BY 1
@@ -1104,7 +1104,7 @@ async def rebuild_equity_series_async(
             today - dt.timedelta(days=1),
         ).reindex(idx, fill_value=0.0)
 
-        realised_full = realised_s.reindex(idx, fill_value=0.0)
+        realised_full = _align_flows_to_business_days(realised_s, idx)
         realised_cum = realised_full.cumsum()
 
         live_upl = 0.0
@@ -1310,7 +1310,7 @@ async def update_today_row_async(
 
         realised_today_row = await repo.fetchrow(
             f"""
-            SELECT COALESCE(SUM(pnl_cash), 0) AS pl
+            SELECT COALESCE(SUM(pnl_cash_fifo), 0) AS pl
               FROM {t_closed}
              WHERE exit_time::date = $1
             """,

@@ -249,7 +249,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                 SELECT symbol, qty, side,
                        entry_time AT TIME ZONE 'UTC' AS entry_time,
                        exit_time  AT TIME ZONE 'UTC' AS exit_time,
-                       entry_price, pnl_cash
+                       entry_price, pnl_cash_fifo
                   FROM {mgr.tbl_closed}
                  WHERE exit_time::date = $1
                 """,
@@ -261,7 +261,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
             f"""
                 SELECT symbol, qty,
                        filled_at AT TIME ZONE 'UTC' AS filled_at,
-                       avg_fill AS basis,
+                       COALESCE(avg_px_symbol, avg_fill) AS basis,
                        profit_loss,
                        profit_loss_lot
                   FROM {mgr.tbl_live}
@@ -317,7 +317,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
             ).dt.floor("min")
             rcum = (
                 closed_today.assign(_m=exit_floor)
-                .groupby("_m")["pnl_cash"]
+                .groupby("_m")["pnl_cash_fifo"]
                 .sum()
                 .reindex(idx, fill_value=0.0)
                 .cumsum()
