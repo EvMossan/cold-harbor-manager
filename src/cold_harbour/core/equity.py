@@ -328,6 +328,7 @@ def rebuild_equity_series(
         where_types = (
             " OR ".join([f"type ILIKE '{p}%'" for p in pats]) or "FALSE"
         )
+        exclusion_clause = "AND type NOT IN ('FILL', 'PARTIAL_FILL')"
         # Fetch ALL flows for strict ledger accuracy
         flows_df = pd.read_sql(
             text(
@@ -335,9 +336,10 @@ def rebuild_equity_series(
                 SELECT ts::date AS date,
                        SUM(amount) AS net_flows
                   FROM {t_flows}
-                 WHERE {where_types}
-                 GROUP BY 1
-                 ORDER BY 1
+                     WHERE {where_types}
+                       {exclusion_clause}
+                  GROUP BY 1
+                  ORDER BY 1
                 """
             ),
             engine,
@@ -587,6 +589,7 @@ def update_today_row(cfg: Dict) -> None:
         where_types = (
             " OR ".join([f"type ILIKE '{p}%'" for p in pats]) or "FALSE"
         )
+        exclusion_clause = "AND type NOT IN ('FILL', 'PARTIAL_FILL')"
         prev_bday = (pd.Timestamp(today) - pd.offsets.BDay()).date()
         start_cal = min(prev_bday, today)
         flows_df = pd.read_sql(
@@ -598,6 +601,7 @@ def update_today_row(cfg: Dict) -> None:
                  WHERE ts::date >= :start
                    AND ts::date <= :end
                    AND ({where_types})
+                   {exclusion_clause}
                  GROUP BY 1
                  ORDER BY 1
                 """
@@ -988,6 +992,7 @@ async def rebuild_equity_series_async(
         where_types = (
             " OR ".join([f"type ILIKE '{p}%'" for p in pats]) or "FALSE"
         )
+        exclusion_clause = "AND type NOT IN ('FILL', 'PARTIAL_FILL')"
 
         async def flows_series(idx: pd.DatetimeIndex) -> pd.Series:
             try:
@@ -998,8 +1003,9 @@ async def rebuild_equity_series_async(
                            SUM(amount) AS net_flows
                       FROM {t_flows}
                      WHERE {where_types}
-                  GROUP BY 1
-                  ORDER BY 1
+                        {exclusion_clause}
+                 GROUP BY 1
+                     ORDER BY 1
                     """
                 )
                 if not rows:
@@ -1340,6 +1346,7 @@ async def update_today_row_async(
                  WHERE ts::date >= $1
                    AND ts::date <= $2
                    AND ({where_types})
+                   {exclusion_clause}
               GROUP BY 1
               ORDER BY 1
                 """,

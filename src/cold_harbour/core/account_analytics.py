@@ -345,8 +345,21 @@ def get_history_start_dates(api: REST) -> tuple[datetime, datetime]:
 
 def fetch_all_activities(api, start_date=None, end_date=None):
     """
-    Fetches account activity history (FILL, FEE, DIV, JNLS, etc.).
-    Does not filter by activity type.
+    Fetches account activity history (FILL, FEE, DIV, JNLS, etc.) 
+    and normalizes the resulting DataFrame.
+
+    This function coalesces multiple potential timestamp fields into 
+    a single 'exec_time' column, ensuring that non-trade activities 
+    (like deposits and fees) are correctly dated even when 
+    'transaction_time' is missing.
+
+    Args:
+        api: Alpaca-compatible client.
+        start_date (datetime, optional): Earliest date to fetch (inclusive).
+        end_date (datetime, optional): Latest date to fetch (exclusive).
+
+    Returns:
+        pd.DataFrame: Normalized activity history.
     """
     def _to_iso(value):
         if value is None:
@@ -361,84 +374,86 @@ def fetch_all_activities(api, start_date=None, end_date=None):
     after_iso = _to_iso(start_date)
     until_iso = _to_iso(end_date)
 
-    # print(">>> Downloading full account history (All Events)...")
     all_activities = []
     last_id = None
 
     while True:
-        # Removing 'activity_types' fetches all event types
         params = {
-            'direction': 'desc',
-            'page_size': 100
+            "direction": "desc",
+            "page_size": 100
         }
         if after_iso:
-            params['after'] = after_iso
+            params["after"] = after_iso
         if until_iso:
-            params['until'] = until_iso
+            params["until"] = until_iso
         if last_id:
-            params['page_token'] = last_id
+            params["page_token"] = last_id
 
         try:
-            # This returns a list of mixed activity objects
             activities = api.get_activities(**params)
         except Exception as e:
-            print(f"API Error: {e}")
+            # log.error should be configured in your analytics logger
             raise e
 
         if not activities:
             break
-        
+
         all_activities.extend(activities)
         last_id = getattr(activities[-1], 'id', None)
+        
+        if len(activities) < params["page_size"]:
+            break
 
-    # --- PROTECTION AGAINST EMPTY RESPONSE ---
     if not all_activities:
-        # print("Account history is empty.")
         return pd.DataFrame()
 
-    # Convert to DataFrame
-    # Note: Different activity types have different fields.
-    # Pandas will create columns for all fields, filling missing ones with NaN.
     data = [x._raw if hasattr(x, '_raw') else x for x in all_activities]
     df = pd.DataFrame(data)
 
-    # --- GUARANTEED CREATION OF EXEC_TIME ---
-    # Common timestamp fields across different activity types
+    # --- COALESCE STRATEGY FOR TIMESTAMPS ---
+    # We iterate through priority columns to fill gaps in exec_time.
+    # FILL rows usually have transaction_time. 
+    # CSD/FEE rows usually have date.
     possible_time_cols = [
-        'transaction_time', 'activity_time', 'date', 'timestamp', 'created_at'
+        "transaction_time",
+        "activity_time",
+        "date",
+        "timestamp",
+        "created_at",
     ]
-    time_col_found = False
+
+    df["exec_time"] = pd.NaT
 
     for col in possible_time_cols:
         if col in df.columns:
-            df['exec_time'] = pd.to_datetime(
-                df[col], utc=True, errors='coerce'
+            # Fill missing values from the current column
+            current_col_dates = pd.to_datetime(
+                df[col], utc=True, errors="coerce"
             )
-            time_col_found = True
-            break
+            df["exec_time"] = df["exec_time"].fillna(current_col_dates)
 
-    if not time_col_found:
-        print(f"!!! WARNING: Time column not found. "
-              f"Available: {list(df.columns)}")
-        df['exec_time'] = pd.NaT
-
+    df["exec_time"] = df["exec_time"].infer_objects(copy=False)
     # --- DATA NORMALIZATION ---
-    # Apply numeric conversion only if columns exist 
-    # (some events like 'JNLS' might not have price/qty)
-    numeric_cols = ['qty', 'price', 'cum_qty', 'leaves_qty']
+    # Ensure net_amount is numeric as it powers Equity and Metrics flows.
+    numeric_cols = [
+        "qty",
+        "price",
+        "cum_qty",
+        "leaves_qty",
+        "net_amount",
+    ]
     for col in numeric_cols:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    # Normalize strings
-    if 'side' in df.columns:
-        df['side'] = df['side'].str.lower()
-    if 'symbol' in df.columns:
-        df['symbol'] = df['symbol'].astype(str).replace('nan', '')
-    if 'activity_type' in df.columns:
-        df['activity_type'] = df['activity_type'].str.upper()
+    # String sanitization
+    if "side" in df.columns:
+        df["side"] = df["side"].str.lower()
+    if "symbol" in df.columns:
+        df["symbol"] = df["symbol"].astype(str).replace("nan", "")
+    if "activity_type" in df.columns:
+        df["activity_type"] = df["activity_type"].str.upper()
 
-    # print(f"Loaded {len(df)} account events.")
     return df
 
 

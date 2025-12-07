@@ -96,6 +96,15 @@ async def _bootstrap_cash_flows(
             continue
         seen_ids.add(row_id)
 
+        raw_type = row.get("activity_type") or row.get("type")
+        activity_type = (
+            str(raw_type).strip().upper()
+            if raw_type not in (None, "")
+            else ""
+        )
+        if activity_type in ("FILL", "PARTIAL_FILL"):
+            continue
+
         ts_val = None
         for col in time_cols:
             if col not in activities.columns:
@@ -120,7 +129,7 @@ async def _bootstrap_cash_flows(
         if amount is None:
             amount = 0.0
 
-        type_val = row.get("activity_type") or row.get("type") or ""
+        type_val = raw_type or ""
         desc_val = row.get("description") or row.get("symbol") or ""
         records.append(
             (
