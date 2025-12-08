@@ -1039,9 +1039,9 @@
       }
       if (meta.live_deposit != null) {
         const live = Number(meta.live_deposit);
-        if (Number.isFinite(live)) {
+        // STRICT GUARD: Only accept valid positive numbers
+        if (Number.isFinite(live) && live > 1) {
           pfHeader.latestLiveDeposit = live;
-          // Force immediate update
           syncPortfolioHeaderState();
         }
       }
@@ -1079,10 +1079,10 @@
     }
 
     function syncPortfolioHeaderState() {
-      // 1. Always prioritize LIVE push data (The "Truth")
+      // 1. Live push has the highest priority
       if (
         pfHeader.latestLiveDeposit != null &&
-        Number.isFinite(pfHeader.latestLiveDeposit)
+        pfHeader.latestLiveDeposit > 1
       ) {
         renderPortfolioHeaderValue(
           pfHeader.latestLiveDeposit,
@@ -1090,27 +1090,42 @@
         );
         return;
       }
-      // 2. Fallback to Intraday Snapshot (from API load)
-      if (
-        pfHeader.intradayDeposit != null &&
-        Number.isFinite(pfHeader.intradayDeposit)
-      ) {
-        renderPortfolioHeaderValue(
-          pfHeader.intradayDeposit,
-          pfHeader.intradayTimestamp
-        );
-        return;
+
+      // 2. Intraday tab is active and has valid data (> 1)
+      if (pfHeader.source === 'intraday') {
+        if (
+          pfHeader.intradayDeposit != null &&
+          pfHeader.intradayDeposit > 1
+        ) {
+          renderPortfolioHeaderValue(
+            pfHeader.intradayDeposit,
+            pfHeader.intradayTimestamp
+          );
+          return;
+        }
       }
-      // 3. Last Resort: Daily Close (Historical)
+
+      // 3. Fallback to Daily when Intraday is missing or Daily tab is active
       if (
         pfHeader.dailyDeposit != null &&
-        Number.isFinite(pfHeader.dailyDeposit)
+        pfHeader.dailyDeposit > 1
       ) {
         renderPortfolioHeaderValue(
           pfHeader.dailyDeposit,
           pfHeader.dailyTimestamp
         );
         return;
+      }
+
+      // 4. If everything else is empty, show Intraday as a last resort
+      if (
+        pfHeader.intradayDeposit != null &&
+        pfHeader.intradayDeposit > 1
+      ) {
+        renderPortfolioHeaderValue(
+          pfHeader.intradayDeposit,
+          pfHeader.intradayTimestamp
+        );
       }
     }
     window.syncPortfolioHeaderState = syncPortfolioHeaderState;
@@ -2328,19 +2343,29 @@
           chartDDIntra.options = ddc.options;
           chartDDIntra.update('none');
         }
+        // --- FIX START: Strict Zero Guard ---
         try {
           const last = rows[rows.length - 1];
           if (last && last.deposit != null) {
-            pfHeader.intradayDeposit = +last.deposit;
-            pfHeader.intradayTimestamp = last.ts || null;
-            if (pfHeader.source === 'intraday') {
-              renderPortfolioHeaderValue(
-                pfHeader.intradayDeposit,
-                pfHeader.intradayTimestamp
-              );
+            const val = +last.deposit;
+            // STRICT GUARD: Never update header with zero or tiny value.
+            // Ignore prematch glitches so the header sticks to the fallback.
+            if (val > 1) {
+              pfHeader.intradayDeposit = val;
+              pfHeader.intradayTimestamp = last.ts || null;
+              if (pfHeader.source === 'intraday') {
+                renderPortfolioHeaderValue(
+                  pfHeader.intradayDeposit,
+                  pfHeader.intradayTimestamp
+                );
+              } else {
+                // Daily tab is active but the API provided valid data.
+                syncPortfolioHeaderState();
+              }
             }
           }
         } catch (_) { /* ignore */ }
+        // --- FIX END ---
         // ensure areas line up horizontally
         try { syncRightPaddingBetween(chartIntra, chartDDIntra); } catch(_) {}
       }

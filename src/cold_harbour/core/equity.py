@@ -235,7 +235,7 @@ def _fetch_daily_closes_utc(
                 TimeFrame.Day,
                 start=start_str,
                 end=end_str,
-                adjustment='all'
+                adjustment='raw'
             ).df
 
             if bars.empty:
@@ -495,6 +495,18 @@ async def rebuild_equity_series_async(
             _fetch_daily_closes_utc, rest, all_symbols, start_date, end_date
         )
 
+        # Fix: Ensure today's date exists in price_df via forward fill.
+        # This prevents mark-to-market crashes during pre-market hours when
+        # Alpaca hasn't yet published the daily bar for the current date.
+        if not price_df.empty:
+            full_range = pd.date_range(
+                start=price_df.index.min(),
+                end=end_date,
+                freq='D'
+            ).date
+            price_df = price_df.reindex(full_range)
+            price_df = price_df.ffill()
+
         # 4. Ledger Replay
         log.info(f"[{slug}] Replaying ledger...")
         equity_df = await asyncio.to_thread(
@@ -515,7 +527,9 @@ async def rebuild_equity_series_async(
         # CORRECT FORMULA: Daily Return = (Profit) / Start_Capital
         # Profit = End_Capital - Start_Capital - Net_Inflow
         equity_df['daily_profit'] = (
-            equity_df['deposit'] - equity_df['prev_deposit'] - equity_df['net_flows']
+            equity_df['deposit']
+            - equity_df['prev_deposit']
+            - equity_df['net_flows']
         )
 
         equity_df['daily_return'] = np.where(
