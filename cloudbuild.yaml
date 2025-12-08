@@ -2,8 +2,8 @@ options:
   substitution_option: ALLOW_LOOSE
   logging: CLOUD_LOGGING_ONLY
 substitutions:
-  _SERVICE_NAME: cold-harbour-web
-  _REGION: europe-north1
+  _SERVICE_NAME: cold-harbour-dashboard
+  _REGION: us-central1
   _PROJECT_NUMBER: 'MUST_BE_SUPPLIED_AT_BUILD_TIME'
   # Secret Manager IDs must match the secret names shown in console:
   # CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, POSTGRESQL_LIVE_CONN_STRING, TIMESCALE_LIVE_CONN_STRING
