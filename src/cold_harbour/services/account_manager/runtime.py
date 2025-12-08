@@ -37,7 +37,9 @@ from cold_harbour.services.account_manager import snapshot
 from cold_harbour.services.account_manager import state as state_helpers
 from cold_harbour.services.account_manager import trades
 from cold_harbour.services.account_manager import workers as runtime_workers
-from cold_harbour.core.market_schedule import SessionWindow
+from cold_harbour.services.account_manager.core_logic.market_schedule import (
+    SessionWindow,
+)
 from cold_harbour.infrastructure.db import AsyncAccountRepository
 from cold_harbour.services.account_manager.config import _Config
 from cold_harbour.services.account_manager.utils import (

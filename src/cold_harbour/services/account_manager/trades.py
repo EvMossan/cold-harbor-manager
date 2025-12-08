@@ -11,7 +11,9 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from cold_harbour.core.account_analytics import build_closed_trades_df_lot
+from cold_harbour.services.account_manager.core_logic.account_analytics import (
+    build_closed_trades_df_lot,
+)
 from cold_harbour.services.account_manager import snapshot
 from cold_harbour.services.account_manager.utils import (
     _is_at_break_even,

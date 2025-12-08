@@ -12,7 +12,7 @@ import pandas as pd
 from alpaca_trade_api.rest import REST
 from alpaca_trade_api.stream import Stream
 
-from cold_harbour.core.account_analytics import (
+from cold_harbour.services.account_manager.core_logic.account_analytics import (
     fetch_all_activities,
     fetch_orders,
     get_history_start_dates,

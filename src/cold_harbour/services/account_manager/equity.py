@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import datetime as dt
 
-from cold_harbour.core.equity import (
+from cold_harbour.services.account_manager.core_logic.equity import (
     rebuild_equity_series_async,
     update_today_row_async,
 )

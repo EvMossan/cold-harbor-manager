@@ -11,9 +11,11 @@ from typing import Optional, TYPE_CHECKING
 import pandas as pd
 from zoneinfo import ZoneInfo
 
-from cold_harbour.core.account_start import earliest_activity_date_async
-from cold_harbour.core.account_utils import trading_session_date
-from cold_harbour.core.market_schedule import (
+from cold_harbour.core.date_utils import trading_session_date
+from cold_harbour.services.account_manager.core_logic.account_start import (
+    earliest_activity_date_async,
+)
+from cold_harbour.services.account_manager.core_logic.market_schedule import (
     SessionWindow,
     next_session_after_async,
     session_for_timestamp_async,

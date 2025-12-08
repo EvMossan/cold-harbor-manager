@@ -28,11 +28,7 @@ from flask import (
 )
 from sqlalchemy import URL, create_engine, text
 
-from cold_harbour.core.account_utils import (
-    calculate_trade_metrics,
-    coalesce_exit_slices,
-    trading_session_date,
-)
+from cold_harbour.core.date_utils import trading_session_date
 from cold_harbour.core.destinations import (
     DESTINATIONS,
     account_table_names,

@@ -1,5 +1,6 @@
 options:
   substitution_option: ALLOW_LOOSE
+  logging: CLOUD_LOGGING_ONLY
 substitutions:
   _SERVICE_NAME: cold-harbour-web
   _REGION: europe-north1

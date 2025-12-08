@@ -11,7 +11,9 @@ import msgpack
 import pandas as pd
 import zmq.asyncio
 
-from cold_harbour.core.account_analytics import calculate_metrics
+from cold_harbour.services.account_manager.core_logic.account_analytics import (
+    calculate_metrics,
+)
 from cold_harbour.services.account_manager import snapshot
 from cold_harbour.services.account_manager.utils import (
     _json_safe,

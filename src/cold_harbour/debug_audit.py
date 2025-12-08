@@ -20,7 +20,10 @@ from tabulate import tabulate  # pip install tabulate if missing, or use pandas 
 from cold_harbour.manager_run import _cfg_for
 from cold_harbour.core.destinations import DESTINATIONS
 from cold_harbour.services.account_manager.runtime import AccountManager
-from cold_harbour.core.equity import _calculate_daily_ledger_utc, _fetch_daily_closes_utc
+from cold_harbour.services.account_manager.core_logic.equity import (
+    _calculate_daily_ledger_utc,
+    _fetch_daily_closes_utc,
+)
 from cold_harbour.services.account_manager.loader import load_activities_from_db
 
 # Configure simplified logging

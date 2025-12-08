@@ -8,7 +8,9 @@ from typing import Any, Dict, Optional, Set, TYPE_CHECKING
 
 import pandas as pd
 
-from cold_harbour.core.account_analytics import build_lot_portfolio
+from cold_harbour.services.account_manager.core_logic.account_analytics import (
+    build_lot_portfolio,
+)
 from cold_harbour.services.account_manager import trades
 from cold_harbour.services.account_manager.db import fetch_latest_prices
 from cold_harbour.services.account_manager.loader import load_activities_from_db
