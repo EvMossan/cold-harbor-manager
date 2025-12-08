@@ -40,3 +40,4 @@ steps:
     - '--set-secrets=GCP_PROJECT_NUMBER=projects/${_PROJECT_NUMBER}/secrets/GCP_PROJECT_NUMBER:latest'
 images:
 - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$COMMIT_SHA'
+#
