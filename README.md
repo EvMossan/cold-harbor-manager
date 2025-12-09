@@ -4,7 +4,9 @@
 
 It bridges the gap between raw execution data and actionable trading insights, acting as the authoritative source of truth for your trading bot's state.
 
----
+## Preview
+
+![Platform preview](docs/img/preview.png)
 
 ## Key Features
 
