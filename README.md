@@ -23,6 +23,9 @@ It bridges the gap between raw execution data and actionable trading insights, a
 - **Hybrid Data Storage:** Uses **PostgreSQL** for transactional state (orders/positions) and **TimescaleDB** for time-series data (intraday equity, price bars).
 - **Secure Connectivity:** Built-in integration with **Cloudflare Access** tunnels to securely expose database connections from Cloud Run or local dev environments without public IPs.
 
+- **Hybrid Pricing Model:** Simultaneously tracks "Strategy Price" (for technical execution) and "Broker Average Cost" (for financial reconciliation), preventing P&L drift while maintaining precise stop-loss logic.
+- **Session-Aware Architecture:** An autonomous `Schedule Supervisor` manages the lifecycle of background workers, automatically spinning up resources for Pre-Market and shutting down after Post-Market close.
+
 ---
 
 ## System Components
@@ -31,7 +34,10 @@ It bridges the gap between raw execution data and actionable trading insights, a
     An async Python daemon that maintains the "live" state. It reconciles REST API snapshots with WebSocket streams, calculates Greeks/metrics, and pushes updates to the UI via Postgres `NOTIFY`.
 
 2.  **Data Ingester (The Memory):**
-    A robust, self-healing service that creates a raw data lake (`account_activities` schema). It ensures no trade event is ever lost, even if the WebSocket stream drops, by using a "healing" polling mechanism.
+    A robust, self-healing service that creates a raw data lake. It uses **Synthetic IDs**
+    (`Timestamp::ExecutionID`) to seamlessly deduplicate high-speed WebSocket events
+    against REST API history, ensuring 100% data integrity even during connection
+    drops.
 
 3.  **Web Dashboard (The View):**
     A concise, single-page application (`account_positions.html`) rendering live tables and charts. It features visual P&L flashing, "Break-Even" status indicators, and multi-account switching.

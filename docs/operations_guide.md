@@ -42,6 +42,10 @@ new destinations or managing the runtime infrastructure.
 | `TIMESCALE_LIVE_LOCAL_CONN_STRING` | Direct Timescale DSN used alongside the local Postgres tunnel bypass when running dev instances in-network. |
 | `UI_BATCH_MS` | Millisecond window before batching SSE/UI payloads (higher values throttle updates for noisy feeds). |
 | `UI_SNAPSHOT_SEC` | Time window (seconds) between full UI snapshots/deltas to ensure clients recovering from reconnects get a fresh view. |
+| `CASH_FLOW_TYPES` | Comma-separated list of activity types (e.g. `DIV,FEE,JNLC`) included in equity calculations; used to filter out technical transfers. |
+| `TRADE_CONDITIONS_EXCLUDE` | Comma-separated trade condition codes to drop from the ZMQ stream, preventing noisy or ineligible fills from affecting state. |
+| `UI_PUSH_PCT_THRESHOLD` | Price-change threshold (percent) that triggers an immediate UI `NOTIFY`, guarding against flood updates during normal noise. |
+| `DISABLE_SESSION_SLEEP` | When set to `1`/`true`, forces the Account Manager to run continuously outside NYSE hours (useful for crypto or weekend debugging). |
 
 ## Database management
 
@@ -57,3 +61,10 @@ When the tunnels from `entrypoint.sh` expose 15433/15434 locally, those
 DSNs should point at `localhost:15433` (Postgres) and
 `localhost:15434` (Timescale) so the services can connect securely even
 inside Cloud Run or Docker containers.
+
+## Troubleshooting & Auditing
+
+Included is a CLI tool for deep diagnostics:
+`python -m cold_harbour.debug_audit`. It reconciles the Broker API state
+against the Local DB Ledger and Intraday logic to identify "Ghost Fees",
+missing dividends, or price sync drifts.

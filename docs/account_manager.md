@@ -35,11 +35,11 @@ The `AccountManager` runs several concurrent `asyncio` tasks:
 2.  **`db_worker`**: A throttling mechanism that flushes "dirty" state (changed prices) to the database at a fixed interval (e.g., every 60s) to avoid overwhelming the DB with tick-by-tick updates, while immediate structural changes (fills) are pushed instantly.
 3.  **`snapshot_loop`**: Periodically performs a "full sync" with Alpaca to ensure local state hasn't drifted from the broker (e.g., due to missed WebSocket messages).
 4.  **`closed_trades_worker`**: Periodically scans for newly closed trades and archives them to the closed trades history table.
-5.  **`metrics_worker`**: Computes account KPIs (Sharpe ratios, drawdowns, win rates) and persists them to `account_metrics`, ensuring dashboards see the latest calculated indicators.
+5.  **`metrics_worker`**: Computes account KPIs. It now prioritizes the `cumulative_return` from the `account_equity_intraday` table (if available) to ensure the "Total Return %" on the dashboard updates in real-time during the session, falling back to daily equity only if necessary. Runs on a high-frequency 5-second interval to keep Total Return and Sharpe ratios live.
 6.  **`cash_flows_worker`**: Bootstraps and ingests cash flow activities (dividends, journals, deposits) independently of equity updates so the ledger stays current even if equity rebuilding is paused.
-7.  **`equity_intraday_worker`**: Handles minute-resolution intraday equity backfills and incremental updates, keeping `account_equity_intraday` aligned with live trades without blocking the main state loop.
+7.  **`equity_intraday_worker`**: Rebuilds the intraday equity curve every minute using a "Mark-to-Market Delta" approach. It anchors calculations to the previous day's close and adds the P&L delta of current positions + intraday cash flows, ensuring the chart matches the broker's intraday volatility exactly.
 8.  **`ui_heartbeat_worker`**: Emits a heartbeat signal over the PostgreSQL notification channel to let the frontend know the backend is alive.
-9.  **`market_schedule_worker`**: Keeps the local market schedule table in sync with Alpaca's calendar.
+9.  **`schedule_supervisor`**: A high-level supervisor that manages the lifecycle of the trading session. It polls `market_schedule` and automatically calls `_activate_session` (spawning workers) or `_deactivate_session` (canceling tasks) based on Pre-Market, Open, and Post-Market windows. Includes an automatic retention policy that prunes session rows older than 120 days to keep the table compact.
 
 ## Data Model
 
@@ -100,7 +100,9 @@ When `run()` is called:
 2.  Ensures all required tables exist (creating them if missing).
 3.  Synchronizes the market schedule.
 4.  Fetches an initial snapshot of all positions from Alpaca.
-5.  Starts the WebSocket trade stream and background workers.
+5.  Loads the latest `mkt_px` values from TimescaleDB (`fetch_latest_prices`
+    in `db.py`) because the ZMQ price listener may not be operational yet.
+6.  Starts the WebSocket trade stream and background workers.
 
 ### Trade Lifecycle
 1.  **New Order:** `trades.py` detects a `new` order event.
@@ -108,12 +110,22 @@ When `run()` is called:
 3.  **Update:** ZMQ worker updates `mkt_px`. P&L is recalculated.
 4.  **Close:** When `qty` reaches 0, the row is removed from `account_open_positions` and a record is written to `account_closed`.
 
+#### Stream Robustness
+The manager implements a Dual Client Fallback strategy for WebSockets.
+It tries to connect with the modern `alpaca-py` `stream` client first, and if
+the attempt fails or the package is unavailable, it falls back to the legacy
+`alpaca_trade_api.stream` (SDK v2) to keep the stream running.
+
 ### Database Notifications
 The service uses PostgreSQL `NOTIFY` to broadcast changes.
 -   **Channel:** Configurable via `POS_CHANNEL`.
 -   **Payload:** JSON object containing the updated row or deletion event.
     -   Upsert: `{"row": {...}}`
     -   Delete: `{"op": "delete", "parent_id": "..."}`
+-   **Smart Throttling:** `pos_channel` notifies only when `mkt_px` shifts
+    beyond `UI_PUSH_PCT_THRESHOLD` or when structural fields (`qty`, `status`,
+    etc.) mutate. This keeps the UI responsive without overwhelming it on
+    volatile ticks.
 
 ## Development
 

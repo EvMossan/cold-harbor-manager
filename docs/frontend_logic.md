@@ -10,13 +10,19 @@ A global `pfHeader` object lifts key values across page reloads so the
 daily and intraday views stay in sync. Lines ~553‑618 initialize
 `pfHeader` on `window`, attach DOM handles (`pfHeader.valueEl` etc.), and
 reserve storage for `baseDeposit`, `dailyDeposit`, `intradayDeposit`,
-and session metadata. `syncPortfolioHeaderState` consults those fields to
-render the right currency/percentage display: if the user is viewing
-`intraday` data it favors `pfHeader.intradayDeposit`; otherwise it
-defaults to the daily baseline. Updates to session flow, realised P/L,
-and live deposits (see `renderPortfolioHeaderValue` and
-`updateSessionMetadata`) mutate `pfHeader` so the UI reflects the most
-recent streaming + REST data without recalculating everything.
+and session metadata. `syncPortfolioHeaderState` implements a strict
+priority queue to render the most accurate Portfolio Value:
+
+1.  **Live Push (SSE):** If a realtime update (`latestLiveDeposit`) is
+    received via WebSocket, it takes highest priority.
+2.  **Intraday (REST):** If no live push is active, it uses the latest
+    value from the `equity_intraday` API series.
+3.  **Daily Fallback:** If the market is closed or data is missing, it
+    falls back to the static `dailyDeposit` from the end-of-day equity
+    table.
+
+This ensures the UI never flickers between old and new data during active
+trading.
 
 ## SSE batching and scheduling
 

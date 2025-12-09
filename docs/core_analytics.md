@@ -10,26 +10,32 @@ fills/orders, matches trades, and enriches every position, while
 ### `build_lot_portfolio`
 
 Constructs a **lot-based portfolio** that mirrors the open-position table
-while enriching it with the Deep Chain Tracer. The tracer recursively
-follows `replaced_by` links in `orders_map` to surface the final active
-legs (limit/stop) for bracket chains even when orders have been
-modified or replaced multiple times. The function still sorts fills by
-execution time, builds `lots` keyed by `order_id`, and keeps
-`fifo_queues` for partial closes, but every lot now inherits up-to-date
-`Take_Profit_Price` and `Stop_Loss_Price` values resolved from the latest
-child legs discovered by the tracer. `orders_df` metadata (`status`,
-`side`, `parent_id`, etc.) drives each pass, ensuring the lot view matches
-the live Alpaca order book.
+while implementing a **Split Pricing Logic** to reconcile Strategy
+targets with Broker P/L.
 
-### `build_closed_trades_df_fifo`
+- **Buy Price (Strategy Execution):** Derived from the actual execution
+  price stored in the DB. This is used to calculate technical metrics
+  like `TP Reach %` and `Break-Even` status, ensuring the bot's logic
+  remains consistent with its original entry intent.
+- **Avg Entry (API):** Derived from the Broker's API (WAC). This is used
+  strictly for the `Profit/Loss` column to ensure the dashboard values
+  match the broker's official balance.
 
-Implements a **pure FIFO** close engine. It sorts fills chronologically,
-builds per-symbol buy inventory, and matches sells against the oldest
-buys, emitting one closed trade per matched tranche. Every record
-contains entry/exit IDs, fulfillment timestamps, PnL cash/pct, and
-`exit_type` sourced from `orders_df`. The FIFO engine is used as a
-reference to compare against the lot-based view and to compute unit PnL
-fallbacks when parent matches are unavailable.
+The function deduplicates orders by `updated_at` and matches active legs
+(limit/stop) to these positions.
+
+### `build_closed_trades_df_lot`
+
+Implements a **Lot-Based** close engine. It pre-processes raw fills using
+`_compress_fills` to calculate weighted average prices per order ID. It
+then matches SELL orders against specific BUY lots (inventory) using a
+priority queue.
+
+- **Matching Priority:** Direct Parent Match -> FIFO Fallback for orphans.
+- **Unit PnL Validation:** The function also calculates `fifo_unit_pnl`
+  (Pure FIFO per share) internally to compute `diff_pnl`, highlighting
+  discrepancies between the Lot-based strategy and the broker's FIFO
+  accounting.
 
 ## Advanced features
 
