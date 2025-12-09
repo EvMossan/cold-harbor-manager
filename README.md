@@ -32,6 +32,98 @@ It bridges the gap between raw execution data and actionable trading insights, a
 
 ## System Components
 
+The following architecture diagram summarizes the key services and data
+flows:
+
+```mermaid
+graph TD
+    %% Node Styling
+    classDef external fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef core fill:#ccf,stroke:#333,stroke-width:2px;
+    classDef worker fill:#dfd,stroke:#333,stroke-width:1px;
+    classDef logic fill:#ffd,stroke:#333,stroke-width:1px;
+    classDef db fill:#eee,stroke:#333,stroke-width:2px;
+
+    %% --- EXTERNAL SOURCES ---
+    subgraph External_Sources [External Sources]
+        AlpacaWS(Alpaca WebSocket<br/>Trade Updates)
+        AlpacaREST(Alpaca REST API<br/>Snapshots & History)
+        ZMQ(ZMQ Price Stream<br/>Real-time Quotes)
+    end
+
+    %% --- ACCOUNT MANAGER SERVICE ---
+    subgraph Account_Manager_Service [Account Manager Service]
+        
+        %% Entry Point
+        Runtime(<b>runtime.py</b><br/>Orchestrator & Config):::core
+
+        %% Background Tasks
+        subgraph Background_Workers [Workers / workers.py]
+            PriceList(price_listener):::worker
+            DBWork(db_worker):::worker
+            SnapLoop(snapshot_loop):::worker
+            ClosedSync(closed_trades_worker):::worker
+            Metrics(metrics_worker):::worker
+            Equity(equity_workers):::worker
+            SchedSup(schedule_supervisor):::worker
+        end
+
+        %% Business Logic
+        subgraph Core_Logic [Business Logic Modules]
+            Trades(<b>trades.py</b><br/>Order Logic):::logic
+            State(<b>state.py</b><br/>In-Memory State):::logic
+            Snapshot(<b>snapshot.py</b><br/>Reconciliation):::logic
+            EquityLogic(equity.py<br/>Math & Calc):::logic
+        end
+    end
+
+    %% --- STORAGE & UI ---
+    subgraph Storage_and_Output [Storage & Notifications]
+        TblLive[(tbl_live<br/>Open Positions)]:::db
+        TblClosed[(tbl_closed<br/>History)]:::db
+        TblEquity[(tbl_equity<br/>Performance)]:::db
+        TblMetrics[(tbl_metrics<br/>JSON KPIs)]:::db
+        ChanPos((NOTIFY<br/>pos_channel)):::db
+    end
+
+    %% --- DATA FLOW ---
+    
+    %% Startup
+    Runtime -->|Spawns| PriceList
+    Runtime -->|Spawns| DBWork
+    Runtime -->|Spawns| SnapLoop
+    Runtime -->|Spawns| ClosedSync
+    Runtime -->|Spawns| SchedSup
+
+    %% Price Stream (ZMQ)
+    ZMQ -->|Tick Data| PriceList
+    PriceList -->|Update Price| State
+    
+    %% Trade Stream (Alpaca WS)
+    AlpacaWS -->|Fills/Cancels| Trades
+    Trades -->|Update/Delete| State
+    Trades -->|Insert| TblClosed
+
+    %% Reconciliation (Alpaca REST)
+    AlpacaREST -->|Fetch All| Snapshot
+    SnapLoop -->|Trigger| Snapshot
+    Snapshot -->|Rebuild| State
+
+    %% DB Writes & Notifications
+    State -->|Upsert Row| TblLive
+    State -->|PG NOTIFY| ChanPos
+    DBWork -->|Flush Dirty Rows| State
+    
+    %% Metrics & Equity
+    Metrics -->|Read| TblLive
+    Metrics -->|Calc & Write| TblMetrics
+    Equity -->|Recalc| EquityLogic
+    EquityLogic -->|Write| TblEquity
+
+    %% Apply Styles
+    class AlpacaWS,AlpacaREST,ZMQ external;
+```
+
 1.  **Account Manager (The Brain):**
     An async Python daemon that maintains the "live" state. It reconciles REST API snapshots with WebSocket streams, calculates Greeks/metrics, and pushes updates to the UI via Postgres `NOTIFY`.
 
