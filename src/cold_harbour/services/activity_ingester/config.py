@@ -18,8 +18,7 @@ class IngesterConfig:
     HEALING_INTERVAL_SEC: int = 300  # 5 minutes
 
     # How far back to look during a healing poll (seconds)
-    # Should be slightly larger than HEALING_INTERVAL_SEC to ensure overlap
-    HEALING_LOOKBACK_SEC: int = 600  # 10 minutes
+    HEALING_LOOKBACK_SEC: int = 3600 * 200  # 10 minutes
 
     # Backfill Settings
     # How far back to download history on the very first run (days)

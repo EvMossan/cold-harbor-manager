@@ -159,7 +159,8 @@ async def closed_trades_worker(mgr: "AccountManager") -> None:
 
 async def metrics_worker(mgr: "AccountManager") -> None:
     """Compute account metrics and persist a single JSON document."""
-    interval = max(30, int(mgr.CLOSED_SYNC_SEC))
+    # Update metrics frequently so Total Return stays live.
+    interval = 5
     log = mgr.log.with_module("metrics_worker")
     while True:
         try:
@@ -287,6 +288,8 @@ async def _build_metrics_payload(
 
     metrics = {k: _coerce_number(v) for k, v in metrics.items()}
 
+    live_equity = metrics.get("TOTAL ACCOUNT RESULT (Equity)")
+
     equity_row = await mgr._db_fetchrow(
         f"""
             SELECT *
@@ -296,14 +299,25 @@ async def _build_metrics_payload(
         """
     )
     if equity_row:
-        total_return = _safe_float(equity_row.get("cumulative_return"))
-        if total_return is not None:
-            metrics["Total Return %"] = total_return * 100.0
-
         sharpe_vals = _extract_sharpe(
             equity_row, (10, 21, 63, 126, 252)
         )
         metrics.update(sharpe_vals)
+
+        last_daily_dep = _safe_float(equity_row.get("deposit"))
+        last_daily_cum = _safe_float(
+            equity_row.get("cumulative_return")
+        )
+
+        if live_equity and last_daily_dep and last_daily_cum is not None:
+            base_cap = last_daily_dep / (1.0 + last_daily_cum)
+            if base_cap > 0:
+                new_cum_ret = (live_equity / base_cap) - 1.0
+                metrics["Total Return %"] = new_cum_ret * 100.0
+            else:
+                metrics["Total Return %"] = last_daily_cum * 100.0
+        elif last_daily_cum is not None:
+            metrics["Total Return %"] = last_daily_cum * 100.0
 
     return metrics
 

@@ -1079,7 +1079,7 @@
     }
 
     function syncPortfolioHeaderState() {
-      // 1. Live push has the highest priority
+      // 1. Live push has the highest priority (always prefer it when present).
       if (
         pfHeader.latestLiveDeposit != null &&
         pfHeader.latestLiveDeposit > 1
@@ -1091,21 +1091,19 @@
         return;
       }
 
-      // 2. Intraday tab is active and has valid data (> 1)
-      if (pfHeader.source === 'intraday') {
-        if (
-          pfHeader.intradayDeposit != null &&
-          pfHeader.intradayDeposit > 1
-        ) {
-          renderPortfolioHeaderValue(
-            pfHeader.intradayDeposit,
-            pfHeader.intradayTimestamp
-          );
-          return;
-        }
+      // 2. If live data has not arrived yet, rely on cached intraday values.
+      if (
+        pfHeader.intradayDeposit != null &&
+        pfHeader.intradayDeposit > 1
+      ) {
+        renderPortfolioHeaderValue(
+          pfHeader.intradayDeposit,
+          pfHeader.intradayTimestamp
+        );
+        return;
       }
 
-      // 3. Fallback to Daily when Intraday is missing or Daily tab is active
+      // 3. Fallback to Daily when neither live nor intraday data is available.
       if (
         pfHeader.dailyDeposit != null &&
         pfHeader.dailyDeposit > 1
@@ -1115,17 +1113,6 @@
           pfHeader.dailyTimestamp
         );
         return;
-      }
-
-      // 4. If everything else is empty, show Intraday as a last resort
-      if (
-        pfHeader.intradayDeposit != null &&
-        pfHeader.intradayDeposit > 1
-      ) {
-        renderPortfolioHeaderValue(
-          pfHeader.intradayDeposit,
-          pfHeader.intradayTimestamp
-        );
       }
     }
     window.syncPortfolioHeaderState = syncPortfolioHeaderState;
