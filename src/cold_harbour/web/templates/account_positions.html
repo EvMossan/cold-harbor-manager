@@ -709,15 +709,8 @@
           last && last.deposit != null ? +last.deposit : null;
         pfHeader.dailyTimestamp =
           last && last.date ? last.date : null;
-        if (pfHeader.source === 'daily' ||
-            pfHeader.intradayDeposit == null) {
-          if (pfHeader.dailyDeposit != null) {
-            renderPortfolioHeaderValue(
-              pfHeader.dailyDeposit,
-              pfHeader.dailyTimestamp
-            );
-          }
-        }
+        // Just update state; syncPortfolioHeaderState will render the best value.
+        syncPortfolioHeaderState();
       } catch (_) { /* ignore */ }
     }
     scheduleAligned(loadKpi);
@@ -827,11 +820,12 @@
       { data:'mkt_value', name:'mkt_value', title:'Mkt&nbsp;Value',
         defaultContent:0, render:num2 },
 
-      { data:'profit_loss', name:'profit_loss', title:'P/L&nbsp;(WAC)',
+      { data:'profit_loss', name:'profit_loss', title:'P/L&nbsp;(FIFO)',
         className:'col-pl-wac dt-right', defaultContent:0,
         render:(d,t)=> t==='display' ? num2.display(+d||0) : +d||0 },
 
-      { data:'profit_loss_lot', name:'profit_loss_lot', title:'P/L',
+      { data:'profit_loss_lot', name:'profit_loss_lot',
+        title:'P/L&nbsp;(Strategy)',
         className:'col-pl-lot dt-right', defaultContent:0,
         render:(d,t)=> t==='display' ? num2.display(+d||0) : +d||0 }
     ];
@@ -1079,7 +1073,7 @@
     }
 
     function syncPortfolioHeaderState() {
-      // 1. Live push has the highest priority (always prefer it when present).
+      // 1. Live push (Websocket/SSE) - highest priority.
       if (
         pfHeader.latestLiveDeposit != null &&
         pfHeader.latestLiveDeposit > 1
@@ -1091,7 +1085,7 @@
         return;
       }
 
-      // 2. If live data has not arrived yet, rely on cached intraday values.
+      // 2. Intraday (REST API) - force this value whenever it exists.
       if (
         pfHeader.intradayDeposit != null &&
         pfHeader.intradayDeposit > 1
@@ -1103,7 +1097,7 @@
         return;
       }
 
-      // 3. Fallback to Daily when neither live nor intraday data is available.
+      // 3. Daily fallback (only if no intraday/live data is available).
       if (
         pfHeader.dailyDeposit != null &&
         pfHeader.dailyDeposit > 1
@@ -2303,14 +2297,7 @@
           if (Number.isFinite(live)) {
             pfHeader.intradayDeposit = live;
             pfHeader.intradayTimestamp = meta && meta.live_ts ? meta.live_ts : null;
-            if (pfHeader.source === 'intraday') {
-              renderPortfolioHeaderValue(
-                pfHeader.intradayDeposit,
-                pfHeader.intradayTimestamp
-              );
-            } else {
-              updatePortfolioChange();
-            }
+            syncPortfolioHeaderState();
           }
           return;
         }
@@ -2340,15 +2327,7 @@
             if (val > 1) {
               pfHeader.intradayDeposit = val;
               pfHeader.intradayTimestamp = last.ts || null;
-              if (pfHeader.source === 'intraday') {
-                renderPortfolioHeaderValue(
-                  pfHeader.intradayDeposit,
-                  pfHeader.intradayTimestamp
-                );
-              } else {
-                // Daily tab is active but the API provided valid data.
-                syncPortfolioHeaderState();
-              }
+              syncPortfolioHeaderState();
             }
           }
         } catch (_) { /* ignore */ }

@@ -532,9 +532,10 @@ async def rebuild_equity_series_async(
             - equity_df['net_flows']
         )
 
+        capital_base = equity_df['prev_deposit'] + equity_df['net_flows']
         equity_df['daily_return'] = np.where(
-            equity_df['prev_deposit'] > 0,
-            equity_df['daily_profit'] / equity_df['prev_deposit'],
+            capital_base > 0,
+            equity_df['daily_profit'] / capital_base,
             0.0
         )
 

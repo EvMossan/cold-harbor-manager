@@ -254,13 +254,24 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
         )
         open_df = pd.DataFrame(open_rows)
 
-        # 4. Fetch Flows (ALL non-fill activities: Fees, Divs, Journals, etc.)
+        # 4. Fetch Flows (split into PnL vs external deposits/withdrawals)
+        pnl_types = {
+            "DIV",
+            "DIVCGL",
+            "DIVCGS",
+            "DIVNRA",
+            "DIVROC",
+            "DIVTXEX",
+            "DIVWH",
+            "INT",
+            "INTPNL",
+            "FEE",
+            "CFEE",
+        }
         try:
-            # We exclude FILL and PARTIAL_FILL to get everything else.
-            # This ensures Fees (-$) and Dividends (+$) are captured in Intraday Equity.
             flow_rows = await mgr._db_fetch(
                 f"""
-                    SELECT ts AT TIME ZONE 'UTC' AS ts, amount
+                    SELECT ts AT TIME ZONE 'UTC' AS ts, amount, type
                       FROM {mgr.tbl_cash_flows}
                      WHERE ts >= $1 AND ts <= $2
                        AND (type NOT ILIKE 'FILL%' AND type NOT ILIKE 'PARTIAL_FILL%')
@@ -269,9 +280,19 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                 start_utc.to_pydatetime(),
                 now_pydt,
             )
-            flows = pd.DataFrame(flow_rows)
+            pnl_flows_data = []
+            external_flows_data = []
+            for row in flow_rows:
+                atype = str(row.get("type") or "").upper()
+                if atype in pnl_types:
+                    pnl_flows_data.append(row)
+                else:
+                    external_flows_data.append(row)
+            pnl_flows = pd.DataFrame(pnl_flows_data)
+            ext_flows = pd.DataFrame(external_flows_data)
         except Exception:
-            flows = pd.DataFrame(columns=["ts", "amount"])
+            pnl_flows = pd.DataFrame(columns=["ts", "amount", "type"])
+            ext_flows = pd.DataFrame(columns=["ts", "amount", "type"])
 
         # 5. Fetch Prices & Build Reference Map
         cutoff_ts = cutoff.to_pydatetime()
@@ -414,20 +435,41 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                     fill_value=0.0
                 )
 
-        # 7. Add Flows (Now includes Fees, Divs, etc.)
-        if flows is not None and not flows.empty:
-            flow_floor = pd.to_datetime(flows["ts"], utc=True).dt.floor("min")
-            fser = (
-                flows.assign(_m=flow_floor)
+        # 7. Add Flows (split PnL vs external deposits/withdrawals)
+        if pnl_flows is not None and not pnl_flows.empty:
+            flow_floor = (
+                pd.to_datetime(pnl_flows["ts"], utc=True)
+                .dt.floor("min")
+            )
+            fser_pnl = (
+                pnl_flows.assign(_m=flow_floor)
                 .groupby("_m")["amount"]
                 .sum()
                 .reindex(idx, fill_value=0.0)
                 .cumsum()
             )
-            delta_series = delta_series.add(fser, fill_value=0.0)
+            delta_series = delta_series.add(fser_pnl, fill_value=0.0)
+
+        # Track external flows separately for balance but not returns.
+        ext_series = pd.Series(0.0, index=idx)
+        if ext_flows is not None and not ext_flows.empty:
+            flow_floor_ext = (
+                pd.to_datetime(ext_flows["ts"], utc=True)
+                .dt.floor("min")
+            )
+            fser_ext = (
+                ext_flows.assign(_m=flow_floor_ext)
+                .groupby("_m")["amount"]
+                .sum()
+                .reindex(idx, fill_value=0.0)
+                .cumsum()
+            )
+            ext_series = ext_series.add(fser_ext, fill_value=0.0)
 
         # 8. Final Series Construction
-        deposit_series = (prev_equity + delta_series).astype(float)
+        deposit_series = (
+            prev_equity + delta_series + ext_series
+        ).astype(float)
 
         step = max(1, int(mgr.EQUITY_INTRADAY_SEC))
         tick_idx = pd.date_range(
@@ -436,11 +478,16 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
         if tick_idx.empty:
             tick_idx = pd.DatetimeIndex([cutoff])
 
-        dep_ticks = deposit_series.reindex(tick_idx, method="ffill")
-        dep_ticks = dep_ticks.ffill().astype(float)
+        dep_ticks = deposit_series.reindex(
+            tick_idx, method="ffill"
+        ).ffill().astype(float)
+
+        profit_ticks = (
+            prev_equity + delta_series
+        ).reindex(tick_idx, method="ffill").ffill().astype(float)
 
         base_cap = prev_equity if prev_equity != 0.0 else 1.0
-        daily_ret = dep_ticks / base_cap - 1.0
+        daily_ret = profit_ticks / base_cap - 1.0
         cum_ticks = (1.0 + prev_cum_ret) * (1.0 + daily_ret) - 1.0
         peak_ticks = dep_ticks.cummax().replace(0.0, np.nan)
         dd_ticks = (dep_ticks / peak_ticks) - 1.0

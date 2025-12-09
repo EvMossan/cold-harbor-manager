@@ -304,20 +304,55 @@ async def _build_metrics_payload(
         )
         metrics.update(sharpe_vals)
 
-        last_daily_dep = _safe_float(equity_row.get("deposit"))
-        last_daily_cum = _safe_float(
+        last_equity = _safe_float(equity_row.get("deposit"))
+        last_cum_ret = _safe_float(
             equity_row.get("cumulative_return")
         )
 
-        if live_equity and last_daily_dep and last_daily_cum is not None:
-            base_cap = last_daily_dep / (1.0 + last_daily_cum)
-            if base_cap > 0:
-                new_cum_ret = (live_equity / base_cap) - 1.0
-                metrics["Total Return %"] = new_cum_ret * 100.0
+        init_cash = None
+        try:
+            val = mgr.cfg.get("EQUITY_INIT_CASH")
+            if val:
+                init_cash = float(val)
+        except Exception:
+            pass
+
+        if live_equity and init_cash and init_cash > 0:
+            ret = (live_equity - init_cash) / init_cash
+            metrics["Total Return %"] = ret * 100.0
+        elif live_equity and last_equity and last_cum_ret is not None:
+            if last_equity > 0:
+                day_ret = (live_equity / last_equity) - 1.0
+                compounded = (
+                    (1.0 + last_cum_ret) * (1.0 + day_ret) - 1.0
+                )
+                metrics["Total Return %"] = compounded * 100.0
             else:
-                metrics["Total Return %"] = last_daily_cum * 100.0
-        elif last_daily_cum is not None:
-            metrics["Total Return %"] = last_daily_cum * 100.0
+                metrics["Total Return %"] = last_cum_ret * 100.0
+        elif last_cum_ret is not None:
+            metrics["Total Return %"] = last_cum_ret * 100.0
+
+    # --- NEW LOGIC: Override Total Return from Intraday Table ---
+    # account_equity_intraday is the trusted source for cumulative return.
+    try:
+        intraday_row = await mgr._db_fetchrow(
+            f"""
+            SELECT cumulative_return
+              FROM {mgr.tbl_equity_intraday}
+          ORDER BY ts DESC
+             LIMIT 1
+            """
+        )
+        if intraday_row:
+            raw_ret = _safe_float(
+                intraday_row.get("cumulative_return")
+            )
+            if raw_ret is not None:
+                metrics["Total Return %"] = raw_ret * 100.0
+    except Exception as exc:
+        mgr.log.warning(
+            "Failed to fetch intraday return for metrics: %s", exc
+        )
 
     return metrics
 

@@ -54,6 +54,7 @@ def _aggregate_lots(df: pd.DataFrame) -> pd.DataFrame:
         "Take_Profit_Price": "first",
         "Stop_Loss_Price": "first",
         "Source": "first",
+        "Avg Entry (API)": "first",
         "_avg_px_symbol": "first",
         # Preserve TP_reach if possible (taking first isn't perfect but sufficient for summary)
         "TP_reach, %": "first", 
@@ -143,7 +144,11 @@ def _build_live_row(
     qty = qty_val if qty_val is not None else 0.0
 
     avg_fill = _safe_float(entry.get("Buy Price"))
-    avg_px_symbol = _safe_float(entry.get("_avg_px_symbol")) or avg_fill
+    avg_px_symbol = (
+        _safe_float(entry.get("Avg Entry (API)"))
+        or _safe_float(entry.get("_avg_px_symbol"))
+        or avg_fill
+    )
     sl_px = _safe_float(entry.get("Stop_Loss_Price"))
     tp_px = _safe_float(entry.get("Take_Profit_Price"))
     mkt_px = _safe_float(entry.get("Current_Price"))
