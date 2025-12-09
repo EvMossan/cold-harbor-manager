@@ -462,18 +462,15 @@ def build_lot_portfolio(
     api: Any = None
 ) -> pd.DataFrame:
     """
-    Builds a portfolio using 'Simple' logic (JSON unpacking) but with 
-    financial metrics matching the Broker's Dashboard.
-
-    Structure: Matches exactly the legacy 'build_lot_portfolio' columns.
-    Logic:
-    - 'Buy Price' = Broker's Average Entry Price (from API).
-    - 'Profit/Loss' = Calculated based on Average Entry Price.
-    - Includes deduplication of orders by updated_at.
+    Builds a portfolio with SPLIT pricing logic:
+    
+    1. 'Buy Price' = Strategy Execution Price (DB). Used for TP Reach & BrE.
+    2. 'Avg Entry (API)' = Broker's Average Price. Used for Profit/Loss (Dashboard match).
+    
+    Includes deduplication by 'updated_at'.
     """
 
     # --- 1. Fetch Broker Data (Market Data & Averages) ---
-    # Map: symbol -> {cur_px, avg_entry}
     market_data: Dict[str, Dict[str, float]] = {}
     
     if api:
@@ -481,8 +478,9 @@ def build_lot_portfolio(
             raw_positions = api.list_positions()
             for p in raw_positions:
                 qty = float(p.qty)
-                # Current Price
                 cur_px = float(getattr(p, "current_price", 0.0))
+                
+                # Fallback calculation
                 if cur_px == 0.0 and qty != 0:
                     try:
                         cur_px = float(p.market_value) / qty
@@ -499,39 +497,20 @@ def build_lot_portfolio(
         except Exception as e:
             print(f"Warning: API fetch failed. {e}")
 
-    # --- 2. Define Exact Legacy Columns ---
-    expected_cols = [
-        "Parent ID",
-        "Symbol",
-        "Buy Date",
-        "Buy Qty",
-        "Remaining Qty",
-        "Buy Price",
-        "Take_Profit_Price",
-        "Stop_Loss_Price",
-        "Source",
-        "Holding_Period",
-        "Current_Price",
-        "Current Market Value",
-        "Profit/Loss",
-        "TP_reach, %",
-        "BrE",
-    ]
-
+    # --- 2. Pre-process: Deduplication ---
     if orders_df.empty:
-        return pd.DataFrame(columns=expected_cols)
+        return pd.DataFrame()
 
-    # --- 3. Pre-process: Deduplication ---
     df_clean = orders_df.copy()
     
-    # Sort by update time (descending) to keep the freshest record first
+    # Sort by updated_at descending (newest first)
     sort_col = 'updated_at' if 'updated_at' in df_clean.columns else 'created_at'
     df_clean.sort_values(by=sort_col, ascending=False, inplace=True)
     
-    # Drop duplicates by ID, keeping the freshest
+    # Deduplicate by ID
     df_clean.drop_duplicates(subset=['id'], keep='first', inplace=True)
 
-    # Filter Parents: Buy + Filled + Has Legs
+    # Filter Parents
     parents = df_clean[
         (df_clean['side'] == 'buy') & 
         (df_clean['status'] == 'filled') &
@@ -541,7 +520,7 @@ def build_lot_portfolio(
     active_lots = []
     live_statuses = ['new', 'held', 'accepted', 'partially_filled']
 
-    # --- 4. Iterate & Unpack ---
+    # --- 3. Iterate & Unpack ---
     for _, row in parents.iterrows():
         legs_raw = row.get('legs')
         legs_data = []
@@ -585,70 +564,87 @@ def build_lot_portfolio(
                     if sl_price == 0.0:
                         sl_price = float(leg.get('limit_price') or 0.0)
 
-        # --- 5. Build Row ---
+        # --- 4. Build Row ---
         if has_active_legs:
             symbol = str(row.get('symbol'))
             qty = float(row.get('filled_qty') or 0.0)
             
-            # Fetch Market Data
+            # PRICE A: Strategy (Real DB fill) -> Goes to 'Buy Price'
+            strategy_entry = float(row.get('filled_avg_price') or 0.0)
+            
+            # PRICE B: Broker Average (API) -> Goes to 'Avg Entry (API)'
             m_data = market_data.get(symbol.lower(), {})
             current_price = m_data.get("cur_px", 0.0)
-            broker_avg_entry = m_data.get("avg_entry", 0.0)
+            broker_avg = m_data.get("avg_entry", 0.0)
             
-            # KEY LOGIC: Use Broker Average if available, else DB fill price
-            # This ensures 'Buy Price' matches the Dashboard.
-            final_buy_price = broker_avg_entry if broker_avg_entry > 0 else float(row.get('filled_avg_price') or 0.0)
+            # Fallback if API is silent
+            if broker_avg == 0.0:
+                broker_avg = strategy_entry
 
             pos = {
                 "Parent ID": str(row.get('id')),
                 "Symbol": symbol,
                 "Buy Date": row.get('created_at'),
                 "Buy Qty": qty,
-                "Remaining Qty": qty, # Simple logic assumption
-                "Buy Price": final_buy_price, # <-- Now holds API Average
+                "Remaining Qty": qty,
+                
+                # --- PRICING SPLIT ---
+                "Buy Price": strategy_entry,      # STRATEGY (For TP Reach)
+                "Avg Entry (API)": broker_avg,    # BROKER (For P/L)
+                
                 "Take_Profit_Price": tp_price,
                 "Stop_Loss_Price": sl_price,
-                "Source": "Simple", # Static indicator
+                "Source": "Simple",
                 "Current_Price": current_price,
-                # Metrics calculated below via vectorization
             }
             active_lots.append(pos)
 
-    # --- 6. DataFrame & Math ---
+    # --- 5. DataFrame & Calculations ---
     df = pd.DataFrame(active_lots)
+    
+    # Define Column Order (Legacy + New Avg Column)
+    final_cols_ordered = [
+        "Parent ID", "Symbol", "Buy Date", "Buy Qty", "Remaining Qty", 
+        "Buy Price", "Avg Entry (API)", # <--- Added here
+        "Take_Profit_Price", "Stop_Loss_Price", "Source", "Holding_Period", 
+        "Current_Price", "Current Market Value", "Profit/Loss", 
+        "TP_reach, %", "BrE"
+    ]
 
     if df.empty:
-        return pd.DataFrame(columns=expected_cols)
+        return pd.DataFrame(columns=final_cols_ordered)
 
-    # Dates
+    # Dates & Holding
     df["Buy Date Obj"] = pd.to_datetime(df["Buy Date"], utc=True)
     now = pd.Timestamp.now(tz=df["Buy Date Obj"].dt.tz)
     df["Holding_Period"] = (now - df["Buy Date Obj"]).dt.days
     df["Buy Date"] = df["Buy Date Obj"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Fill NaNs
-    df["Current_Price"] = df["Current_Price"].fillna(0.0)
-
     # Financials
+    df["Current_Price"] = df["Current_Price"].fillna(0.0)
     df["Current Market Value"] = df["Remaining Qty"] * df["Current_Price"]
     
-    # Profit/Loss (Now uses the API Average Price because that is what's in 'Buy Price')
-    df["Profit/Loss"] = (df["Current_Price"] - df["Buy Price"]) * df["Remaining Qty"]
+    # --- LOGIC SPLIT ---
+    
+    # 1. Profit/Loss -> Uses BROKER AVG (Matches Dashboard)
+    df["Profit/Loss"] = (df["Current_Price"] - df["Avg Entry (API)"]) * df["Remaining Qty"]
 
-    # Metrics (TP Reach & BrE)
-    # Calculated relative to 'Buy Price' (which is now the Average Entry)
-    diff = df["Current_Price"] - df["Buy Price"]
+    # 2. TP Reach -> Uses STRATEGY BUY PRICE (Matches Order Logic)
+    diff_strategy = df["Current_Price"] - df["Buy Price"]
     tp_dist = df["Take_Profit_Price"] - df["Buy Price"]
     sl_dist = df["Buy Price"] - df["Stop_Loss_Price"]
 
     df["TP_reach, %"] = np.nan
     
-    mask_profit = (diff >= 0) & (tp_dist > 0)
-    df.loc[mask_profit, "TP_reach, %"] = (diff / tp_dist * 100).round(2)
+    # Case: Profit (Towards TP)
+    mask_profit = (diff_strategy >= 0) & (tp_dist > 0)
+    df.loc[mask_profit, "TP_reach, %"] = (diff_strategy / tp_dist * 100).round(2)
     
-    mask_loss = (diff < 0) & (sl_dist > 0)
-    df.loc[mask_loss, "TP_reach, %"] = (diff / sl_dist * 100).round(2)
+    # Case: Loss (Towards SL)
+    mask_loss = (diff_strategy < 0) & (sl_dist > 0)
+    df.loc[mask_loss, "TP_reach, %"] = (diff_strategy / sl_dist * 100).round(2)
 
+    # 3. BrE -> Uses STRATEGY BUY PRICE
     df["BrE"] = df.apply(
         lambda r: 1
         if (
@@ -660,9 +656,7 @@ def build_lot_portfolio(
         axis=1,
     )
 
-    # Select & Sort final columns exactly as requested
-    final_cols_ordered = [c for c in expected_cols if c in df.columns]
-
+    # Return ordered columns
     return (
         df[final_cols_ordered]
         .sort_values(["Symbol", "Buy Date"], ascending=[True, False])

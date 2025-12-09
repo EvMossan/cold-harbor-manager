@@ -13,7 +13,6 @@ from cold_harbour.services.account_manager.core_logic.account_analytics import (
 )
 from cold_harbour.services.account_manager import trades
 from cold_harbour.services.account_manager.db import fetch_latest_prices
-from cold_harbour.services.account_manager.loader import load_activities_from_db
 from cold_harbour.services.account_manager.utils import (
     _is_at_break_even,
     _utcnow,
@@ -267,22 +266,7 @@ async def initial_snapshot(mgr: "AccountManager") -> None:
         log.exception("Snapshot: failed to fetch orders")
         orders_df = pd.DataFrame()
 
-    try:
-        activities_df = await load_activities_from_db(
-            mgr.repo, mgr.c.ACCOUNT_SLUG
-        )
-    except Exception:
-        log.exception("Snapshot: failed to fetch activities")
-        activities_df = pd.DataFrame()
-
-    if "activity_type" in activities_df.columns:
-        fills_df = activities_df[
-            activities_df["activity_type"] == "FILL"
-        ].copy()
-    else:
-        fills_df = pd.DataFrame()
-
-    open_df = build_lot_portfolio(fills_df, orders_df, api=mgr.rest)
+    open_df = build_lot_portfolio(orders_df, api=mgr.rest)
     open_df = _aggregate_lots(open_df)
     if open_df is None or open_df.empty:
         for pid in list(prev_ids):
@@ -370,30 +354,7 @@ async def refresh_symbol_snapshot(
             log.exception("Symbol snapshot: failed to fetch orders")
             orders_df = pd.DataFrame()
 
-        try:
-            activities_df = await load_activities_from_db(
-                mgr.repo, mgr.c.ACCOUNT_SLUG
-            )
-        except Exception:
-            log.exception("Symbol snapshot: failed to fetch activities")
-            activities_df = pd.DataFrame()
-
-        if "activity_type" in activities_df.columns:
-            fills_df = activities_df[
-                activities_df["activity_type"] == "FILL"
-            ].copy()
-        else:
-            fills_df = pd.DataFrame()
-
-        if "symbol" in fills_df.columns:
-            fills_df = fills_df[
-                fills_df["symbol"]
-                .astype(str)
-                .str.upper()
-                .eq(sym)
-            ].copy()
-
-        if not orders_df.empty and "symbol" in orders_df.columns:
+        if "symbol" in orders_df.columns:
             orders_df = orders_df[
                 orders_df["symbol"]
                 .astype(str)
@@ -402,8 +363,7 @@ async def refresh_symbol_snapshot(
             ].copy()
         else:
             orders_df = orders_df.copy()
-
-        open_df = build_lot_portfolio(fills_df, orders_df, api=mgr.rest)
+        open_df = build_lot_portfolio(orders_df, api=mgr.rest)
         open_df = _aggregate_lots(open_df)
         if open_df is None or open_df.empty:
             for pid in list(mgr.sym2pid.get(sym, set())):
