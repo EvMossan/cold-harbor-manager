@@ -132,7 +132,7 @@ async def upsert_orders(
     orders: List[Dict[str, Any]]
 ) -> int:
     """
-    Batch UPSERT orders. Updates status/filled_qty if order exists.
+    Batch UPSERT orders. Fully overwrites existing row on conflict.
     """
     if not orders:
         return 0
@@ -158,12 +158,8 @@ async def upsert_orders(
     placeholders = ",".join(f"${i+1}" for i in range(len(cols)))
     
     # Build UPDATE clause for ON CONFLICT
-    # We update fields that can change during order lifecycle
-    update_cols = [
-        "status", "filled_qty", "filled_avg_price", "updated_at",
-        "filled_at", "expired_at", "canceled_at", "replaced_at",
-        "replaced_by", "raw_json", "legs"
-    ]
+    # FORCE FULL OVERWRITE: Update ALL columns except 'id'
+    update_cols = [c for c in cols if c != "id"]
     updates = ",".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
 
     sql = f"""
@@ -173,7 +169,6 @@ async def upsert_orders(
         {updates}
     """
 
-    # AsyncAccountRepository.executemany handles batching logic internally via asyncpg
     await repo.executemany(sql, values)
     return len(values)
 

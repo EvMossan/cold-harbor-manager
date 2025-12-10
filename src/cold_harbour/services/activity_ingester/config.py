@@ -15,7 +15,7 @@ class IngesterConfig:
 
     # Worker Intervals
     # How often to run the "healing" REST poll to catch missed events (seconds)
-    HEALING_INTERVAL_SEC: int = 300  # 5 minutes
+    HEALING_INTERVAL_SEC: int = 60
 
     # How far back to look during a healing poll (seconds)
     HEALING_LOOKBACK_SEC: int = 3600 * 200  # 10 minutes
