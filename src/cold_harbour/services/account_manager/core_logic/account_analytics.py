@@ -462,14 +462,12 @@ def build_lot_portfolio(
     api: Any = None
 ) -> pd.DataFrame:
     """
-    Builds a portfolio with SPLIT pricing logic:
+    Builds a portfolio with SPLIT pricing logic and "Global Status Lookup".
     
-    1. 'Buy Price' = Strategy Execution Price (DB). Used for TP Reach & BrE.
-    2. 'Avg Entry (API)' = Broker's Average Price. Used for Profit/Loss (Dashboard match).
-    
-    Includes deduplication by 'updated_at'.
+    Fixes the issue where Parent JSON contains stale leg statuses (e.g., 'new')
+    while the legs themselves appear as separate, updated rows (e.g., 'filled') 
+    later in the DB.
     """
-
     # --- 1. Fetch Broker Data (Market Data & Averages) ---
     market_data: Dict[str, Dict[str, float]] = {}
     
@@ -480,14 +478,12 @@ def build_lot_portfolio(
                 qty = float(p.qty)
                 cur_px = float(getattr(p, "current_price", 0.0))
                 
-                # Fallback calculation
                 if cur_px == 0.0 and qty != 0:
                     try:
                         cur_px = float(p.market_value) / qty
                     except Exception:
                         cur_px = 0.0
                 
-                # Broker's Average Entry (FIFO/Weighted Average)
                 avg_entry = float(p.avg_entry_price)
                 
                 market_data[p.symbol.lower()] = {
@@ -497,20 +493,42 @@ def build_lot_portfolio(
         except Exception as e:
             print(f"Warning: API fetch failed. {e}")
 
-    # --- 2. Pre-process: Deduplication ---
+    # --- 2. Pre-process: Clean, Sort & Deduplicate ---
     if orders_df.empty:
         return pd.DataFrame()
-
+    
     df_clean = orders_df.copy()
     
-    # Sort by updated_at descending (newest first)
+    # Identify time column and Convert to datetime
     sort_col = 'updated_at' if 'updated_at' in df_clean.columns else 'created_at'
+    if sort_col in df_clean.columns:
+        df_clean[sort_col] = pd.to_datetime(df_clean[sort_col], utc=True, errors='coerce')
+    
+    # Sort descending (newest first)
     df_clean.sort_values(by=sort_col, ascending=False, inplace=True)
     
-    # Deduplicate by ID
-    df_clean.drop_duplicates(subset=['id'], keep='first', inplace=True)
+    # Deduplicate primarily by 'id' (or 'order_id' if available/populated)
+    dedup_subset = ['id']
+    if 'order_id' in df_clean.columns and df_clean['order_id'].notna().any():
+        dedup_subset = ['order_id']
+            
+    df_clean.drop_duplicates(subset=dedup_subset, keep='first', inplace=True)
 
-    # Filter Parents
+    # --- 3. GLOBAL STATUS LOOKUP (The Fix) ---
+    # Create a map of {order_id: latest_status} from the entire dataframe.
+    # This allows us to override stale status info found inside Parent JSONs.
+    status_map = {}
+    
+    # Use 'id' column for mapping keys
+    if 'id' in df_clean.columns:
+        status_map = df_clean.set_index('id')['status'].to_dict()
+    
+    # If order_id exists, map that too just in case
+    if 'order_id' in df_clean.columns:
+        extra_map = df_clean.dropna(subset=['order_id']).set_index('order_id')['status'].to_dict()
+        status_map.update(extra_map)
+
+    # --- 4. Filter Parents ---
     parents = df_clean[
         (df_clean['side'] == 'buy') & 
         (df_clean['status'] == 'filled') &
@@ -518,9 +536,9 @@ def build_lot_portfolio(
     ].copy()
     
     active_lots = []
-    live_statuses = ['new', 'held', 'accepted', 'partially_filled']
+    live_statuses = ['new', 'held', 'accepted', 'partially_filled', 'open', 'calculated']
 
-    # --- 3. Iterate & Unpack ---
+    # --- 5. Iterate & Unpack ---
     for _, row in parents.iterrows():
         legs_raw = row.get('legs')
         legs_data = []
@@ -542,71 +560,90 @@ def build_lot_portfolio(
                     legs_data = ast.literal_eval(legs_raw)
                 except Exception:
                     continue
-
+        
         if not legs_data:
             continue
 
-        # Check Active Legs
+        # Check Active Legs (with Cross-Reference)
         tp_price = None
+        tp_id = None
         sl_price = None
+        sl_id = None
         has_active_legs = False
         
         for leg in legs_data:
-            l_status = str(leg.get('status')).lower()
+            leg_id = str(leg.get('id'))
+            
+            # 1. Get status from JSON (potentially stale)
+            json_status = str(leg.get('status')).lower()
+            
+            # 2. Look up ACTUAL status from the separate rows in DB (fresh)
+            # If not found in map, fallback to JSON status
+            real_status = str(status_map.get(leg_id, json_status)).lower()
+            
             l_type = str(leg.get('order_type') or leg.get('type')).lower()
             
-            if l_status in live_statuses:
+            # Check if the REAL status is live
+            if real_status in live_statuses:
                 has_active_legs = True
+                
+                # Extract details (Prices/IDs)
                 if l_type == 'limit':
                     tp_price = float(leg.get('limit_price') or 0.0)
+                    tp_id = leg_id
                 elif 'stop' in l_type:
                     sl_price = float(leg.get('stop_price') or 0.0)
                     if sl_price == 0.0:
                         sl_price = float(leg.get('limit_price') or 0.0)
+                    sl_id = leg_id
 
-        # --- 4. Build Row ---
+        # --- 6. Build Row ---
         if has_active_legs:
+            p_id = str(row.get('id'))
+            if 'order_id' in row and pd.notna(row['order_id']):
+                p_id = str(row.get('order_id'))
+
             symbol = str(row.get('symbol'))
             qty = float(row.get('filled_qty') or 0.0)
             
-            # PRICE A: Strategy (Real DB fill) -> Goes to 'Buy Price'
+            # Prices
             strategy_entry = float(row.get('filled_avg_price') or 0.0)
-            
-            # PRICE B: Broker Average (API) -> Goes to 'Avg Entry (API)'
             m_data = market_data.get(symbol.lower(), {})
             current_price = m_data.get("cur_px", 0.0)
             broker_avg = m_data.get("avg_entry", 0.0)
             
-            # Fallback if API is silent
             if broker_avg == 0.0:
                 broker_avg = strategy_entry
-
+            
             pos = {
-                "Parent ID": str(row.get('id')),
+                "Parent ID": p_id,
                 "Symbol": symbol,
                 "Buy Date": row.get('created_at'),
                 "Buy Qty": qty,
                 "Remaining Qty": qty,
                 
-                # --- PRICING SPLIT ---
-                "Buy Price": strategy_entry,      # STRATEGY (For TP Reach)
-                "Avg Entry (API)": broker_avg,    # BROKER (For P/L)
+                "Buy Price": strategy_entry,
+                "Avg Entry (API)": broker_avg,
                 
                 "Take_Profit_Price": tp_price,
                 "Stop_Loss_Price": sl_price,
+                "Take_Profit_ID": tp_id,
+                "Stop_Loss_ID": sl_id,
+                
                 "Source": "Simple",
                 "Current_Price": current_price,
             }
             active_lots.append(pos)
 
-    # --- 5. DataFrame & Calculations ---
+    # --- 7. DataFrame & Calculations ---
     df = pd.DataFrame(active_lots)
     
-    # Define Column Order (Legacy + New Avg Column)
     final_cols_ordered = [
         "Parent ID", "Symbol", "Buy Date", "Buy Qty", "Remaining Qty", 
-        "Buy Price", "Avg Entry (API)", # <--- Added here
-        "Take_Profit_Price", "Stop_Loss_Price", "Source", "Holding_Period", 
+        "Buy Price", "Avg Entry (API)", 
+        "Take_Profit_Price", "Stop_Loss_Price", 
+        "Take_Profit_ID", "Stop_Loss_ID", 
+        "Source", "Holding_Period", 
         "Current_Price", "Current Market Value", "Profit/Loss", 
         "TP_reach, %", "BrE"
     ]
@@ -614,37 +651,29 @@ def build_lot_portfolio(
     if df.empty:
         return pd.DataFrame(columns=final_cols_ordered)
 
-    # Dates & Holding
     df["Buy Date Obj"] = pd.to_datetime(df["Buy Date"], utc=True)
     now = pd.Timestamp.now(tz=df["Buy Date Obj"].dt.tz)
     df["Holding_Period"] = (now - df["Buy Date Obj"]).dt.days
     df["Buy Date"] = df["Buy Date Obj"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Financials
     df["Current_Price"] = df["Current_Price"].fillna(0.0)
     df["Current Market Value"] = df["Remaining Qty"] * df["Current_Price"]
     
-    # --- LOGIC SPLIT ---
-    
-    # 1. Profit/Loss -> Uses BROKER AVG (Matches Dashboard)
+    # Financials
     df["Profit/Loss"] = (df["Current_Price"] - df["Avg Entry (API)"]) * df["Remaining Qty"]
 
-    # 2. TP Reach -> Uses STRATEGY BUY PRICE (Matches Order Logic)
+    # Metrics
     diff_strategy = df["Current_Price"] - df["Buy Price"]
     tp_dist = df["Take_Profit_Price"] - df["Buy Price"]
     sl_dist = df["Buy Price"] - df["Stop_Loss_Price"]
-
     df["TP_reach, %"] = np.nan
     
-    # Case: Profit (Towards TP)
     mask_profit = (diff_strategy >= 0) & (tp_dist > 0)
     df.loc[mask_profit, "TP_reach, %"] = (diff_strategy / tp_dist * 100).round(2)
     
-    # Case: Loss (Towards SL)
     mask_loss = (diff_strategy < 0) & (sl_dist > 0)
     df.loc[mask_loss, "TP_reach, %"] = (diff_strategy / sl_dist * 100).round(2)
 
-    # 3. BrE -> Uses STRATEGY BUY PRICE
     df["BrE"] = df.apply(
         lambda r: 1
         if (
@@ -656,7 +685,6 @@ def build_lot_portfolio(
         axis=1,
     )
 
-    # Return ordered columns
     return (
         df[final_cols_ordered]
         .sort_values(["Symbol", "Buy Date"], ascending=[True, False])

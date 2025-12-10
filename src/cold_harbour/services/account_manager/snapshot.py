@@ -53,6 +53,8 @@ def _aggregate_lots(df: pd.DataFrame) -> pd.DataFrame:
         "Current_Price": "first",
         "Take_Profit_Price": "first",
         "Stop_Loss_Price": "first",
+        "Take_Profit_ID": "first",
+        "Stop_Loss_ID": "first",
         "Source": "first",
         "Avg Entry (API)": "first",
         "_avg_px_symbol": "first",
@@ -95,6 +97,13 @@ def _safe_float(value: Any) -> Optional[float]:
     if math.isnan(result):
         return None
     return result
+
+
+def _normalize_leg_id(value: Any) -> Optional[str]:
+    """Return str id or None for leg identifier fields."""
+    if value is None or pd.isna(value):
+        return None
+    return str(value)
 
 
 def _build_side_map(positions: list[Any]) -> Dict[str, str]:
@@ -166,6 +175,9 @@ def _build_live_row(
     )
     tp_sl_reach = _safe_float(entry.get("TP_reach, %"))
 
+    sl_child = _normalize_leg_id(entry.get("Stop_Loss_ID"))
+    tp_child = _normalize_leg_id(entry.get("Take_Profit_ID"))
+
     return {
         "parent_id": parent_id,
         "symbol": symbol,
@@ -174,9 +186,9 @@ def _build_live_row(
         "qty": qty,
         "avg_fill": avg_fill,
         "avg_px_symbol": avg_px_symbol,
-        "sl_child": None,
+        "sl_child": sl_child,
         "sl_px": sl_px,
-        "tp_child": None,
+        "tp_child": tp_child,
         "tp_px": tp_px,
         "mkt_px": mkt_px,
         "moved_flag": "—",
