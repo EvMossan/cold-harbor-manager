@@ -1,3 +1,26 @@
+Metadata-Version: 2.4
+Name: coldharbor_manager
+Version: 0.1.0
+Summary: Shared account management and dashboard services.
+Author: Cold Harbour Team
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: Flask
+Requires-Dist: SQLAlchemy
+Requires-Dist: alpaca-py
+Requires-Dist: alpaca-trade-api==3.2.0
+Requires-Dist: asyncpg
+Requires-Dist: gevent
+Requires-Dist: gunicorn
+Requires-Dist: nest_asyncio
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: pandas_market_calendars
+Requires-Dist: psycopg2-binary
+Requires-Dist: pyzmq
+Requires-Dist: requests
+Requires-Dist: watchdog
+
 # Cold Harbour: Real-Time Trading Analytics Dashboard
 
 **Cold Harbour** is a specialized high-frequency monitoring system designed for algorithmic traders. It serves as a unified "Control Tower" for Alpaca brokerage accounts, providing real-time visibility into positions, order flow, and equity performance that standard broker interfaces often lack.

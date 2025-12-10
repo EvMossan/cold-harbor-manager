@@ -1,0 +1,15 @@
+Flask
+SQLAlchemy
+alpaca-py
+alpaca-trade-api==3.2.0
+asyncpg
+gevent
+gunicorn
+nest_asyncio
+numpy
+pandas
+pandas_market_calendars
+psycopg2-binary
+pyzmq
+requests
+watchdog
