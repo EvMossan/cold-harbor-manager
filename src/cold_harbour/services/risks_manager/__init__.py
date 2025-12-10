@@ -1,3 +1,5 @@
-from .risks_manager import RiskManager
+from .risks_manager import BreakevenOrderManager
 
-__all__ = ["RiskManager"]
+RiskManager = BreakevenOrderManager
+
+__all__ = ["RiskManager", "BreakevenOrderManager"]

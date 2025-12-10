@@ -109,7 +109,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict
+from typing import Any, Coroutine, Dict
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -204,12 +204,23 @@ class BreakevenOrderManager:
 
         self.repo: AsyncAccountRepository | None = None
 
-    def close(self) -> None:
-        """Close both database connections."""
+    def close(self) -> None | Coroutine[Any, Any, None]:
+        """Close database handles and optionally await repo close.
+
+        If an event loop is running the coroutine is returned so callers can
+        await it.
+        """
         self.pg.close()
         self.pg_ts.close()
-        if self.repo:
+        if not self.repo:
+            return None
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
             asyncio.run(self.repo.close())
+        else:
+            return self.repo.close()
+        return None
 
     async def _fetch_portfolio_state(self) -> pd.DataFrame:
         """
@@ -224,7 +235,7 @@ class BreakevenOrderManager:
 
         try:
             orders = await load_orders_from_db(
-                self.repo, self.slug, days_back=10000
+                self.repo, self.slug
             )
         except Exception as exc:
             self.log.warning("DB load failed: %s", exc)
@@ -234,7 +245,7 @@ class BreakevenOrderManager:
             self.log.info("Loading orders from API (Fallback)...")
             try:
                 orders = await asyncio.to_thread(
-                    fetch_orders, self.api, days_back=10000
+                    fetch_orders, self.api
                 )
             except Exception as exc:
                 self.log.warning("API load failed: %s", exc)
@@ -793,6 +804,7 @@ class BreakevenOrderManager:
 
         rows = []
         pos_by_sym = positions.set_index("symbol")
+        snapshot_records: list[dict[str, Any]] = []
 
         for (sym, pid), m in meta.items():
 
@@ -804,21 +816,6 @@ class BreakevenOrderManager:
             if   pid in moved_parent_ids:   flag = "OK"
             elif pid in already_parent_ids: flag = "Already"
             else:                           flag = "—"
-
-            # ---- console ------------------------------------------------
-            self.log.info(
-                "%s | %-5s | %s | Qty %-5d | Avg %.4f | SL %6s | TP %6.4f | "
-                "Mkt %6s | %s",
-                pid[:8],
-                sym,
-                m['fill_ts'].isoformat(timespec="seconds"),
-                qty,
-                m['entry_px'],
-                f"{sl_px:.4f}" if sl_px is not None else "n/a ",
-                m['be_tp'],
-                f"{mkt_px:.4f}" if mkt_px is not None else "n/a ",
-                flag,
-            )
 
             # ---- DB payload ---------------------------------------------
             rows.append((
@@ -832,6 +829,23 @@ class BreakevenOrderManager:
                 mkt_px,
                 flag,
             ))
+            snapshot_records.append(
+                {
+                    "Parent": pid[:8],
+                    "Symbol": sym,
+                    "Filled at": m["fill_ts"].isoformat(
+                        timespec="seconds"
+                    ),
+                    "Qty": qty,
+                    "Avg": f"{m['entry_px']:.4f}",
+                    "SL": f"{sl_px:.4f}" if sl_px is not None else "n/a",
+                    "TP": f"{m['be_tp']:.4f}",
+                    "Mkt": (
+                        f"{mkt_px:.4f}" if mkt_px is not None else "n/a"
+                    ),
+                    "Flag": flag,
+                }
+            )
 
         if rows:
             with self.pg.cursor() as cur:
@@ -843,6 +857,11 @@ class BreakevenOrderManager:
                     rows,
                 )
             self.pg.commit()
+
+        if snapshot_records:
+            snapshot_frame = pd.DataFrame(snapshot_records)
+            snapshot_frame.index.name = "No."
+            self.log.info("\n%s", snapshot_frame.to_string())
 
     def _prune_old_snapshots(self, *, days: int = 30) -> None:
         """
@@ -1033,6 +1052,15 @@ class BreakevenOrderManager:
         self.log.info("— cycle complete —")
 
 
-    def run(self) -> None:
-        """Synchronous wrapper for the async Break-Even cycle."""
-        asyncio.run(self.run_async())
+    def run(self) -> None | Coroutine[Any, Any, None]:
+        """Blocking wrapper for ``run_async``.
+
+        When an existing loop is running this returns the coroutine for
+        awaiting.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.run_async())
+            return None
+        return self.run_async()
