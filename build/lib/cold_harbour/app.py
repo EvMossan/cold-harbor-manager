@@ -1,0 +1,37 @@
+from __future__ import annotations
+
+import asyncio
+import os
+from typing import Any, Dict
+
+from cold_harbour import create_app
+from cold_harbour.services.account_manager import AccountManager
+
+
+def run_web() -> None:
+    """Convenience dev runner for the Flask web app."""
+
+    app = create_app()
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "5000")),
+        debug=False,
+        threaded=True,
+    )
+
+
+def run_manager(cfg: Dict[str, Any]) -> AccountManager:
+    """Instantiate and return an AccountManager; caller controls lifecycle."""
+
+    manager = AccountManager(cfg)
+
+    async def _start() -> None:
+        await manager.init()
+        await manager.run()  # type: ignore[attr-defined]
+
+    # Kick off the async loop in a fire-and-forget manner for quick dev use
+    asyncio.get_event_loop().create_task(_start())
+    return manager
+
+
+__all__ = ["run_web", "run_manager"]

@@ -2,7 +2,6 @@ README.md
 pyproject.toml
 src/cold_harbour/__init__.py
 src/cold_harbour/app.py
-src/cold_harbour/debug_audit.py
 src/cold_harbour/manager_run.py
 src/cold_harbour/core/__init__.py
 src/cold_harbour/core/account_utils.py
@@ -36,6 +35,7 @@ src/cold_harbour/services/activity_ingester/runtime.py
 src/cold_harbour/services/activity_ingester/storage.py
 src/cold_harbour/services/activity_ingester/transform.py
 src/cold_harbour/services/activity_ingester/workers.py
+src/cold_harbour/services/risks_manager/risks_manager.py
 src/cold_harbour/web/__init__.py
 src/cold_harbour/web/routes.py
 src/coldharbor_manager/__init__.py
@@ -44,3 +44,5 @@ src/coldharbor_manager.egg-info/SOURCES.txt
 src/coldharbor_manager.egg-info/dependency_links.txt
 src/coldharbor_manager.egg-info/requires.txt
 src/coldharbor_manager.egg-info/top_level.txt
+src/coldharbor_manager/services/__init__.py
+src/coldharbor_manager/services/risks_manager.py
