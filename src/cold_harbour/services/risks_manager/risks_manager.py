@@ -105,188 +105,32 @@ Evgenii Mosikhin
 
 from __future__ import annotations
 
-import sys, time
+import asyncio
 from datetime import datetime, timezone, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict
 
-import pandas as pd
-import requests
-from alpaca_trade_api.rest import REST, TimeFrame, TimeFrameUnit
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import psycopg2
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import pandas as pd
+from alpaca_trade_api.rest import REST, TimeFrame, TimeFrameUnit
+import psycopg2
+
+from cold_harbour.services.account_manager.core_logic import (
+    account_analytics,
+)
+from cold_harbour.services.account_manager.loader import load_orders_from_db
+from cold_harbour.infrastructure.db import AsyncAccountRepository
+
+fetch_orders = account_analytics.fetch_orders
+build_lot_portfolio = account_analytics.build_lot_portfolio
 
 logging.basicConfig(
     level=logging.INFO,                       # raise to DEBUG for verboser output
     format="%(asctime)s │ %(levelname)5s │ %(message)s",
 )
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper 1: download orders for a symbol (parents + legs)
-# ─────────────────────────────────────────────────────────────────────────────
-def fetch_orders_for_symbols(
-    api_key: str,
-    secret_key: str,
-    base_url: str,
-    symbols: list[str] | str,
-    *,
-    after: str | None = None,
-    until: str | None = None,
-    limit: int = 500,
-    show_progress: bool = False,
-) -> pd.DataFrame:
-    """
-    Fetch every order (parents + legs) for the given `symbols`.
-
-    Notes
-    -----
-    - Uses the provided `base_url` to target either LIVE or PAPER:
-        e.g. "https://api.alpaca.markets" (live)
-             "https://paper-api.alpaca.markets" (paper)
-    - Flattens child legs and attaches `parent_id` so stop/TP rows can be
-      processed alongside their parents.
-
-    Parameters
-    ----------
-    api_key : str
-        Alpaca API key.
-    secret_key : str
-        Alpaca API secret.
-    base_url : str
-        Trading API base URL (live or paper).
-    symbols : list[str] | str
-        One ticker or a list (e.g., ["AAPL","MSFT"]). Passed as a comma-
-        separated string per the API spec.
-    after, until : str | None
-        Optional ISO-8601 bounds (inclusive/exclusive as per Alpaca API).
-    limit : int
-        Max rows per page (Alpaca cap = 500).
-    show_progress : bool
-        If True, prints a crude progress counter.
-
-    Returns
-    -------
-    pd.DataFrame
-        Orders (parents and legs) with basic numeric/datetime coercion applied.
-
-    Raises
-    ------
-    requests.HTTPError
-        If the HTTP request fails.
-    RuntimeError
-        If the API returns 200 but no rows were found.
-    """
-    # ---- 0) Prepare ----------------------------------------------------
-    if isinstance(symbols, (list, tuple, set)):
-        symbols = ",".join(symbols)
-
-    base = (base_url or "https://api.alpaca.markets").rstrip("/")
-    url = f"{base}/v2/orders"
-
-    headers = {
-        "accept": "application/json",
-        "APCA-API-KEY-ID": api_key,
-        "APCA-API-SECRET-KEY": secret_key,
-    }
-    params: dict[str, Any] = {
-        "status": "all",
-        "nested": True,
-        "limit": limit,
-        "direction": "asc",
-        "symbols": symbols,
-    }
-    if after:
-        params["after"] = after
-    if until:
-        params["until"] = until
-
-    # ---- 1) Paginate ---------------------------------------------------
-    all_rows: list[dict] = []
-    page_token: str | None = None
-    page = 0
-
-    while True:
-        if page_token:
-            params["page_token"] = page_token
-        elif "page_token" in params:
-            del params["page_token"]
-
-        rsp = requests.get(url, headers=headers, params=params, timeout=30)
-        rsp.raise_for_status()
-        chunk: list[dict] = rsp.json()
-
-        if show_progress:
-            page += 1
-            sys.stdout.write(
-                f"\rpage {page:<3}  rows {len(chunk):<4}  total {len(all_rows)+len(chunk):<6}"
-            )
-            sys.stdout.flush()
-
-        if not chunk:
-            break
-
-        # Unfold legs and attach parent_id to children.
-        for order in chunk:
-            all_rows.append(order)
-            for leg in order.get("legs") or []:
-                leg["parent_id"] = order.get("id")
-                all_rows.append(leg)
-
-        page_token = rsp.headers.get("cb-after")
-        if not page_token:
-            break
-
-    if show_progress:
-        print()
-
-    # ---- 2) DataFrame + clean-up --------------------------------------
-    df = pd.DataFrame(all_rows)
-    if df.empty:
-        raise RuntimeError(
-            "fetch_orders_for_symbols() returned no rows – check credentials, "
-            "base_url, or symbol list."
-        )
-
-    # Coerce numerics if present
-    num_cols = ["filled_qty", "filled_avg_price", "limit_price", "stop_price", "qty"]
-    for col in num_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Coerce datetimes if present
-    dt_cols = ["created_at", "submitted_at", "filled_at", "updated_at", "expires_at"]
-    for col in dt_cols:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], utc=True, errors="coerce")
-
-    # Ensure 'side' exists as string column
-    if "side" in df.columns:
-        df["side"] = df["side"].fillna("").astype(str)
-    else:
-        df["side"] = ""
-
-    return df.reset_index(drop=True)
-
-
-def extract_stop_loss_legs(df: pd.DataFrame) -> pd.DataFrame:
-    """Return rows representing stop-loss children of bracket orders."""
-    order_types = {"stop", "stop_limit"}
-    mask_parent = df["parent_id"].notna()
-    mask_kind = (
-        df["order_type"].str.lower().isin(order_types)
-        | df["type"].str.lower().isin(order_types)
-    )
-    return df[mask_parent & mask_kind].copy()
-
-
-def extract_take_profit_legs(df: pd.DataFrame) -> pd.DataFrame:
-    """Return rows representing take-profit (limit) children of bracket orders."""
-    mask_parent = df["parent_id"].notna()
-    mask_kind = (df["order_type"].str.lower() == "limit") | (df["type"].str.lower() == "limit")
-    return df[mask_parent & mask_kind].copy()
-
 
 def prev_30m_bar(ts: datetime) -> datetime:
     """
@@ -342,62 +186,74 @@ class BreakevenOrderManager:
         self.api = REST(cfg["API_KEY"], cfg["SECRET_KEY"], cfg["ALPACA_BASE_URL"])
 
         # Databases
-        self.pg       = psycopg2.connect(cfg["CONN_STRING_POSTGRESQL"])  # logs
-        self.pg_ts    = psycopg2.connect(cfg["CONN_STRING_TIMESCALE"])   # bars
-        self.pg.autocommit    = True          # ← ensures each INSERT is durable
+        self.pg = psycopg2.connect(cfg["CONN_STRING_POSTGRESQL"])  # logs
+        self.pg_ts = psycopg2.connect(cfg["CONN_STRING_TIMESCALE"])  # bars
+        self.pg.autocommit = True
         self.pg_ts.autocommit = True
 
-        # data caches refreshed every run
+        # data cache refreshed every run
         self.orders_df: pd.DataFrame = pd.DataFrame()
-        self.stop_loss_df: pd.DataFrame = pd.DataFrame()
-        self.take_profit_df: pd.DataFrame = pd.DataFrame()
 
-        self.log = logging.getLogger("BE_Manager")   # per-instance handle
+        self.log = logging.getLogger("BE_Manager")
         self.log.info("⇢ OrderManager initialised")
+
+        self.slug = cfg.get("ACCOUNT_SLUG", "default")
+        self.dry_run = cfg.get("DRY_RUN", False)
+        if self.dry_run:
+            self.log.warning("⚠️ DRY RUN MODE. No orders will be sent.")
+
+        self.repo: AsyncAccountRepository | None = None
 
     def close(self) -> None:
         """Close both database connections."""
         self.pg.close()
         self.pg_ts.close()
+        if self.repo:
+            asyncio.run(self.repo.close())
 
-    # ------------------------------------------------------------------
-    # 1. Orders universe  (FULL refresh – always stateless)
-    # ------------------------------------------------------------------
-    def refresh_leg_views(self) -> None:
-        self.stop_loss_df   = extract_stop_loss_legs(self.orders_df)
-        self.take_profit_df = extract_take_profit_legs(self.orders_df)
-        self.log.info(
-            "• stop-loss legs: %d  • take-profit legs: %d",
-            len(self.stop_loss_df), len(self.take_profit_df),
-        )
-
-    def find_parents_for_symbol(self, symbol: str) -> set[str]:
+    async def _fetch_portfolio_state(self) -> pd.DataFrame:
         """
-        Return IDs of still-open **filled** bracket parents for <symbol>.
+        Load orders (DB → fallback API) and build the lot portfolio.
+
+        Returns the DataFrame with every active lot.
         """
-        # ➊ open stop-loss leg
-        df = self.stop_loss_df
-        live_sl = df[
-            (df["symbol"] == symbol)
-        & df["status"].str.lower().isin({"new", "held"})
-        ]
+        if not self.repo:
+            self.repo = await AsyncAccountRepository.create(
+                self.cfg["CONN_STRING_POSTGRESQL"]
+            )
 
-        if live_sl.empty:
-            return set()
+        try:
+            orders = await load_orders_from_db(
+                self.repo, self.slug, days_back=10000
+            )
+        except Exception as exc:
+            self.log.warning("DB load failed: %s", exc)
+            orders = pd.DataFrame()
 
-        # ➋ the parent row must tell us it got a fill
-        filled_parents = {
-            pid for pid in live_sl["parent_id"]
-            if (self.orders_df.loc[self.orders_df["id"] == pid, "filled_qty"]
-                    .astype(float)               # NaN → float('nan')
-                    .fillna(0)                   # NaN → 0
-                    .iloc[0] > 0)                # keep only qty > 0
-        }
-        return filled_parents
-       
-    # ───────────────────────────────────────────────────────────────────
-    # 2. Market-data helpers
-    # ───────────────────────────────────────────────────────────────────    
+        if orders.empty:
+            self.log.info("Loading orders from API (Fallback)...")
+            try:
+                orders = await asyncio.to_thread(
+                    fetch_orders, self.api, days_back=10000
+                )
+            except Exception as exc:
+                self.log.warning("API load failed: %s", exc)
+                orders = pd.DataFrame()
+
+        if orders.empty:
+            return pd.DataFrame()
+
+        self.orders_df = orders
+
+        try:
+            portfolio = await asyncio.to_thread(
+                build_lot_portfolio, orders, api=self.api
+            )
+        except Exception as exc:
+            self.log.warning("Portfolio build failed: %s", exc)
+            return pd.DataFrame()
+
+        return portfolio
 
     def fetch_be_trigger_price(self, symbol: str, created_at: datetime) -> float | None:
         """
@@ -604,29 +460,6 @@ class BreakevenOrderManager:
     # ───────────────────────────────────────────────────────────────────
     # 3. Stop-loss replacement helpers
     # ───────────────────────────────────────────────────────────────────
-    def current_stop_info(self, parent_id: str) -> tuple[float, str] | tuple[None, None]:
-        """
-        Locate the active stop-loss child for *parent_id*.
-
-        Returns
-        -------
-        (stop_price, child_id)  – if found and still open
-        (None, None)            – if not found / already cancelled
-        """
-        df = self.stop_loss_df
-        live = df[
-            (df["parent_id"] == parent_id)
-            & ~df["status"].str.lower().isin(
-                ["canceled", "filled", "expired", "replaced"]
-            )
-        ]
-        if live.empty:
-            return None, None
-
-        # pick the most recently updated leg
-        row = live.sort_values("updated_at").iloc[-1]
-        return float(row["stop_price"]), str(row["id"])
-
     # ------------------------------------------------------------------
     def replace_stop_loss(self, child_id: str, new_px_raw: float, symbol: str) -> bool:
         """
@@ -638,8 +471,17 @@ class BreakevenOrderManager:
         """
         new_px = round_price(new_px_raw)
 
+        if self.dry_run:
+            self.log.info(
+                "[DRY RUN] Would PATCH %s %s → %.4f",
+                symbol,
+                child_id,
+                new_px,
+            )
+            return True
+
         # find the leg row so we know which style it is
-        leg = self.stop_loss_df[self.stop_loss_df["id"] == child_id]
+        leg = self.orders_df[self.orders_df["id"] == child_id]
         if leg.empty:
             self.log.error("replace_stop_loss: child_id %s not found in cache", child_id)
             return False
@@ -788,6 +630,16 @@ class BreakevenOrderManager:
         Emit a DEBUG/INFO line only – no database insert.
         (We now persist snapshots elsewhere.)
         """
+        if self.dry_run:
+            dry_parts = [action, symbol, position_id]
+            if old is not None and new is not None:
+                dry_parts.append(f"old={old:.2f}")
+                dry_parts.append(f"new={new:.2f}")
+            if note:
+                dry_parts.append(note)
+            self.log.info("[DRY RUN EVENT] %s", " ".join(dry_parts))
+            return
+
         # ── human-readable line ──────────────────────────────────────────
         parts = [action, symbol]
         if old is not None and new is not None:
@@ -798,78 +650,93 @@ class BreakevenOrderManager:
         msg = "  ".join(parts)
         (self.log.info if action == "STOP_MOVED" else self.log.debug)(msg)
 
-    # ------------------------------------------------------------------ helpers (private) ──
-    def _get_live_positions(self) -> pd.DataFrame:
-        """Return live positions as a DataFrame; abort early if none."""
-        pos = pd.DataFrame([p._raw for p in self.api.list_positions()])
-        self.log.info("Live positions: %d", len(pos))
-        return pos
-
-    def _load_order_universe(self, symbols: list[str]) -> None:
-        """Refresh self.orders_df and the stop-loss / TP views."""
-        self.orders_df = fetch_orders_for_symbols(
-            api_key  = self.cfg["API_KEY"],
-            secret_key = self.cfg["SECRET_KEY"],
-            base_url=self.cfg["ALPACA_BASE_URL"],
-            symbols = symbols,
-            after   = "2025-07-01T00:00:00Z",
-            until   = datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            limit   = 500,
-            show_progress = False,
-        )
-        self.log.info("• %d relevant order rows fetched", len(self.orders_df))
-        self.refresh_leg_views()
-
-    def _build_meta(self, positions: pd.DataFrame) -> dict[tuple[str, str], dict]:
+    def _build_meta(self, portfolio_df: pd.DataFrame) -> dict[tuple[str, str], dict]:
         """
-        For **every** live *(symbol, parent_id)* pair collect:
-
-            • parent_id        • entry_px
-            • fill_ts (UTC)    • BE-trigger price
-
-        Returns
-        -------
-        meta[(sym, pid)] = {...}
+        Adapt the portfolio view into the classic (symbol,parent) meta map.
         """
         meta: dict[tuple[str, str], dict] = {}
+        if portfolio_df.empty:
+            return meta
 
-        for _, pos in positions.iterrows():
-            sym   = pos["symbol"]
-            pids  = self.find_parents_for_symbol(sym)      # ← now a *set*
-            if not pids:
-                self.log_event("NO_PARENT_ORDER", sym, "n/a")
+        active = portfolio_df[
+            (portfolio_df["Stop_Loss_ID"].notna())
+            & (portfolio_df["Remaining Qty"] > 0)
+        ]
+        unsafe = portfolio_df[
+            portfolio_df["Stop_Loss_ID"].isna()
+            & (portfolio_df["Remaining Qty"] > 0)
+        ]
+
+        for _, row in unsafe.iterrows():
+            self.log.warning(
+                "⚠️ NO STOP LOSS: %s (Parent: %s)",
+                row["Symbol"],
+                row["Parent ID"],
+            )
+
+        order_index = (
+            self.orders_df.set_index("id") if "id" in self.orders_df else None
+        )
+
+        for _, row in active.iterrows():
+            sym = row["Symbol"]
+            parent_val = row["Parent ID"]
+            if pd.isna(parent_val):
+                continue
+            pid = str(parent_val)
+
+            fill_dt = pd.to_datetime(row["Buy Date"], utc=True, errors="coerce")
+            if pd.isna(fill_dt):
+                self.log.warning(
+                    "⚠️ INVALID BUY DATE: %s (Parent: %s)", sym, pid
+                )
                 continue
 
-            for pid in pids:
-                p_row = self.orders_df[self.orders_df["id"] == pid]
-                if p_row.empty:
-                    self.log_event("PARENT_NOT_IN_DF", sym, pid)
-                    continue
+            fill_ts = fill_dt.to_pydatetime()
+            if fill_ts.tzinfo is None:
+                fill_ts = fill_ts.replace(tzinfo=timezone.utc)
 
-                p_row = p_row.iloc[0]
+            be_tp = self.fetch_be_trigger_price(sym, fill_ts)
+            if be_tp is None:
+                self.log_event("NO_TRIGGER_ROW", sym, pid)
+                continue
 
-                # --- guard: parent must be FILLED (qty>0) and have a real timestamp ----------
-                qty  = p_row["filled_qty"]
-                ts   = p_row["filled_at"]
+            entry_px = float(row["Buy Price"])
+            remaining_qty = float(row["Remaining Qty"])
 
-                filled_ok = (not pd.isna(qty)) and (float(qty) > 0)
-                time_ok   = not pd.isna(ts)
+            order_row = None
+            if order_index is not None and pid in order_index.index:
+                order_row = order_index.loc[pid]
+                if isinstance(order_row, pd.DataFrame):
+                    order_row = order_row.iloc[0]
 
-                if not (filled_ok and time_ok):
-                    self.log_event("SKIP_EMPTY_PARENT", sym, pid)
-                    continue
+            raw_side = ""
+            if order_row is not None:
+                raw_side = str(order_row.get("side", "") or "").lower()
 
-                be_tp = self.fetch_be_trigger_price(sym, p_row["created_at"])
-                if be_tp is None:
-                    self.log_event("NO_TRIGGER_ROW", sym, pid)
-                    continue
+            if raw_side == "buy":
+                side = "long"
+            elif raw_side == "sell":
+                side = "short"
+            elif raw_side in {"long", "short"}:
+                side = raw_side
+            else:
+                side = "long"
 
-                meta[(sym, pid)] = dict(
-                    parent_id = pid,
-                    fill_ts   = p_row["filled_at"] or p_row["submitted_at"],
-                    be_tp     = be_tp,
-                    entry_px  = float(p_row["filled_avg_price"]),
-                )
+            current_sl = row["Stop_Loss_Price"]
+            current_sl = float(current_sl) if pd.notna(current_sl) else 0.0
+            sl_child_id = str(row["Stop_Loss_ID"])
+
+            meta[(sym, pid)] = {
+                "parent_id": pid,
+                "fill_ts": fill_ts,
+                "be_tp": be_tp,
+                "entry_px": entry_px,
+                "current_sl": current_sl,
+                "sl_child_id": sl_child_id,
+                "side": side,
+                "remaining_qty": remaining_qty,
+            }
 
         return meta
     
@@ -930,10 +797,8 @@ class BreakevenOrderManager:
         for (sym, pid), m in meta.items():
 
             # ---- parent-specific details -----------------------------
-            p_row = self.orders_df[self.orders_df["id"] == pid]
-            qty   = int(p_row.iloc[0]["filled_qty"]) if not p_row.empty else 0
-
-            sl_px, _ = self.current_stop_info(pid)
+            qty = int(m.get("remaining_qty", 0))
+            sl_px = m["current_sl"]
             mkt_px   = last_px.get(sym)
 
             if   pid in moved_parent_ids:   flag = "OK"
@@ -1015,12 +880,9 @@ class BreakevenOrderManager:
         """
         pid      = meta["parent_id"]
         entry_px = meta["entry_px"]
-        is_long  = pos_side.lower() == "long"
-
-        old_stop, child = self.current_stop_info(pid)
-        if old_stop is None:
-            self.log_event("NO_STOP_CHILD", sym, pid)
-            return None, "noop"
+        is_long = pos_side.lower() == "long"
+        old_stop = meta["current_sl"]
+        child = meta["sl_child_id"]
 
         legal_be = self._tightest_legal_stop(entry_px, is_long)
         if abs(old_stop - legal_be) < 1e-9:
@@ -1101,39 +963,37 @@ class BreakevenOrderManager:
     # ───────────────────────────────────────────────────────────────
     #  orchestrator
     # ───────────────────────────────────────────────────────────────
-    def run(self) -> None:
+    async def run_async(self) -> None:
         """
-        One full break-even cycle.
-
-        Now fully parent-aware:
-            • extrema are fetched *once per SYMBOL* (earliest fill_ts wins)
-            • summary counters reflect #parents, not #symbols
+        Execute one break-even cycle (async entry point).
         """
         self.log.info("— Break-Even manager cycle start —")
 
-        # 0) live positions -------------------------------------------------
-        positions = self._get_live_positions()
-        if positions.empty:
+        portfolio = await self._fetch_portfolio_state()
+        if portfolio.empty:
+            self.log.info("No active positions found.")
             return
 
-        # 1) orders universe  ----------------------------------------------
-        self._load_order_universe(positions["symbol"].tolist())
-
-        # 2) meta  (one entry per (symbol,parent_id)) ----------------------
-        meta = self._build_meta(positions)
+        meta = self._build_meta(portfolio)
         if not meta:
-            
-            self.log.info("No valid brackets with open stops – aborting cycle")
+            self.log.info("No valid brackets to manage.")
             return
-        
+
         parents_total = len(meta)
-        # ---------- ✱ NEW ✱  earliest fill per SYMBOL ---------------------
         since_by_sym: dict[str, datetime] = {}
-        for (sym, _pid), m in meta.items():
+        side_by_sym: dict[str, str] = {}
+        for (sym, _), m in meta.items():
             since_by_sym.setdefault(sym, m["fill_ts"])
             since_by_sym[sym] = min(since_by_sym[sym], m["fill_ts"])
+            side_by_sym.setdefault(sym, m["side"])
 
-        # 3) price extrema (symbol → {max_high,min_low}) -------------------
+        positions = pd.DataFrame(
+            {
+                "symbol": list(side_by_sym),
+                "side": list(side_by_sym.values()),
+            }
+        )
+
         extrema = (
             self._fetch_price_extrema_parallel(
                 symbols=list(since_by_sym),
@@ -1144,13 +1004,11 @@ class BreakevenOrderManager:
             .to_dict("index")
         )
 
-        # 4) last-trade prices (symbol → px) -------------------------------
         last_px = self._fetch_last_trade_prices_parallel(
             symbols=list(since_by_sym),
             max_workers=self.cfg.get("MAX_WORKERS"),
         )
 
-        # 5) decide & queue PATCHes ----------------------------------------
         jobs, already_pids = self._collect_patch_jobs(
             positions, meta, extrema, last_px
         )
@@ -1158,7 +1016,6 @@ class BreakevenOrderManager:
             jobs, max_workers=self.cfg.get("MAX_WORKERS", 10)
         )
 
-        # 6) snapshot & logging --------------------------------------------
         self._log_position_snapshot(
             positions, meta, last_px, moved_pids, already_pids
         )
@@ -1166,9 +1023,16 @@ class BreakevenOrderManager:
         self.log.info(
             "Cycle finished – %d parents moved, %d already @BE, "
             "%d parents reviewed across %d positions",
-            len(moved_pids), len(already_pids), parents_total, len(positions),
+            len(moved_pids),
+            len(already_pids),
+            parents_total,
+            len(positions),
         )
 
-        # 7) housekeeping ---------------------------------------------------
         self._prune_old_snapshots(days=30)
         self.log.info("— cycle complete —")
+
+
+    def run(self) -> None:
+        """Synchronous wrapper for the async Break-Even cycle."""
+        asyncio.run(self.run_async())
