@@ -1,3 +1,12 @@
+Metadata-Version: 2.4
+Name: coldharbour-manager
+Version: 0.1.0
+Summary: Management and dashboard modules for the Cold Harbour stack
+Author-email: Cold Harbour <info@coldharbour.local>
+Project-URL: Homepage, https://github.com/tradingbot/cold_harbour_web
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+
 # Cold Harbour: Real-Time Trading Analytics Dashboard
 
 **Cold Harbour** is a specialized high-frequency monitoring system designed for algorithmic traders. It serves as a unified "Control Tower" for Alpaca brokerage accounts, providing real-time visibility into positions, order flow, and equity performance that standard broker interfaces often lack.

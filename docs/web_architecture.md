@@ -1,6 +1,6 @@
 # Web Layer Architecture
 
-The Flask UI lives under `src/cold_harbour/web/routes.py` and builds a
+The Flask UI lives under `src/coldharbour_manager/web/routes.py` and builds a
 per-destination blueprint via `_make_blueprint_for_dest`. Each entry in
 `core.destinations.DESTINATIONS` gets a slugified prefix (e.g.
 `/demo/`) so the same `account_positions.html` template can be rendered for

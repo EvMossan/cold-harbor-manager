@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coldharbour-manager"
+version = "0.1.0"
+description = "Management and dashboard modules for the Cold Harbour stack"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Cold Harbour", email = "info@coldharbour.local" }]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/tradingbot/cold_harbour_web"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["coldharbour_manager*", "cold_harbour_manager*"]

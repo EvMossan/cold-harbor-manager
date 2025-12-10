@@ -1,6 +1,6 @@
 # Core Analytics Reference
 
-The `src/cold_harbour/core` package holds the financial logic that powers
+The `src/coldharbour_manager/core` package holds the financial logic that powers
 both the manager and the dashboard summaries. `account_analytics.py` reads
 fills/orders, matches trades, and enriches every position, while
 `equity.py` replays cash flows into a Sharpe/drawdown-aware curve.
@@ -61,7 +61,7 @@ mid-flight.
 
 ## Equity & metrics
 
-`src/cold_harbour/core/equity.py` rebuilds the raw equity curve by
+`src/coldharbour_manager/core/equity.py` rebuilds the raw equity curve by
 aggregating realized/unrealized PnL, aligning cash flows, and computing
 Sharpe/drawdown statistics.
 
@@ -86,7 +86,7 @@ Sharpe/drawdown statistics.
 
 ## Analytics vs. Reporting Utils
 
-`src/cold_harbour/core/account_analytics.py` (notably `build_lot_portfolio`)
+`src/coldharbour_manager/core/account_analytics.py` (notably `build_lot_portfolio`)
 is treated as part of the **Account Manager**’s control loop. The manager
 calls it to reconcile fills/orders, maintain lot-level open positions,
 trace parent/child chains, and keep the live state aligned with Alpaca’s
@@ -95,7 +95,7 @@ logic runs, so the portfolio it builds lands in `accounts.open_trades_*`
 and `closed_trades_*` tables.
 
 In contrast, the Web layer uses helpers from
-`src/cold_harbour/core/account_utils.py`, especially `calculate_trade_metrics`,
+`src/coldharbour_manager/core/account_utils.py`, especially `calculate_trade_metrics`,
 to summarize the already-settled trades exposed by the manager. Those
 helpers resolve the schema returned by `account_table_names` into
 flattened DataFrames, collapse slice-level exits, and calculate the final

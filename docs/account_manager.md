@@ -13,7 +13,7 @@ The service operates as an autonomous async agent that:
 
 ## Architecture
 
-The system is built around the `AccountManager` class (`src/cold_harbour/services/account_manager/runtime.py`), which orchestrates several specialized background workers.
+The system is built around the `AccountManager` class (`src/coldharbour_manager/services/account_manager/runtime.py`), which orchestrates several specialized background workers.
 
 ### Core Components
 
@@ -130,11 +130,11 @@ The service uses PostgreSQL `NOTIFY` to broadcast changes.
 ## Development
 
 ### Running the Manager
-The manager is typically run via the `manager_run.py` script, which can handle multiple accounts defined in `cold_harbour.destinations`.
+The manager is typically run via the `manager_run.py` script, which can handle multiple accounts defined in `coldharbour_manager.destinations`.
 
 ```bash
 # Example run command
-python -m cold_harbour.manager_run
+python -m coldharbour_manager.manager_run
 ```
 
 ### Extending

@@ -39,4 +39,4 @@ if [ "${WEB_RELOAD:-0}" = "1" ]; then
   RELOAD_FLAG="--reload"
 fi
 
-exec gunicorn ${RELOAD_FLAG} -k gevent -w 1 -b "0.0.0.0:${PORT:-5000}" "cold_harbour:create_app()"
+exec gunicorn ${RELOAD_FLAG} -k gevent -w 1 -b "0.0.0.0:${PORT:-5000}" "coldharbour_manager:create_app()"

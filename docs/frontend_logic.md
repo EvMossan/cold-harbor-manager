@@ -1,7 +1,7 @@
 # Frontend Logic (`account_positions.html`)
 
 This document explains the JavaScript powering
-`src/cold_harbour/web/templates/account_positions.html`, which wraps a
+`src/coldharbour_manager/web/templates/account_positions.html`, which wraps a
 dashboard in a single-page interaction surface.
 
 ## State management (pfHeader)

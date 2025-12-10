@@ -1,22 +1,22 @@
-name: cold_harbour_dashboard
+name: coldharbour_manager_dashboard
 
 services:
   manager:
     build:
       context: .
-    image: cold_harbour/manager:dev
+    image: coldharbour_manager/manager:dev
     container_name: manager
     working_dir: /app
     entrypoint:
       - watchmedo
       - auto-restart
-      - "--directory=/app/src/cold_harbour/services/account_manager"
+      - "--directory=/app/src/coldharbour_manager/services/account_manager"
       - "--pattern=*.py"
       - "--recursive"
       - --
       - python
       - -m
-      - cold_harbour.manager_run
+      - coldharbour_manager.manager_run
     env_file: .env
     volumes:
       - ./src:/app/src
@@ -25,7 +25,7 @@ services:
   web:
     build:
       context: .
-    image: cold_harbour/web:dev
+    image: coldharbour_manager/web:dev
     container_name: web
     working_dir: /app
     env_file: .env
@@ -40,22 +40,19 @@ services:
   ingester:
     build:
       context: .
-    image: cold_harbour/ingester:dev
+    image: coldharbour_manager/ingester:dev
     container_name: ingester
     working_dir: /app
-    
-    # We use watchmedo to monitor changes in /app/src and restart the process
     entrypoint:
       - watchmedo
       - auto-restart
-      - "--directory=/app/src/cold_harbour/services/activity_ingester"
+      - "--directory=/app/src/coldharbour_manager/services/activity_ingester"
       - "--pattern=*.py"
       - "--recursive"
       - --
       - python
       - -m
-      - cold_harbour.services.activity_ingester.ingester_run
-      
+      - coldharbour_manager.services.activity_ingester.ingester_run
     env_file: .env
     volumes:
       - ./src:/app/src
@@ -68,3 +65,51 @@ services:
         reservations:
           cpus: '0.10'
           memory: 128M
+
+  postgres-airflow-mgr:
+    image: postgres:18
+    container_name: airflow_manager_db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-mgr-data:/var/lib/postgresql
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  airflow-ch-mgr:
+    image: apache/airflow:3.1.4
+    container_name: airflow
+    restart: unless-stopped
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./airflow.cfg:/opt/airflow/airflow.cfg
+      - ./dags:/opt/airflow/dags
+      - ./airflow_simple_auth_passwords.json:/opt/airflow/simple_auth_manager_passwords.json
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres-airflow-mgr/airflow
+      - AIRFLOW__API_AUTH__JWT_SECRET=change-me-please-32chars-min
+      - AIRFLOW__API__SECRET_KEY=change-me-please-32chars-min
+      - AIRFLOW__API__HOST=0.0.0.0
+      - AIRFLOW__API__PORT=8080
+      - AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS=admin:admin
+      - AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE=/opt/airflow/simple_auth_manager_passwords.json
+    depends_on:
+      postgres-airflow-mgr:
+        condition: service_healthy
+    command: >
+      bash -c "airflow db migrate &&
+      airflow api-server & airflow scheduler"
+
+volumes:
+  airflow-mgr-data:

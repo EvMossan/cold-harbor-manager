@@ -22,7 +22,7 @@ data is captured even if the Account Manager restarts or crashes.
 ## Architecture
 
 The system is orchestrated by the `IngesterService`
-(`src/cold_harbour/services/activity_ingester/runtime.py`), which manages a
+(`src/coldharbour_manager/services/activity_ingester/runtime.py`), which manages a
 set of workers for each account defined in `DESTINATIONS`.
 
 ### Core Components
@@ -104,7 +104,7 @@ stream events so the ingester can insert data immediately and later
 overlap the REST payloads without duplicates:
 - Format: `YYYYMMDDHHMMSSmmm::execution_id`
 - Timezone: `America/New_York`, the same zone Alpaca uses for its internal
-  identifiers (see `src/cold_harbour/services/activity_ingester/transform.py`).
+  identifiers (see `src/coldharbour_manager/services/activity_ingester/transform.py`).
 
 This allows the Ingester to insert data from the Stream immediately, and
 later safely "overlap" it with data fetched by the Healing worker without
@@ -131,7 +131,7 @@ The service is typically run via Docker Compose or the module entrypoint.
 
 ```bash
 # Run standalone
-python -m cold_harbour.services.activity_ingester.ingester_run
+python -m coldharbour_manager.services.activity_ingester.ingester_run
 ```
 It reuses the same `POSTGRESQL_LIVE_CONN_STRING` and `DESTINATIONS`
 configuration as the Account Manager.

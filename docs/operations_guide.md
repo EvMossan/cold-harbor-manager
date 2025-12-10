@@ -5,7 +5,7 @@ new destinations or managing the runtime infrastructure.
 
 ## Adding a new destination
 
-1. Copy one of the dictionaries in `src/cold_harbour/core/destinations.py`
+1. Copy one of the dictionaries in `src/coldharbour_manager/core/destinations.py`
    and update fields:
    - `name`: the human-friendly identifier shown in UI tabs.
    - `base_url`, `key_id`, `secret_key`: point at the Alpaca endpoints for
@@ -49,7 +49,7 @@ new destinations or managing the runtime infrastructure.
 
 ## Database management
 
-`src/cold_harbour/infrastructure/db.py` contains the async helpers used by
+`src/coldharbour_manager/infrastructure/db.py` contains the async helpers used by
 magagers to fetch/exec statements. `AsyncAccountRepository.create` accepts
 both SQLAlchemy URLs (e.g. `postgresql+psycopg2://...`) and libpq DSNs
 (`host=… user=…`). Helpers `_url_from_sqlalchemy` and `_url_from_libpq`
@@ -65,6 +65,6 @@ inside Cloud Run or Docker containers.
 ## Troubleshooting & Auditing
 
 Included is a CLI tool for deep diagnostics:
-`python -m cold_harbour.debug_audit`. It reconciles the Broker API state
+`python -m coldharbour_manager.debug_audit`. It reconciles the Broker API state
 against the Local DB Ledger and Intraday logic to identify "Ghost Fees",
 missing dividends, or price sync drifts.
