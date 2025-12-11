@@ -47,14 +47,13 @@ import os
 from datetime import datetime, timedelta
 # from zoneinfo import ZoneInfo
 # from typing import Any, Dict, List
-# from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP
 # import pandas as pd
 from alpaca_trade_api.rest import REST, TimeFrame, TimeFrameUnit
 # from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from airflow import DAG
-from airflow.operators.python import PythonOperator
-
+from airflow.providers.standard.operators.python import PythonOperator
 from coldharbour_manager.services.risks_manager import BreakevenOrderManager
 
 
@@ -135,11 +134,11 @@ default_args = {
 schedule_cron = "*/1 9-16 * * 1-5"
 
 with DAG(
-    dag_id="Order_Manager_StopLoss_to_Breakeven_LIVE",
+    dag_id="Risk_Manager_Live",
     description="Break-Even stop-loss adjustment cycle",
     default_args=default_args,
     start_date=datetime(2025, 7, 14),
-    schedule_interval=schedule_cron,
+    schedule=schedule_cron,
     catchup=False,
     tags=["StopLoss Manager", "Alpaca", "Breakeven"],
 ) as dag:

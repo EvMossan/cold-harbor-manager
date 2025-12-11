@@ -26,7 +26,8 @@ from flask import (
     render_template,
     request,
 )
-from sqlalchemy import URL, create_engine, text
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL
 
 from coldharbour_manager.core.date_utils import trading_session_date
 from coldharbour_manager.core.destinations import (

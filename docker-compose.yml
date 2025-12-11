@@ -85,16 +85,21 @@ services:
     restart: always
 
   airflow-ch-mgr:
-    image: apache/airflow:3.1.4
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
     container_name: airflow
     restart: unless-stopped
     ports:
       - "8082:8080"
+    env_file: .env
     volumes:
       - ./airflow.cfg:/opt/airflow/airflow.cfg
       - ./dags:/opt/airflow/dags
       - ./airflow_simple_auth_passwords.json:/opt/airflow/simple_auth_manager_passwords.json
+      - ./src:/opt/airflow/src
     environment:
+      - PYTHONPATH=/opt/airflow/src
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres-airflow-mgr/airflow
