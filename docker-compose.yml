@@ -109,7 +109,8 @@ services:
         condition: service_healthy
     command: >
       bash -c "airflow db migrate &&
-      airflow api-server & airflow scheduler"
+      airflow api-server & airflow scheduler & airflow dag-processor \
+      & airflow triggerer"
 
 volumes:
   airflow-mgr-data:
