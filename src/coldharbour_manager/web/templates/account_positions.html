@@ -790,6 +790,8 @@
 
     /* Build columns for Open Positions */
     const posColumns = [
+      { data:'symbol', name:'symbol', title:'Symbol', defaultContent:'' },
+
       { data:'moved_flag', name:'moved_flag', title:'BE&nbsp;?',
         className:'be-flag col-be-flag', defaultContent:'—',
         render: d => d === 'OK' ? '<span class="ok">✔︎</span>' : '—' },
@@ -797,8 +799,6 @@
       { data:'tp_sl_reach_pct', name:'tp_sl_reach_pct', title:'TP/SL&nbsp;%',
         defaultContent:0, className:'tp-reach col-tp-sl-pct', type:'num',
         render:(d,t)=> t==='display' ? num2.display(+d||0) : +d||0 },
-
-      { data:'symbol', name:'symbol', title:'Symbol', defaultContent:'' },
 
       { data:'profit_loss', name:'profit_loss', title:'P/L&nbsp;(FIFO)',
         className:'col-pl-wac dt-right', defaultContent:0,
