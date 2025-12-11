@@ -2,16 +2,11 @@
 
 ## Cloudflare tunnels
 
-`entrypoint.sh` (used by Docker, Cloud Run, and local launches) starts
-Cloudflare Access TCP tunnels before handing control to `gunicorn`. When
-`CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are present, it
-launches two background `cloudflared access tcp` commands that
-terminate on `localhost:15433` and `localhost:15434`. The `--hostname`
-flags default to `postgres.example.com` (Postgres) and
-`timescale.example.com` (Timescale), but can be overridden. The
-app then connects to the databases via `POSTGRESQL_LIVE_CONN_STRING` and
-`TIMESCALE_LIVE_CONN_STRING`, which point at the local tunnel ports so the
-databases stay hidden behind Cloudflare Access.
+`entrypoint.sh` (used by Docker, Cloud Run, and local launches) brings up
+Cloudflare Access TCP tunnels before handing control to `gunicorn`. It reads
+`CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET`, spawns `cloudflared access
+tcp` processes, and exposes the tunneled Postgres/Timescale ports locally.
+See `entrypoint.sh` for the exact CLI arguments.
 
 ## CI/CD flow
 
@@ -28,21 +23,9 @@ same secret names used in the codebase (`POSTGRESQL_LIVE_CONN_STRING`,
 `TIMESCALE_LIVE_CONN_STRING`, `CF_ACCESS_CLIENT_ID`,
 and `CF_ACCESS_CLIENT_SECRET`).
 
-## Critical environment variables
+## Configuration
 
-| Variable | Purpose |
-|----------|---------|
-| `CF_ACCESS_CLIENT_ID` | Cloudflare Access service token ID used by `entrypoint.sh`. |
-| `CF_ACCESS_CLIENT_SECRET` | Cloudflare Access service token secret. |
-| `POSTGRESQL_LIVE_CONN_STRING` | DSN (SQLAlchemy URL or libpq) for the live Postgres tunnel on port 15433. |
-| `TIMESCALE_LIVE_CONN_STRING` | DSN for Timescale (defaults to tunnel on port 15434). |
-| `WEB_RELOAD` | When `1`, `entrypoint.sh` passes `--reload` to `gunicorn` for local tweaks. |
-| `ALPACA_*` vars | Client/secret/base_url per destination managed through `core.destinations`. |
-| `ACCOUNT_SCHEMA` | Optional schema prefix used by both the manager and web layer. |
-
-Keeping these variables aligned in Secret Manager and `.env` ensures
-the tunnels, database connections, and runtime knobs remain synchronized
-between local Docker Compose and Cloud Run environments.
+For a complete list of environment variables and their purposes, please refer to the [Operations Guide](operations_guide.md#environment-variables).
 
 ## Airflow & Risk Orchestration
 

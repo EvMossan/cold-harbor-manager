@@ -120,20 +120,7 @@ Stores the latest calculated KPIs as a JSON document for the frontend.
 
 ## Configuration
 
-Configuration is managed via `_Config` in `config.py`. Key environment variables include:
-
-| Env Variable | Description | Default |
-|--------------|-------------|---------|
-| `API_KEY` | Alpaca API Key ID | (Required) |
-| `SECRET_KEY` | Alpaca Secret Key | (Required) |
-| `ALPACA_BASE_URL` | API Endpoint | `https://paper-api.alpaca.markets` |
-| `CONN_STRING_POSTGRESQL` | DB Connection String | (Required) |
-| `ZMQ_SIP_STREAM_ENDPOINT` | ZMQ Address for prices | `tcp://127.0.0.1:5558` |
-| `POS_CHANNEL` | Postgres NOTIFY channel for positions | `pos_channel` |
-| `ACCOUNT_LABEL` | Logical name for this account | Derived from config |
-| `POSTGRESQL_LIVE_LOCAL_CONN_STRING` | Direct Postgres DSN used by `manager_run.py` when bypassing Cloudflare tunnels in local/network-adjacent runs | (Optional; overrides the tunneled value) |
-| `UI_PUSH_PCT_THRESHOLD` | Minimum percentage swing before the UI push channel emits a refreshed row | `0.0` (push every update) |
-| `ENABLE_TRADE_STREAM` | Master toggle to enable/disable WebSocket connections for trade updates. | False |
+Configuration is managed via `_Config` in `config.py`. For the full list of environment variables, see the [Operations Guide](operations_guide.md#environment-variables).
 
 ## Runtime Behavior
 

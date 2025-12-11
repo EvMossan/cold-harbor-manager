@@ -29,20 +29,30 @@ handling is executed independently from the core strategy code.
 - **[System Architecture](#system-components)**
 - **Documentation:**
   - **Logic:** [Core Analytics](docs/core_analytics.md) | [Risk Manager](docs/risk_manager.md) | [Account Manager](docs/account_manager.md)
-  - **Infra:** [Data Flow & Schema](docs/data_flow_and_schema.md) | [Ingester](docs/ingester.md) | [Infrastructure](docs/infrastructure.md)
+  - **Infra:** [Ingester](docs/ingester.md) | [Infrastructure](docs/infrastructure.md)
   - **Web/Ops:** [Frontend Logic](docs/frontend_logic.md) | [Web Architecture](docs/web_architecture.md) | [Operations Guide](docs/operations_guide.md)
 - **[Getting Started](#getting-started)**
 - **[Deployment](#deployment)**
 
 ## Key Features
 
-### 🛡️ Active Risk Management (The "Guardian")
-*Powered by Apache Airflow*
+Tech Stack:
+
+| Domain | Technologies |
+|--------|--------------|
+| **Core & Async** | Python 3.12, `asyncio`, `asyncpg` (DB), ZeroMQ (Data Bus) |
+| **Web & API** | Flask, Server-Sent Events (SSE), Gunicorn (`gevent`), Jinja2 |
+| **Data Engineering** | PostgreSQL 16+, **TimescaleDB** (Time-Series), Pandas, NumPy |
+| **Orchestration** | **Apache Airflow** (DAGs, Scheduling), `supervisord` |
+| **Infrastructure** | Docker, Docker Compose, **Google Cloud Run**, Cloud Build |
+| **Networking** | **Cloudflare Access** (Zero Trust Tunnels), Alpaca API (Trading) |
+
+### 🛡️ Active Risk Management
 -   **Break-Even Engine:** Automatically trails Stop-Loss orders to the entry price once a position is "safe" (price > entry + trigger).
 -   **Smart Triggers:** Uses pre-calculated volatility targets (e.g., 30-min breakout levels) to arm the break-even logic, ensuring stops aren't moved prematurely during noise.
 -   **Session Orchestration:** An autonomous Supervisor manages the trading lifecycle, spinning up workers for Pre-Market (04:00 ET) and shutting down after Post-Market close to save resources.
 
-### 📊 Real-Time Analytics (The "Control Tower")
+### 📊 Real-Time Analytics
 -   **Hybrid Pricing Model:** Simultaneously tracks **Strategy Price** (technical execution basis) and **Broker WAC** (tax/accounting basis), preventing P&L drift in decision-making.
 -   **Live Greeks & Metrics:** Streaming calculation of Sharpe Ratio (Smart/Rolling), Win Rate, and Drawdown updated every 5 seconds.
 -   **Intraday Equity Curve:** High-resolution (1-minute) charting that reconciles mark-to-market position values with cash flows (dividends, fees) in real-time.
@@ -185,23 +195,13 @@ graph TD
 
 ```
 
-1.  **Account Manager (The Brain):**
-    An async Python daemon that maintains the "live" state. It reconciles REST API snapshots with WebSocket streams, calculates Greeks/metrics, and pushes updates to the UI via Postgres `NOTIFY`.
+The architecture consists of five core distinct services. See the documentation for details:
 
-2.  **Data Ingester (The Memory):**
-    A robust, self-healing service that creates a raw data lake. It uses **Synthetic IDs**
-    (`Timestamp::ExecutionID`) to seamlessly deduplicate high-speed WebSocket events
-    against REST API history, ensuring 100% data integrity even during connection
-    drops.
-
-3.  **Web Dashboard (The View):**
-    A concise, single-page application (`account_positions.html`) rendering live tables and charts. It features visual P&L flashing, "Break-Even" status indicators, and multi-account switching.
-
-4.  **Risk Manager (The Guardian):**
-    An automated break-even engine running on **Apache Airflow**. It scans active bracket orders every minute and mechanically moves stop-losses to the entry price once targets are hit, securing profits without manual intervention.
-
-5.  **Airflow Orchestrator:**
-    Manages the scheduling of the Risk Manager cycles and other periodic maintenance tasks (DAGs), ensuring they run only during valid market hours across multiple accounts.
+- **[Account Manager](docs/account_manager.md)**: Real-time state synchronization and metric calculation.
+- **[Data Ingester](docs/ingester.md)**: Immutable data lake and stream capture.
+- **[Risk Manager](docs/risk_manager.md)**: Airflow-based break-even engine.
+- **[Web Dashboard](docs/web_architecture.md)**: Flask/SSE frontend.
+- **Infrastructure**: Postgres, TimescaleDB, and Cloudflare Tunnels.
 
 ## Repository Layout
 
@@ -266,7 +266,6 @@ For deep dives into specific subsystems, refer to the `docs/` directory:
 -   [**Account Manager**](docs/account_manager.md): The state machine, background workers, and session supervisor.
 
 ### Data & Infrastructure
--   [**Data Flow & Schema**](docs/data_flow_and_schema.md): How data moves from Alpaca WS → Ingester (Raw) → Manager (Live) → UI.
 -   [**Data Ingester**](docs/ingester.md): The immutable data lake, healing strategies, and backfill logic.
 -   [**Infrastructure**](docs/infrastructure.md): Cloudflare tunnels, Docker containers, and CI/CD pipelines.
 
@@ -274,8 +273,6 @@ For deep dives into specific subsystems, refer to the `docs/` directory:
 -   [**Web Architecture**](docs/web_architecture.md): Flask blueprints, SSE streaming, and caching layers.
 -   [**Frontend Logic**](docs/frontend_logic.md): JavaScript state management for the dashboard (`account_positions.html`).
 -   [**Operations Guide**](docs/operations_guide.md): Adding new destinations, environment variables, and troubleshooting.
-- [**Web Architecture**](docs/web_architecture.md): How the SSE streaming and caching layers function.
-- [**Risk Manager**](docs/risk_manager.md): Logic for break-even stops and Airflow scheduling.
 
 ## Deployment
 

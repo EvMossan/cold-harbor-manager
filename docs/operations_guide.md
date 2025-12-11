@@ -48,6 +48,10 @@ new destinations or managing the runtime infrastructure.
 | `TRADE_CONDITIONS_EXCLUDE` | Comma-separated trade condition codes to drop from the ZMQ stream, preventing noisy or ineligible fills from affecting state. |
 | `UI_PUSH_PCT_THRESHOLD` | Price-change threshold (percent) that triggers an immediate UI `NOTIFY`, guarding against flood updates during normal noise. |
 | `DISABLE_SESSION_SLEEP` | When set to `1`/`true`, forces the Account Manager to run continuously outside NYSE hours (useful for crypto or weekend debugging). |
+| `ZMQ_SIP_STREAM_ENDPOINT` | ZMQ Address for prices | `tcp://127.0.0.1:5558` |
+| `POS_CHANNEL` | Postgres NOTIFY channel for positions | `pos_channel` |
+| `ACCOUNT_LABEL` | Logical name for this account | Derived from configuration |
+| `ENABLE_TRADE_STREAM` | Toggle to enable the Alpaca trade_updates websocket stream | `False` |
 
 ## Database management
 
