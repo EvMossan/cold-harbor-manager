@@ -37,27 +37,39 @@ priority queue.
   discrepancies between the Lot-based strategy and the broker's FIFO
   accounting.
 
+### Order Expiration (GTC)
+
+Alpaca orders with `TimeInForce.GTC` (Good Till Canceled) implicitly expire
+after 90 days, though the API does not always populate `expires_at`.
+
+`build_lot_portfolio` implements a fallback logic:
+1.  **Explicit:** Uses the `expires_at` timestamp from the order leg if
+    present.
+2.  **Inferred:** If missing, calculates `created_at + 90 days` (defined as
+    `ALPACA_GTC_DAYS`).
+3.  **Metric:** Calculates `Days_To_Expire` (integer) relative to the current
+    timestamp and exposes it to the dashboard to warn about stale orders
+    nearing cancellation.
+
 ## Advanced features
 
-### Orphan matching
+### Replacement Chain Resolution ("Latest Successor")
 
-The lot portfolio includes a **Sibling Strategy** that handles orphaned
-sells (limit + stop pairs) whose explicit parent linkage is missing.
-It matches these orphaned orders with open lots by comparing quantities
-and uses the sell orders’ price legs to populate the lot’s missing TP/SL
-targets, effectively pairing the closest sibling legs when the parent
-chain can no longer be followed. Lots that receive values this way record
-`Source: Sibling Strategy`, signalling that the targets were derived
-from nearby orders rather than from a direct parent-child chain.
+Instead of recursive tracing, `build_lot_portfolio` pre-processes the
+entire order history to build a **Forward Replacement Map**.
 
-### Parent-child chain tracing
+1.  **Indexing:** It scans all orders to map `replaces` IDs to their new
+    `id`.
+2.  **Resolution:** A helper `get_latest_successor(id)` follows this chain
+    to the bitter end to find the currently active order ID.
+3.  **Fresh Data:** When processing a parent order's legs (TP/SL), the
+    system resolves the leg ID to its latest successor. It then fetches
+    the *live* status, limit price, and stop price from that successor
+    order (preferring DB state over stale JSON snapshots).
 
-`trace_active_leg` recursively walks parent/child order relationships
-(using `orders_map` and `children_map`) and stops at active limit/stop
-orders. When a replacement order exists (`status == 'replaced'`), it
-follows the `replaced_by` chain to the latest active leg. This lets the
-portfolio expose accurate targets even when a trader modifies an order
-mid-flight.
+This ensures that even if a user modifies a Stop-Loss order 5 times in
+the Alpaca UI, the portfolio snapshot will use the price and status of
+the 5th (final) replacement order.
 
 ## Equity & metrics
 
@@ -84,22 +96,16 @@ Sharpe/drawdown statistics.
   layer) can display up-to-date deposits without rerunning the full
   rebuild.
 
-## Analytics vs. Reporting Utils
+## Analytics vs. Reporting
 
-`src/coldharbour_manager/core/account_analytics.py` (notably `build_lot_portfolio`)
-is treated as part of the **Account Manager**’s control loop. The manager
-calls it to reconcile fills/orders, maintain lot-level open positions,
-trace parent/child chains, and keep the live state aligned with Alpaca’s
-order book for decision-making. That logic is executed where the trading
-logic runs, so the portfolio it builds lands in `accounts.open_trades_*`
-and `closed_trades_*` tables.
+Previously, reporting logic was split between the Manager and Web layers.
+In the current architecture, **all heavy lifting is centralized in the Account
+Manager**.
 
-In contrast, the Web layer uses helpers from
-`src/coldharbour_manager/core/account_utils.py`, especially `calculate_trade_metrics`,
-to summarize the already-settled trades exposed by the manager. Those
-helpers resolve the schema returned by `account_table_names` into
-flattened DataFrames, collapse slice-level exits, and calculate the final
-KPI buckets that populate the dashboard (TP/SL splits, durations,
-mean stop/take, etc.). This split keeps the heavy reconciliation inside
-the manager (analytics) while the UI performs lightweight reporting over
-the cached results (`accounts` schema tables).
+-   **`src/coldharbour_manager/services/account_manager/core_logic/account_analytics.py`**:
+    This is the unified calculation engine. It is used by:
+    1.  **Trading Logic:** To reconcile fills and build the live portfolio state.
+    2.  **Metrics Worker:** To periodically compute the full KPI set (Win Rate, Sharpe, Totals) and serialize it to the `account_metrics` table.
+
+-   **Web Layer Role:**
+    The Flask app (`routes.py`) is purely a **viewer**. It does not perform trade matching or P&L calculation. Instead, it queries the `account_metrics` table for the latest JSON payload and serves it directly to the frontend. `src/coldharbour_manager/core/account_utils.py` remains as a legacy/offline analysis toolkit.

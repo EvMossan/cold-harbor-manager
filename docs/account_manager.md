@@ -15,6 +15,14 @@ The service operates as an autonomous async agent that:
 
 The system is built around the `AccountManager` class (`src/coldharbour_manager/services/account_manager/runtime.py`), which orchestrates several specialized background workers.
 
+## Data Dependencies
+
+The Account Manager relies on the **Data Ingester** service for historical context.
+* **Order History:** Reads from `account_activities.raw_orders_<slug>` to reconstruct order chains and calculate lot basis.
+* **Activity Log:** Reads from `account_activities.raw_activities_<slug>` to process dividends and fees for equity reconciliation.
+
+**Note:** The Ingester must be running and backfilled for the Account Manager to correctly rebuild the full portfolio history on startup.
+
 ### Core Components
 
 | Component | Source File | Description |
@@ -52,13 +60,17 @@ Stores currently active positions.
 | Column | Type | Description |
 |--------|------|-------------|
 | `parent_id` | Text (PK) | The ID of the parent order that opened the position. |
-| `symbol` | Text | Ticker symbol (e.g., SPY). |
-| `qty` | Integer | Current quantity held. |
-| `avg_fill` | Real | Average entry price for this specific lot. |
-| `avg_px_symbol` | Real | Broker's average entry price for the symbol (WAC). |
-| `mkt_px` | Real | Current market price (updated via ZMQ). |
-| `profit_loss` | Real | Unrealized P&L. |
-| `sl_px` / `tp_px` | Real | Stop Loss and Take Profit prices (if bracket order). |
+| `symbol` | Text | Ticker symbol. |
+| `qty` | Real | Current active quantity. |
+| `avg_fill` | Real | Strategy Price: Actual execution price of the entry order. |
+| `avg_px_symbol` | Real | Broker Price: Alpaca's weighted average cost (WAC) for the symbol. |
+| `mkt_px` | Real | Current market price (from ZMQ stream). |
+| `profit_loss` | Real | P&L based on Broker WAC (matches Alpaca dashboard). |
+| `profit_loss_lot` | Real | P&L based on Strategy Price (matches bot performance). |
+| `days_to_expire` | Integer | Days remaining until the GTC order expires (max 90). |
+| `moved_flag` | Text | Break-Even status: OK (protected), — (none), or Already. |
+| `tp_sl_reach_pct` | Real | Percentage progress toward TP (positive) or SL (negative). |
+| `sl_px / tp_px` | Real | Active Stop Loss and Take Profit prices. |
 | `updated_at` | Timestamp | Last update time. |
 
 ### 2. Closed Trades Table (`account_closed`)
@@ -66,16 +78,45 @@ Stores historical performance of finished trades.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `entry_lot_id` | Text | Reference to the opening order. |
-| `exit_order_id` | Text | Reference to the closing order. |
-| `pnl_cash` | Real | Realized Profit/Loss in cash. |
-| `return_pct` | Real | Realized return percentage. |
-| `duration_sec` | Real | How long the position was held. |
+| `entry_lot_id` | Text | Reference to the opening parent order. |
+| `exit_order_id` | Text | Reference to the closing order execution. |
+| `exit_parent_id` | Text | Reference to the parent of the closing order (if bracket). |
+| `symbol` | Text | Ticker symbol. |
+| `side` | Text | Direction (Long/Short). |
+| `qty` | Real | Quantity closed in this slice. |
+| `entry_price` | Real | Execution price of the entry. |
+| `exit_price` | Real | Execution price of the exit. |
+| `pnl_cash` | Real | Strategy P&L: Calculated based on the specific lot match. |
+| `pnl_cash_fifo` | Real | Broker P&L: Calculated using strict FIFO methodology for reconciliation. |
+| `diff_pnl` | Real | Difference between Strategy and FIFO P&L (Variance). |
+| `return_pct` | Real | Return percentage based on Strategy P&L. |
+| `duration_sec` | Real | Duration of the trade in seconds. |
+| `exit_type` | Text | Logic used for exit (TP, SL, or MANUAL). |
 
 ### 3. Equity & Cash Flow
 -   `account_equity_full`: Stores historical equity curve.
 -   `account_equity_intraday`: High-resolution intraday equity tracking.
 -   `cash_flows`: Records deposits, withdrawals, and other cash movements.
+
+### 4. Market Schedule (`market_schedule`)
+Shared table driving the `schedule_supervisor`.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `session_date` | Date (PK) | The trading date. |
+| `pre_open_utc` | Timestamp | 04:00 NY time (System wake-up). |
+| `open_utc` | Timestamp | 09:30 NY time. |
+| `close_utc` | Timestamp | 16:00 NY time. |
+| `post_close_utc` | Timestamp | 20:00 NY time (System sleep). |
+
+### 5. Account Metrics (`account_metrics_<slug>`)
+Stores the latest calculated KPIs as a JSON document for the frontend.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | Text (PK) | Singleton key (e.g., 'latest'). |
+| `metrics_payload` | Text (JSON) | Full JSON blob containing Sharpe, Win Rate, and totals. |
+| `updated_at` | Timestamp | Time of last calculation. |
 
 ## Configuration
 

@@ -63,10 +63,3 @@ When the tunnels from `entrypoint.sh` expose 15433/15434 locally, those
 DSNs should point at `localhost:15433` (Postgres) and
 `localhost:15434` (Timescale) so the services can connect securely even
 inside Cloud Run or Docker containers.
-
-## Troubleshooting & Auditing
-
-Included is a CLI tool for deep diagnostics:
-`python -m coldharbour_manager.debug_audit`. It reconciles the Broker API state
-against the Local DB Ledger and Intraday logic to identify "Ghost Fees",
-missing dividends, or price sync drifts.

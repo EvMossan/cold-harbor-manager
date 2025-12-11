@@ -45,3 +45,21 @@ tables, and SSE feeds rely on.
 5. **Web UI / SSE** (`src/coldharbour_manager/web/routes.py`) reads from the live
    tables, serves `/api` endpoints, and listens to PostgreSQL `NOTIFY`
    channels so dashboards remain low-latency.
+[data_flow section at end? need append]
+## Risk Manager layer (Audit)
+
+The **Risk Manager** operates independently and logs its decisions to a dedicated audit table for each account.
+
+### Audit Log (`log_breakeven_<slug>`)
+Records every evaluation cycle where a stop modification was considered or executed.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `timestamp` | Timestamptz | Time of the decision cycle. |
+| `parent_id` | Text | ID of the bracket order being managed. |
+| `symbol` | Text | Ticker symbol. |
+| `moved_flag` | Text | Outcome: `OK` (moved), `Already` (at BE), or `—` (conditions not met). |
+| `old_stop` | Real | Stop price before modification. |
+| `new_stop` | Real | New stop price applied (if moved). |
+| `mkt_px` | Real | Market price used for the decision. |
+| `be_tp` | Real | The calculated break-even trigger price. |

@@ -75,6 +75,7 @@ Filled), this table uses upserts to reflect the latest state.
 | `filled_avg_price` | Numeric | Average fill price across partial fills. |
 | `limit_price` | Numeric | Attached limit price (if any). |
 | `stop_price` | Numeric | Attached stop price (if any). |
+| `legs` | JSONB | Nested list of child order objects (Stop/Limit legs) associated with this parent. |
 | `created_at` | Timestamptz | Timestamp when the order was created. |
 
 ### 2. Raw Activities (`raw_activities_<slug>`)
@@ -132,8 +133,8 @@ environment variables.
 | Constant | Default | Description |
 |----------|---------|-------------|
 | `DB_SCHEMA` | `account_activities` | Postgres schema for raw tables. |
-| `HEALING_INTERVAL_SEC` | `300` | How often the healer polls REST API. |
-| `HEALING_LOOKBACK_SEC` | `600` | Lookback window for healing (overlapping the interval). |
+| `HEALING_INTERVAL_SEC` | `60` | How often the healer polls REST API. |
+| `HEALING_LOOKBACK_SEC` | `720000` | Lookback window for healing (overlapping the interval). |
 | `BACKFILL_DAYS` | `365` | Depth of historical data pulled when backfilling on first run. |
 | `API_PAGE_SIZE` | `100` | Page size used when paging through Alpaca REST API lists. |
 | `DB_BATCH_SIZE` | `1000` | Records per SQL transaction during bulk backfills to optimize throughput. |

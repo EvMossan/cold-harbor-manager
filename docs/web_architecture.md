@@ -29,11 +29,15 @@ All API routes live inside the per-account blueprint (e.g.
   parameter so the UI can request `all`, `first_trade` (default), or `Nd`
   (e.g. `365d`). The handler also keeps a TTL cache in `_cache` per window
   key so repeated opens within ~45 seconds return the cached payload.
-- `/api/equity_intraday` – streams minute-resolution equity series. Returns
-  a JSON object `{ "series": [...], "meta": {...} }`. The `meta` block
-  contains critical session anchors (`baseline_deposit`, `session_flows`,
-  `live_deposit`) which the frontend uses to calculate real-time gains
-  relative to the session open.
+- `/api/equity_intraday` – streams minute-resolution equity series.
+
+Params: `start` (optional) – Filters the start time. Values: `pre`
+(04:00 NY, default), `rth` (09:30 NY), or specific hour offset.
+
+Returns: a JSON object `{ "series": [...], "meta": {...} }`. The `meta`
+block contains critical session anchors (`baseline_deposit`,
+`session_flows`, `live_deposit`) which the frontend uses to calculate
+real-time gains relative to the session open.
 - `/api/metrics` – returns the most recent JSON blob from `tables['metrics']`
   (defaulting to `account_metrics`) so the UI can show aggregated KPIs.
 

@@ -7,8 +7,8 @@ Cloudflare Access TCP tunnels before handing control to `gunicorn`. When
 `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are present, it
 launches two background `cloudflared access tcp` commands that
 terminate on `localhost:15433` and `localhost:15434`. The `--hostname`
-flags default to `dbtunnel-pg.cold-harbor.org` (Postgres) and
-`dbtunnel-ts.cold-harbor.org` (Timescale), but can be overridden. The
+flags default to `postgres.example.com` (Postgres) and
+`timescale.example.com` (Timescale), but can be overridden. The
 app then connects to the databases via `POSTGRESQL_LIVE_CONN_STRING` and
 `TIMESCALE_LIVE_CONN_STRING`, which point at the local tunnel ports so the
 databases stay hidden behind Cloudflare Access.
