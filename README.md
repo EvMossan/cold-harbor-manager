@@ -10,23 +10,25 @@ It bridges the gap between raw execution data and actionable trading insights, a
 
 ## Key Features
 
-### 📊 Real-Time Account Analytics
-- **Live P&L Tracking:** Streaming mark-to-market valuation of all open positions via ZeroMQ price feeds.
-- **Smart Metrics:** Real-time calculation of Sharpe Ratio (10d/21d/63d...), Drawdown, Win Rate, and Risk/Reward ratios.
-- **Equity Curve:** High-resolution (1-minute) intraday equity charting alongside historical daily performance.
+### 🛡️ Active Risk Management (The "Guardian")
+*Powered by Apache Airflow*
+-   **Break-Even Engine:** Automatically trails Stop-Loss orders to the entry price once a position is "safe" (price > entry + trigger).
+-   **Smart Triggers:** Uses pre-calculated volatility targets (e.g., 30-min breakout levels) to arm the break-even logic, ensuring stops aren't moved prematurely during noise.
+-   **Session Orchestration:** An autonomous Supervisor manages the trading lifecycle, spinning up workers for Pre-Market (04:00 ET) and shutting down after Post-Market close to save resources.
 
-### 🛡️ Order Management & Risk
-- **Deep Chain Tracing:** Automatically resolves complex order chains (OTO/OCO/Brackets), tracking positions even through multiple order replacements/modifications.
-- **Orphan Detection:** Identifies "orphaned" positions that lack Stop-Loss or Take-Profit protection.
-- **Data Lake (Ingester):** A standalone service that immutably records every trade event, order state change, and cash flow (dividends, fees) for auditability.
+### 📊 Real-Time Analytics (The "Control Tower")
+-   **Hybrid Pricing Model:** Simultaneously tracks **Strategy Price** (technical execution basis) and **Broker WAC** (tax/accounting basis), preventing P&L drift in decision-making.
+-   **Live Greeks & Metrics:** Streaming calculation of Sharpe Ratio (Smart/Rolling), Win Rate, and Drawdown updated every 5 seconds.
+-   **Intraday Equity Curve:** High-resolution (1-minute) charting that reconciles mark-to-market position values with cash flows (dividends, fees) in real-time.
+
+### 🔍 Data Integrity & Execution
+-   **Deep Chain Tracing:** Resolves complex OTO/Bracket chains, tracking "Grandchild" orders through multiple replacements (e.g., user-modified stops) to maintain correct parentage.
+-   **Orphan Detection:** Identifies "broken" positions where the broker reports exposure but the bot sees no active stop-loss protection.
+-   **Immutable Data Lake:** A dedicated Ingester service captures every WebSocket event into a raw schema using synthetic IDs, ensuring zero data loss even during downtime.
 
 ### ⚡ Technical Architecture
-- **Event-Driven UI:** A lightweight Flask dashboard powered by Server-Sent Events (SSE) for sub-second updates without page reloads.
-- **Hybrid Data Storage:** Uses **PostgreSQL** for transactional state (orders/positions) and **TimescaleDB** for time-series data (intraday equity, price bars).
-- **Secure Connectivity:** Built-in integration with **Cloudflare Access** tunnels to securely expose database connections from Cloud Run or local dev environments without public IPs.
-
-- **Hybrid Pricing Model:** Simultaneously tracks "Strategy Price" (for technical execution) and "Broker Average Cost" (for financial reconciliation), preventing P&L drift while maintaining precise stop-loss logic.
-- **Session-Aware Architecture:** An autonomous `Schedule Supervisor` manages the lifecycle of background workers, automatically spinning up resources for Pre-Market and shutting down after Post-Market close.
+-   **Event-Driven UI:** Server-Sent Events (SSE) push updates to the dashboard with sub-second latency.
+-   **Secure Tunnels:** Integrated **Cloudflare Access** tunnels expose local PostgreSQL/TimescaleDB instances securely without public IPs.
 
 ---
 
@@ -195,9 +197,20 @@ base.
 
 For deep dives into specific subsystems, refer to the `docs/` directory:
 
-- [**Core Analytics**](docs/core_analytics.md): How trades are matched (FIFO vs. Lot) and how "Deep Chain" tracing works.
-- [**Account Manager**](docs/account_manager.md): Architecture of the state machine and background workers.
-- [**Data Ingester**](docs/ingester.md): Explanation of the immutable data lake and healing strategies.
+### Core Logic & Trading
+-   [**Core Analytics**](docs/core_analytics.md): Trade matching engines (FIFO vs. Lot), GTC expiration logic, and Chain Tracing.
+-   [**Risk Manager**](docs/risk_manager.md): Break-even algorithms and Airflow DAG scheduling.
+-   [**Account Manager**](docs/account_manager.md): The state machine, background workers, and session supervisor.
+
+### Data & Infrastructure
+-   [**Data Flow & Schema**](docs/data_flow_and_schema.md): How data moves from Alpaca WS → Ingester (Raw) → Manager (Live) → UI.
+-   [**Data Ingester**](docs/ingester.md): The immutable data lake, healing strategies, and backfill logic.
+-   [**Infrastructure**](docs/infrastructure.md): Cloudflare tunnels, Docker containers, and CI/CD pipelines.
+
+### Operations & UI
+-   [**Web Architecture**](docs/web_architecture.md): Flask blueprints, SSE streaming, and caching layers.
+-   [**Frontend Logic**](docs/frontend_logic.md): JavaScript state management for the dashboard (`account_positions.html`).
+-   [**Operations Guide**](docs/operations_guide.md): Adding new destinations, environment variables, and troubleshooting.
 - [**Web Architecture**](docs/web_architecture.md): How the SSE streaming and caching layers function.
 - [**Risk Manager**](docs/risk_manager.md): Logic for break-even stops and Airflow scheduling.
 
