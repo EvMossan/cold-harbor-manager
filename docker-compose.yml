@@ -103,8 +103,9 @@ services:
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres-airflow-mgr/airflow
-      - AIRFLOW__API_AUTH__JWT_SECRET=change-me-please-32chars-min
-      - AIRFLOW__API__SECRET_KEY=change-me-please-32chars-min
+      - AIRFLOW__API_AUTH__JWT_SECRET=${AIRFLOW_JWT_SECRET}
+      - AIRFLOW__API__SECRET_KEY=${AIRFLOW_API_SECRET_KEY}
+      - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW_WEBSERVER_SECRET_KEY}
       - AIRFLOW__API_AUTH__JWT_EXPIRATION_TIME=2592000
       - AIRFLOW__API__HOST=0.0.0.0
       - AIRFLOW__API__PORT=8080

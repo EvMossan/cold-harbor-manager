@@ -6,7 +6,7 @@ It bridges the gap between raw execution data and actionable trading insights, a
 
 ## Preview
 
-![Platform preview](docs/img/preview.png)
+![Platform preview](docs/img/dashboard_preview.png)
 
 ## Key Features
 
@@ -197,6 +197,10 @@ graph TD
 - A Postgres+TimescaleDB instance (local or remote).
 
 ### Quick Start (Local)
+
+> **Security Note:** This repository does not contain real API keys or passwords.
+> Before running, you must create a `.env` file and a `airflow_simple_auth_passwords.json` file 
+> based on the provided examples.
 
 1.  **Configure Environment:**
     Copy the template `.env` (not included in git) and populate your credentials:
