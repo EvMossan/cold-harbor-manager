@@ -17,7 +17,7 @@ RUN curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/c
     -o /usr/local/bin/cloudflared \
     && chmod +x /usr/local/bin/cloudflared
 
-COPY requirements.txt .
+COPY requirements_dashboard.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src

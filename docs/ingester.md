@@ -93,6 +93,20 @@ Stores an append-only log of financial events (FILL, DIV, FEE, JNLC).
 | `price` | Numeric | Price executed for fills. |
 | `transaction_time` | Timestamptz | When the event occurred on the broker side. |
 
+### 3. History Metadata (`raw_history_meta_<slug>`)
+A simple key-value store used to persist optimization boundaries.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `metric_key` | Text (PK) | Key name (e.g., `earliest_order`, `earliest_activity`). |
+| `metric_value` | Timestamptz | The stored timestamp value. |
+| `updated_at` | Timestamptz | Last update time. |
+
+**Usage:** On startup, the service checks this table. If
+`earliest_order` exists, the **Backfill** worker uses it as the start time
+instead of querying the full history from the API, significantly speeding
+up restarts.
+
 ## Runtime Behavior
 
 ### Idempotency Strategy

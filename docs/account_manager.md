@@ -40,6 +40,7 @@ The `AccountManager` runs several concurrent `asyncio` tasks:
 7.  **`equity_intraday_worker`**: Rebuilds the intraday equity curve every minute using a "Mark-to-Market Delta" approach. It anchors calculations to the previous day's close and adds the P&L delta of current positions + intraday cash flows, ensuring the chart matches the broker's intraday volatility exactly.
 8.  **`ui_heartbeat_worker`**: Emits a heartbeat signal over the PostgreSQL notification channel to let the frontend know the backend is alive.
 9.  **`schedule_supervisor`**: A high-level supervisor that manages the lifecycle of the trading session. It polls `market_schedule` and automatically calls `_activate_session` (spawning workers) or `_deactivate_session` (canceling tasks) based on Pre-Market, Open, and Post-Market windows. Includes an automatic retention policy that prunes session rows older than 120 days to keep the table compact.
+10. **`trade_stream`** (Conditional): Connects to the Alpaca WebSocket `trade_updates` stream for real-time fill reporting. Only spawns if `ENABLE_TRADE_STREAM` is set to `True` in the destination configuration.
 
 ## Data Model
 
@@ -91,6 +92,7 @@ Configuration is managed via `_Config` in `config.py`. Key environment variables
 | `ACCOUNT_LABEL` | Logical name for this account | Derived from config |
 | `POSTGRESQL_LIVE_LOCAL_CONN_STRING` | Direct Postgres DSN used by `manager_run.py` when bypassing Cloudflare tunnels in local/network-adjacent runs | (Optional; overrides the tunneled value) |
 | `UI_PUSH_PCT_THRESHOLD` | Minimum percentage swing before the UI push channel emits a refreshed row | `0.0` (push every update) |
+| `ENABLE_TRADE_STREAM` | Master toggle to enable/disable WebSocket connections for trade updates. | False |
 
 ## Runtime Behavior
 

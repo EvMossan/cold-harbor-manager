@@ -24,6 +24,7 @@ All API routes live inside the per-account blueprint (e.g.
   from `_open_version()` (max `updated_at` + row count) and `Cache-Control`
   set to `public, max-age=30`. If the client sends `If-None-Match`, the
   handler short-circuits with `304` to avoid hitting Postgres.
+- `/api/closed` and `/api/closed_cached` – Returns the history of closed trades (default limit 300). The cached version uses the latest `exit_time` from the database to generate an ETag, returning `304 Not Modified` if the history hasn't changed since the last fetch.
 - `/api/equity` – reads `tables['equity']` and accepts a `window`
   parameter so the UI can request `all`, `first_trade` (default), or `Nd`
   (e.g. `365d`). The handler also keeps a TTL cache in `_cache` per window

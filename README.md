@@ -136,6 +136,12 @@ graph TD
 3.  **Web Dashboard (The View):**
     A concise, single-page application (`account_positions.html`) rendering live tables and charts. It features visual P&L flashing, "Break-Even" status indicators, and multi-account switching.
 
+4.  **Risk Manager (The Guardian):**
+    An automated break-even engine running on **Apache Airflow**. It scans active bracket orders every minute and mechanically moves stop-losses to the entry price once targets are hit, securing profits without manual intervention.
+
+5.  **Airflow Orchestrator:**
+    Manages the scheduling of the Risk Manager cycles and other periodic maintenance tasks (DAGs), ensuring they run only during valid market hours across multiple accounts.
+
 ## Repository Layout
 
 - `src/coldharbour_manager/` – Application source code.
@@ -143,8 +149,10 @@ graph TD
   - `services/activity_ingester/` – Raw data capture service.
   - `web/` – Flask blueprint and Jinja2 templates.
   - `core/` – Shared financial math (Smart Sharpe, FIFO/LIFO matching).
+  - `services/risks_manager/` – Break-even logic and order modification engine.
 - `docs/` – Detailed architectural documentation.
 - `docker-compose.yml` – Full local development stack (Manager + Web + Ingester).
+- `dags/` – Airflow DAG definitions for multi-account risk management.
 
 ## Getting Started
 
@@ -191,6 +199,7 @@ For deep dives into specific subsystems, refer to the `docs/` directory:
 - [**Account Manager**](docs/account_manager.md): Architecture of the state machine and background workers.
 - [**Data Ingester**](docs/ingester.md): Explanation of the immutable data lake and healing strategies.
 - [**Web Architecture**](docs/web_architecture.md): How the SSE streaming and caching layers function.
+- [**Risk Manager**](docs/risk_manager.md): Logic for break-even stops and Airflow scheduling.
 
 ## Deployment
 

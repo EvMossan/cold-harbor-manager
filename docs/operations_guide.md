@@ -16,6 +16,8 @@ new destinations or managing the runtime infrastructure.
      trading configuration hooks if the bot must use a different model or
      dataset (the latter is a path to your external ML artefact that the
      manager may consult before sending signals).
+   - `initial_deposit`: (Optional) A float value to hard-set the starting equity curve calculation. If omitted, the system attempts to derive it or falls back to environment variables.
+   - `trade_stream_enabled`: (Optional boolean, default `False`) If set to `True`, the Account Manager will open a dedicated WebSocket connection for this account. Set to `False` for accounts that only need REST-based snapshots to save connection slots.
 2. `slug_for` derives the per-destination slug by lower-casing `name`,
    replacing any character outside `[a-z0-9_]` with `_`, collapsing
    repeated underscores, stripping edges, and prefixing `d_` if the slug

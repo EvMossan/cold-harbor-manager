@@ -43,3 +43,17 @@ and `CF_ACCESS_CLIENT_SECRET`).
 Keeping these variables aligned in Secret Manager and `.env` ensures
 the tunnels, database connections, and runtime knobs remain synchronized
 between local Docker Compose and Cloud Run environments.
+
+## Airflow & Risk Orchestration
+
+The stack now includes Apache Airflow to handle periodic tasks (Risk
+Manager):
+
+| Service | Description |
+|---------|-------------|
+| `airflow-ch-mgr` | Runs the Airflow Scheduler, Webserver, and Triggerer. It mounts the `dags/` directory to execute risk logic. |
+| `postgres-airflow-mgr` | Dedicated PostgreSQL instance (port 5435) for Airflow's internal metadata state. |
+
+The DAGs in `dags/breakeven_multi_account.py` dynamically import account
+configurations from `src/coldharbour_manager/core/destinations.py` to
+spawn parallel risk-management tasks for every active destination.
