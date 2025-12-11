@@ -39,88 +39,104 @@ flows:
 
 ```mermaid
 graph TD
-    %% Node Styling
+    %% Global Styles
     classDef external fill:#f9f,stroke:#333,stroke-width:2px;
-    classDef core fill:#ccf,stroke:#333,stroke-width:2px;
-    classDef worker fill:#dfd,stroke:#333,stroke-width:1px;
-    classDef logic fill:#ffd,stroke:#333,stroke-width:1px;
-    classDef db fill:#eee,stroke:#333,stroke-width:2px;
+    classDef service fill:#e1f5fe,stroke:#0277bd,stroke-width:2px;
+    classDef worker fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px;
+    classDef db fill:#eee,stroke:#333,stroke-width:2px,shape:cylinder;
+    classDef bus fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,shape:rect;
 
-    %% --- EXTERNAL SOURCES ---
-    subgraph External_Sources [External Sources]
+    %% 1. EXTERNAL SOURCES
+    subgraph External [External Market Data]
+        direction TB
         AlpacaWS(Alpaca WebSocket<br/>Trade Updates)
-        AlpacaREST(Alpaca REST API<br/>Snapshots & History)
+        AlpacaREST(Alpaca REST API<br/>History & Snapshots)
         ZMQ(ZMQ Price Stream<br/>Real-time Quotes)
     end
 
-    %% --- ACCOUNT MANAGER SERVICE ---
-    subgraph Account_Manager_Service [Account Manager Service]
+    %% 2. INGESTION LAYER
+    subgraph Ingester_Layer [Data Ingester Service]
+        direction TB
+        IngesterRun(<b>ingester_run.py</b><br/>Orchestrator):::service
+        StreamWork(stream_consumer):::worker
+        HealWork(healing_worker):::worker
         
-        %% Entry Point
-        Runtime(<b>runtime.py</b><br/>Orchestrator & Config):::core
+        IngesterRun --> StreamWork
+        IngesterRun --> HealWork
+    end
 
-        %% Background Tasks
-        subgraph Background_Workers [Workers / workers.py]
+    %% 3. RAW STORAGE
+    subgraph Raw_DB [Raw Storage / Data Lake]
+        direction LR
+        RawOrders[(raw_orders<br/>Mutable State)]:::db
+        RawActs[(raw_activities<br/>Immutable Log)]:::db
+    end
+
+    %% 4. MANAGER LAYER
+    subgraph Manager_Layer [Account Manager Service]
+        direction TB
+        MgrRun(<b>manager_run.py</b><br/>State Machine):::service
+        
+        subgraph Mgr_Workers [Background Workers]
             PriceList(price_listener):::worker
-            DBWork(db_worker):::worker
             SnapLoop(snapshot_loop):::worker
-            ClosedSync(closed_trades_worker):::worker
-            Metrics(metrics_worker):::worker
-            Equity(equity_workers):::worker
-            SchedSup(schedule_supervisor):::worker
+            EquityWork(equity_intraday):::worker
+            MetricsWork(metrics_worker):::worker
         end
-
-        %% Business Logic
-        subgraph Core_Logic [Business Logic Modules]
-            Trades(<b>trades.py</b><br/>Order Logic):::logic
-            State(<b>state.py</b><br/>In-Memory State):::logic
-            Snapshot(<b>snapshot.py</b><br/>Reconciliation):::logic
-            EquityLogic(equity.py<br/>Math & Calc):::logic
-        end
+        
+        MgrRun --> PriceList
+        MgrRun --> SnapLoop
+        MgrRun --> EquityWork
+        MgrRun --> MetricsWork
     end
 
-    %% --- STORAGE & UI ---
-    subgraph Storage_and_Output [Storage & Notifications]
-        TblLive[(tbl_live<br/>Open Positions)]:::db
-        TblClosed[(tbl_closed<br/>History)]:::db
-        TblEquity[(tbl_equity<br/>Performance)]:::db
-        TblMetrics[(tbl_metrics<br/>JSON KPIs)]:::db
-        ChanPos((NOTIFY<br/>pos_channel)):::db
+    %% 5. LIVE STORAGE
+    subgraph Live_DB [Live State / accounts schema]
+        direction LR
+        TblLive[(open_positions<br/>Live State)]:::db
+        TblClosed[(closed_trades<br/>History)]:::db
+        TblMetrics[(account_metrics<br/>JSON for UI)]:::db
     end
 
-    %% --- DATA FLOW ---
+    %% 6. CONSUMERS: RISK & UI
+    subgraph Risk_Layer [Airflow / Risk Manager]
+        RiskDAG(<b>Risk Manager DAG</b><br/>Break-Even Engine):::service
+        LogRisk[(log_breakeven<br/>Audit)]:::db
+    end
+
+    subgraph Web_Layer [Web Dashboard]
+        Flask(Flask App<br/>routes.py):::service
+        SSE((SSE Stream<br/>Push)):::bus
+    end
+
+    %% CONNECTIONS (The Flow)
     
-    %% Startup
-    Runtime -->|Spawns| PriceList
-    Runtime -->|Spawns| DBWork
-    Runtime -->|Spawns| SnapLoop
-    Runtime -->|Spawns| ClosedSync
-    Runtime -->|Spawns| SchedSup
+    %% Ingestion Flow
+    AlpacaWS -->|Raw Events| StreamWork
+    AlpacaREST -->|Recovery| HealWork
+    StreamWork -->|Upsert| RawOrders & RawActs
+    HealWork -->|Upsert| RawOrders & RawActs
 
-    %% Price Stream (ZMQ)
-    ZMQ -->|Tick Data| PriceList
-    PriceList -->|Update Price| State
-    
-    %% Trade Stream (Alpaca WS)
-    AlpacaWS -->|Fills/Cancels| Trades
-    Trades -->|Update/Delete| State
-    Trades -->|Insert| TblClosed
-
-    %% Reconciliation (Alpaca REST)
-    AlpacaREST -->|Fetch All| Snapshot
-    SnapLoop -->|Trigger| Snapshot
-    Snapshot -->|Rebuild| State
-
-    %% DB Writes & Notifications
-    State -->|Upsert Row| TblLive
-    State -->|PG NOTIFY| ChanPos
-    DBWork -->|Flush Dirty Rows| State
+    %% Manager Flow
+    ZMQ -->|Ticks| PriceList
+    RawOrders & RawActs -->|Read History| SnapLoop
+    PriceList -->|Update Price| TblLive
+    SnapLoop -->|Reconcile| TblLive
     
     %% Metrics & Equity
-    Metrics -->|Read| TblLive
-    Metrics -->|Calc & Write| TblMetrics
-    Equity -->|Recalc| EquityLogic
-    EquityLogic -->|Write| TblEquity
+    TblLive -->|Read| EquityWork & MetricsWork
+    EquityWork -->|Write| TblLive
+    MetricsWork -->|Write| TblMetrics
+
+    %% Risk Flow
+    TblLive -->|Read State| RiskDAG
+    RiskDAG -->|Patch Order| AlpacaREST
+    RiskDAG -->|Audit| LogRisk
+
+    %% UI Flow
+    TblLive & TblMetrics -->|Read| Flask
+    TblLive -.->|PG NOTIFY| SSE
+    SSE -->|Update| Flask
 
     %% Apply Styles
     class AlpacaWS,AlpacaREST,ZMQ external;
