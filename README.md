@@ -1,4 +1,4 @@
-# Cold Harbour: Real-Time Trading Analytics Dashboard
+# Cold Harbour: Real-Time Trading Analytics & Risk Management Platform
 
 **Cold Harbour** is a specialized high-frequency monitoring system designed for algorithmic traders. It serves as a unified "Control Tower" for Alpaca brokerage accounts, providing real-time visibility into positions, order flow, and equity performance that standard broker interfaces often lack.
 
