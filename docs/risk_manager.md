@@ -9,13 +9,13 @@ continuously monitoring price action against pre-calculated volatility targets.
 The primary goal is to move the Stop Loss to the **Entry Price**
 (Break-Even) once the position has moved sufficiently in our favor.
 
-### The Trigger: "TakeProfit 2.1"
+### The Trigger: "TakeProfit 2"
 The system uses a volatility-adjusted trigger based on the **Risk Multiple
 (R)**.
 - **R (Risk Unit):** The distance between `Entry Price` and the initial
   `Stop Loss`.
 - **Trigger Condition:** The break-even logic activates when the price
-  reaches **2.1R** (i.e., `Entry + 2.1 * Risk`).
+  reaches **2R** (i.e., `Entry + 2 * Risk`).
 
 This level is pre-calculated by the breakout engine and stored in the
 `alpaca_breakouts` table as `takeprofit_2_1_price`.

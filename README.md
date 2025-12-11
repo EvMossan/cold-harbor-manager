@@ -148,8 +148,8 @@ graph TD
     MetricsWork --> TblMetrics
     EquityWork --> TblLive
 
-    %% Risk Manager Flow
-    TblLive --> RiskDAG
+    %% Risk Manager Flow (Reads RAW for independence)
+    RawOrders --> RiskDAG
     RiskDAG -- Patch Order --> AlpacaREST
 
     %% Web Flow
