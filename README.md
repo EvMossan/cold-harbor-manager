@@ -1,23 +1,23 @@
 # Cold Harbour: Real-Time Trading Analytics & Risk Management Platform
 
-> **⚠️ Disclaimer:** This project demonstrates **Paper Trading (Virtual Funds)** infrastructure. All positions, equity values, and P&L figures shown in screenshots or examples are simulated and do not represent real financial assets.
 
-**Cold Harbour** is a specialized high-frequency monitoring system designed for algorithmic traders. It serves as a unified "Control Tower" for Alpaca brokerage accounts, providing real-time visibility into positions, order flow, and equity performance that standard broker interfaces often lack.
+**Cold Harbour** is an integrated trading operations system providing real-time state management and automated risk execution for Alpaca accounts. Designed as an authoritative local ledger, it decouples trading logic from broker latency, ensuring precise tracking of positions, equity, and order lifecycles via high-performance PostgreSQL/TimescaleDB storage.
 
-It bridges the gap between raw execution data and actionable trading insights, acting as the authoritative source of truth for your trading bot's state.
+Beyond monitoring, the system includes an autonomous **Risk Manager** service. This execution engine actively monitors open exposure and manages Stop-Loss orders, automatically trailing them to break-even levels upon hitting pre-calculated volatility targets (2.1R). This ensures strict adherence to risk protocols independent of the core strategy execution.
 
 ## Preview
+> **⚠️ Disclaimer:** This preview demonstrates **Paper Trading (Virtual Funds)** infrastructure. All positions, equity values, and P&L figures shown in screenshots or examples are simulated and do not represent real financial assets.
 
 ![Platform preview](docs/img/dashboard_preview.png)
 
-## 📚 Table of Contents
+## Table of Contents
 
 - **[Key Features](#key-features)**
 - **[System Architecture](#system-components)**
 - **Documentation:**
-  - 🧠 **Logic:** [Core Analytics](docs/core_analytics.md) | [Risk Manager](docs/risk_manager.md) | [Account Manager](docs/account_manager.md)
-  - 🏗️ **Infra:** [Data Flow & Schema](docs/data_flow_and_schema.md) | [Ingester](docs/ingester.md) | [Infrastructure](docs/infrastructure.md)
-  - 💻 **Web/Ops:** [Frontend Logic](docs/frontend_logic.md) | [Web Architecture](docs/web_architecture.md) | [Operations Guide](docs/operations_guide.md)
+  - **Logic:** [Core Analytics](docs/core_analytics.md) | [Risk Manager](docs/risk_manager.md) | [Account Manager](docs/account_manager.md)
+  - **Infra:** [Data Flow & Schema](docs/data_flow_and_schema.md) | [Ingester](docs/ingester.md) | [Infrastructure](docs/infrastructure.md)
+  - **Web/Ops:** [Frontend Logic](docs/frontend_logic.md) | [Web Architecture](docs/web_architecture.md) | [Operations Guide](docs/operations_guide.md)
 - **[Getting Started](#getting-started)**
 - **[Deployment](#deployment)**
 
