@@ -69,6 +69,16 @@ class IngesterService:
         # 1. Ensure DB Schema/Tables exist for this account
         await storage.ensure_schema_and_tables(self.repo, slug)
 
+        # 1.5. Run Metadata Check (History Dates)
+        # Ensures raw_history_meta table is created and populated.
+        meta_task = asyncio.create_task(
+            workers.run_startup_meta_check(
+                self.repo, api_key, secret_key, base_url, slug
+            ),
+            name=f"meta-{slug}"
+        )
+        self._tasks.append(meta_task)
+
         # 2. Check if Backfill is needed (run as background task)
         # We spawn this separately so it doesn't block stream startup
         backfill_task = asyncio.create_task(

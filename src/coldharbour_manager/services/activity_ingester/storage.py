@@ -104,6 +104,51 @@ async def ensure_schema_and_tables(
     await repo.execute(ddl_activities)
 
 
+async def ensure_history_meta_table(
+    repo: AsyncAccountRepository,
+    slug: str
+) -> None:
+    """
+    Ensure the history metadata table exists for the account slug.
+    Structure: key-value store for timestamps.
+    """
+    t_meta = _table_name("raw_history_meta", slug)
+
+    ddl = f"""
+        CREATE TABLE IF NOT EXISTS {t_meta} (
+            metric_key TEXT PRIMARY KEY,
+            metric_value TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+    """
+    await repo.execute(ddl)
+
+
+async def upsert_history_meta(
+    repo: AsyncAccountRepository,
+    slug: str,
+    metrics: dict[str, datetime]
+) -> None:
+    """
+    Upsert metadata keys and timestamps for history boundaries.
+    """
+    if not metrics:
+        return
+
+    t_meta = _table_name("raw_history_meta", slug)
+    values = [(k, v) for k, v in metrics.items() if v is not None]
+
+    sql = f"""
+        INSERT INTO {t_meta} (metric_key, metric_value)
+        VALUES ($1, $2)
+        ON CONFLICT (metric_key) DO UPDATE SET
+            metric_value = EXCLUDED.metric_value,
+            updated_at = NOW();
+    """
+
+    await repo.executemany(sql, values)
+
+
 async def get_latest_order_time(
     repo: AsyncAccountRepository,
     slug: str

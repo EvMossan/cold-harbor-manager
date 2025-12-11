@@ -121,7 +121,10 @@ import psycopg2
 from coldharbour_manager.services.account_manager.core_logic import (
     account_analytics,
 )
-from coldharbour_manager.services.account_manager.loader import load_orders_from_db
+from coldharbour_manager.services.account_manager.loader import (
+    fetch_history_meta_dates,
+    load_orders_from_db,
+)
 from coldharbour_manager.infrastructure.db import AsyncAccountRepository
 
 fetch_orders = account_analytics.fetch_orders
@@ -225,6 +228,7 @@ class BreakevenOrderManager:
     async def _fetch_portfolio_state(self) -> pd.DataFrame:
         """
         Load orders (DB → fallback API) and build the lot portfolio.
+        Optimized to use stored history start date.
 
         Returns the DataFrame with every active lot.
         """
@@ -243,9 +247,26 @@ class BreakevenOrderManager:
 
         if orders.empty:
             self.log.info("Loading orders from API (Fallback)...")
+            start_date = None
+            try:
+                dates = await fetch_history_meta_dates(self.repo, self.slug)
+                if dates[0]:
+                    start_date = dates[0]
+                    self.log.info(
+                        f"Optimized fetch: starting from {start_date}"
+                    )
+                self.log.info(
+                    "Historian StartDate: %s",
+                    start_date or "default (365 days ago)",
+                )
+            except Exception as exc:
+                self.log.warning(f"Failed to fetch meta dates: {exc}")
+
             try:
                 orders = await asyncio.to_thread(
-                    fetch_orders, self.api
+                    fetch_orders,
+                    self.api,
+                    start_date=start_date,
                 )
             except Exception as exc:
                 self.log.warning("API load failed: %s", exc)

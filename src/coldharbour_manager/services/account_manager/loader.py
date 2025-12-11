@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Tuple
 
 import pandas as pd
 
@@ -121,3 +122,39 @@ async def load_activities_from_db(
         df["side"] = df["side"].astype(str).str.lower()
 
     return df
+
+
+async def fetch_history_meta_dates(
+    repo: AsyncAccountRepository,
+    slug: str,
+) -> Tuple[Optional[datetime], Optional[datetime]]:
+    """
+    Retrieve cached earliest order and activity timestamps.
+
+    Returns (None, None) if the table or rows do not exist.
+    """
+    safe_slug = slug.replace("-", "_").lower()
+    table_name = f"account_activities.raw_history_meta_{safe_slug}"
+
+    sql = f"""
+        SELECT metric_key, metric_value
+        FROM {table_name}
+        WHERE metric_key IN ('earliest_order', 'earliest_activity')
+    """
+
+    try:
+        rows = await repo.fetch(sql)
+    except Exception:
+        return None, None
+
+    data = {r["metric_key"]: r["metric_value"] for r in rows}
+
+    e_order = data.get("earliest_order")
+    e_activity = data.get("earliest_activity")
+
+    if e_order and e_order.tzinfo is None:
+        e_order = e_order.replace(tzinfo=timezone.utc)
+    if e_activity and e_activity.tzinfo is None:
+        e_activity = e_activity.replace(tzinfo=timezone.utc)
+
+    return e_order, e_activity

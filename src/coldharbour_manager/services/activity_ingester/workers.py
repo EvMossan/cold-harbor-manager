@@ -17,6 +17,9 @@ from coldharbour_manager.services.account_manager.core_logic.account_analytics i
     fetch_orders,
     get_history_start_dates,
 )
+from coldharbour_manager.services.account_manager.loader import (
+    fetch_history_meta_dates,
+)
 from coldharbour_manager.infrastructure.db import AsyncAccountRepository
 from . import storage, transform
 from .config import IngesterConfig
@@ -156,6 +159,39 @@ def _json_dumper(obj: Any) -> str:
         return str(obj)
 
 
+async def run_startup_meta_check(
+    repo: AsyncAccountRepository,
+    api_key: str,
+    secret_key: str,
+    base_url: str,
+    slug: str,
+) -> None:
+    """
+    Fetch and persist account history boundaries on startup.
+    """
+    try:
+        log.info(f"[{slug}] Checking account history boundaries...")
+        await storage.ensure_history_meta_table(repo, slug)
+
+        rest = _get_rest_client(api_key, secret_key, base_url)
+        dates = await asyncio.to_thread(get_history_start_dates, rest)
+        e_order, e_activity = dates
+
+        metrics = {
+            "earliest_order": e_order,
+            "earliest_activity": e_activity,
+        }
+
+        await storage.upsert_history_meta(repo, slug, metrics)
+
+        log.info(
+            f"[{slug}] History meta saved: Order={e_order}, "
+            f"Activity={e_activity}"
+        )
+    except Exception as exc:
+        log.error(f"[{slug}] Startup meta check failed: {exc}")
+
+
 async def run_backfill_task(
     repo: AsyncAccountRepository,
     api_key: str,
@@ -165,13 +201,16 @@ async def run_backfill_task(
 ) -> None:
     """
     One-off task on startup.
-    Uses the latest order time as a watermark for fetch_orders.
+    Uses DB meta or API detection for start dates.
     """
     try:
         log.info(f"[{slug}] Starting Backfill/Catch-up check...")
         rest = _get_rest_client(api_key, secret_key, base_url)
         
         last_update = await storage.get_latest_order_time(repo, slug)
+
+        order_start_date = None
+        activity_start_date = None
 
         if last_update:
             order_start_date = last_update - timedelta(minutes=30)
@@ -180,16 +219,24 @@ async def run_backfill_task(
                 f"[{slug}] Incremental backfill from {order_start_date}"
             )
         else:
+            log.info(f"[{slug}] Checking DB for history meta...")
+            meta_dates = await fetch_history_meta_dates(repo, slug)
+            if meta_dates[0] and meta_dates[1]:
+                order_start_date, activity_start_date = meta_dates
+                log.info(
+                    f"[{slug}] Found meta in DB. Orders from "
+                    f"{order_start_date}"
+                )
+            else:
+                log.info(f"[{slug}] Meta missing. Detecting via API...")
+                (
+                    order_start_date,
+                    activity_start_date,
+                ) = get_history_start_dates(rest)
+
             log.info(
-                f"[{slug}] Detecting account history start dates via API..."
-            )
-            (
-                order_start_date,
-                activity_start_date,
-            ) = get_history_start_dates(rest)
-            log.info(
-                f"[{slug}] Dynamic Backfill Plan: Orders from "
-                f"{order_start_date}, Activities from {activity_start_date}"
+                f"[{slug}] Backfill Plan: Orders > {order_start_date}, "
+                f"Activities > {activity_start_date}"
             )
 
         try:
