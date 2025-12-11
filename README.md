@@ -1,5 +1,7 @@
 # Cold Harbour: Real-Time Trading Analytics & Risk Management Platform
 
+> **⚠️ Disclaimer:** This project demonstrates **Paper Trading (Virtual Funds)** infrastructure. All positions, equity values, and P&L figures shown in screenshots or examples are simulated and do not represent real financial assets.
+
 **Cold Harbour** is a specialized high-frequency monitoring system designed for algorithmic traders. It serves as a unified "Control Tower" for Alpaca brokerage accounts, providing real-time visibility into positions, order flow, and equity performance that standard broker interfaces often lack.
 
 It bridges the gap between raw execution data and actionable trading insights, acting as the authoritative source of truth for your trading bot's state.
@@ -7,6 +9,17 @@ It bridges the gap between raw execution data and actionable trading insights, a
 ## Preview
 
 ![Platform preview](docs/img/dashboard_preview.png)
+
+## 📚 Table of Contents
+
+- **[Key Features](#key-features)**
+- **[System Architecture](#system-components)**
+- **Documentation:**
+  - 🧠 **Logic:** [Core Analytics](docs/core_analytics.md) | [Risk Manager](docs/risk_manager.md) | [Account Manager](docs/account_manager.md)
+  - 🏗️ **Infra:** [Data Flow & Schema](docs/data_flow_and_schema.md) | [Ingester](docs/ingester.md) | [Infrastructure](docs/infrastructure.md)
+  - 💻 **Web/Ops:** [Frontend Logic](docs/frontend_logic.md) | [Web Architecture](docs/web_architecture.md) | [Operations Guide](docs/operations_guide.md)
+- **[Getting Started](#getting-started)**
+- **[Deployment](#deployment)**
 
 ## Key Features
 
