@@ -41,3 +41,4 @@ def trading_session_date(now_ts: datetime) -> date:
 
         search_end = search_start - timedelta(days=1)
         search_start = search_end - timedelta(days=10)
+#
