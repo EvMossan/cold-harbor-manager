@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Optional, Any, Set
 import numpy as np
 import pandas as pd
 import datetime as dt
+from alpaca_trade_api.rest import TimeFrame, TimeFrameUnit
 
 from coldharbour_manager.services.account_manager.core_logic.equity import (
     rebuild_equity_series_async,
@@ -209,7 +210,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
         # 1. Fetch Previous Close Equity (Anchor)
         prev_row = await mgr._db_fetchrow(
             f"""
-                SELECT deposit, cumulative_return
+                SELECT deposit, cumulative_return, date
                   FROM {mgr.tbl_equity}
                  WHERE date < $1
               ORDER BY date DESC
@@ -218,6 +219,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
             session_date,
         )
         prev_equity = float(prev_row.get("deposit") or 0.0) if prev_row else 0.0
+        anchor_date = prev_row.get("date") if prev_row else None
         
         try:
             prev_cum_ret = float(prev_row.get("cumulative_return") or 0.0)
@@ -306,28 +308,55 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
 
         if syms:
             for sym in syms:
-                # A. Get Yesterday's Close (Reference for held positions)
-                # Look strictly BEFORE start_utc
-                pre_px_row = await mgr._ts_fetchrow(
-                    """
-                        SELECT close
-                          FROM public.alpaca_bars_1min
-                         WHERE symbol = $1 AND timestamp < $2
-                      ORDER BY timestamp DESC
-                         LIMIT 1
+                pre_px: float | None = None
+
+                # Ensures the P&L delta starts where DB equity left off.
+                if anchor_date:
+                    try:
+                        def _fetch_anchor_close() -> float | None:
+                            bars = (
+                                mgr.rest.get_bars(
+                                    sym,
+                                    TimeFrame(1, TimeFrameUnit.Day),
+                                    start=anchor_date.isoformat(),
+                                    end=anchor_date.isoformat(),
+                                    adjustment="raw",
+                                )
+                                .df
+                            )
+                            if not bars.empty:
+                                return float(bars.iloc[-1]["close"])
+                            return None
+
+                        pre_px = await asyncio.to_thread(_fetch_anchor_close)
+                    except Exception as exc:
+                        mgr.log.debug(
+                            "Failed to fetch anchor close for %s: %s",
+                            sym,
+                            exc,
+                        )
+
+                if pre_px is None:
+                    pre_px_row = await mgr._ts_fetchrow(
+                        """
+                            SELECT close
+                              FROM public.alpaca_bars_1min
+                             WHERE symbol = $1 AND timestamp < $2
+                          ORDER BY timestamp DESC
+                             LIMIT 1
                         """,
-                    sym,
-                    start_utc.to_pydatetime(),
-                )
-                pre_px = (
-                    float(pre_px_row.get("close"))
-                    if pre_px_row and pre_px_row.get("close") is not None
-                    else None
-                )
+                        sym,
+                        start_utc.to_pydatetime(),
+                    )
+                    pre_px = (
+                        float(pre_px_row.get("close"))
+                        if pre_px_row and pre_px_row.get("close") is not None
+                        else None
+                    )
+
                 if pre_px:
                     ref_prices[sym] = pre_px
 
-                # B. Get Intraday Bars
                 bars_rows = await mgr._ts_fetch(
                     """
                         SELECT timestamp AT TIME ZONE 'UTC' AS ts, close
@@ -336,14 +365,13 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                           AND timestamp >= $2
                           AND timestamp <= $3
                       ORDER BY timestamp
-                        """,
+                    """,
                     sym,
                     start_utc.to_pydatetime(),
                     cutoff_ts,
                 )
                 bars = pd.DataFrame(bars_rows)
-                
-                # Fill gaps correctly
+
                 if not bars.empty:
                     series = (
                         bars.assign(ts=pd.to_datetime(bars["ts"], utc=True))
@@ -352,12 +380,12 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                         .reindex(idx)
                         .ffill()
                     )
-                    
+
                     if pre_px:
                         series = series.fillna(pre_px)
                     else:
-                        series = series.fillna(method='bfill')
-                        
+                        series = series.fillna(method="bfill")
+
                     px_cols[sym] = series
                 elif pre_px:
                     px_cols[sym] = pd.Series(pre_px, index=idx)

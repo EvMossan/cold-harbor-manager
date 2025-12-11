@@ -462,11 +462,12 @@ def build_lot_portfolio(
     api: Any = None
 ) -> pd.DataFrame:
     """
-    Builds a portfolio with SPLIT pricing logic and "Global Status Lookup".
+    Builds a portfolio using a "Latest Successor" logic.
     
-    Fixes the issue where Parent JSON contains stale leg statuses (e.g., 'new')
-    while the legs themselves appear as separate, updated rows (e.g., 'filled') 
-    later in the DB.
+    It handles database lag by:
+    1. Identifying replacement chains via the 'replaces' column.
+    2. Resolving every leg to its latest descendant (Successor).
+    3. Using the Successor's Status and Prices instead of the Stale Parent JSON.
     """
     # --- 1. Fetch Broker Data (Market Data & Averages) ---
     market_data: Dict[str, Dict[str, float]] = {}
@@ -478,6 +479,7 @@ def build_lot_portfolio(
                 qty = float(p.qty)
                 cur_px = float(getattr(p, "current_price", 0.0))
                 
+                # Fallback for market value calc
                 if cur_px == 0.0 and qty != 0:
                     try:
                         cur_px = float(p.market_value) / qty
@@ -504,31 +506,47 @@ def build_lot_portfolio(
     if sort_col in df_clean.columns:
         df_clean[sort_col] = pd.to_datetime(df_clean[sort_col], utc=True, errors='coerce')
     
-    # Sort descending (newest first)
+    # Sort descending (newest first) to ensure we keep the latest version of each ID
     df_clean.sort_values(by=sort_col, ascending=False, inplace=True)
     
-    # Deduplicate primarily by 'id' (or 'order_id' if available/populated)
+    # Deduplicate primarily by 'id'
     dedup_subset = ['id']
     if 'order_id' in df_clean.columns and df_clean['order_id'].notna().any():
         dedup_subset = ['order_id']
             
     df_clean.drop_duplicates(subset=dedup_subset, keep='first', inplace=True)
 
-    # --- 3. GLOBAL STATUS LOOKUP (The Fix) ---
-    # Create a map of {order_id: latest_status} from the entire dataframe.
-    # This allows us to override stale status info found inside Parent JSONs.
-    status_map = {}
+    # --- 3. BUILD REPLACEMENT CHAIN & LOOKUP MAP (The Logic Upgrade) ---
     
-    # Use 'id' column for mapping keys
-    if 'id' in df_clean.columns:
-        status_map = df_clean.set_index('id')['status'].to_dict()
+    # A. Index entire DB by ID for fast lookup of "Fresh Data" (Prices/Status)
+    # We convert to dict for O(1) access.
+    # Note: orient='index' keys by the index, so we set index to 'id' first.
+    if 'id' not in df_clean.columns:
+        return pd.DataFrame()
+        
+    orders_map = df_clean.set_index('id').to_dict('index')
     
-    # If order_id exists, map that too just in case
-    if 'order_id' in df_clean.columns:
-        extra_map = df_clean.dropna(subset=['order_id']).set_index('order_id')['status'].to_dict()
-        status_map.update(extra_map)
+    # B. Build Forward Map: Old_ID -> New_ID
+    # We use the 'replaces' column from NEW orders to find out who they replaced.
+    replacement_map = {}
+    if 'replaces' in df_clean.columns:
+        # Filter only rows that actually replace something
+        replacers = df_clean.dropna(subset=['replaces'])
+        for _, row in replacers.iterrows():
+            old_id = str(row['replaces'])
+            new_id = str(row['id'])
+            replacement_map[old_id] = new_id
+
+    # Helper to walk the chain to the bitter end
+    def get_latest_successor(order_id):
+        curr = str(order_id)
+        # Follow the chain as long as there is a newer order
+        while curr in replacement_map:
+            curr = replacement_map[curr]
+        return curr
 
     # --- 4. Filter Parents ---
+    # We only care about Parents that are Filled Buy orders
     parents = df_clean[
         (df_clean['side'] == 'buy') & 
         (df_clean['status'] == 'filled') &
@@ -536,18 +554,19 @@ def build_lot_portfolio(
     ].copy()
     
     active_lots = []
-    live_statuses = ['new', 'held', 'accepted', 'partially_filled', 'open', 'calculated']
+    live_statuses = {'new', 'held', 'accepted', 'partially_filled', 'open', 'calculated', 'pending_replace'}
 
     # --- 5. Iterate & Unpack ---
     for _, row in parents.iterrows():
         legs_raw = row.get('legs')
         legs_data = []
         
-        # JSON Parsing
+        # Safe JSON Parsing
         if isinstance(legs_raw, list):
             legs_data = legs_raw
         elif isinstance(legs_raw, str):
             try:
+                # Cleanup common Python-string-as-JSON issues
                 clean_json = (
                     legs_raw.replace("'", '"')
                     .replace("None", "null")
@@ -564,40 +583,62 @@ def build_lot_portfolio(
         if not legs_data:
             continue
 
-        # Check Active Legs (with Cross-Reference)
+        # Init Leg Placeholders
         tp_price = None
         tp_id = None
         sl_price = None
         sl_id = None
+        expiry_ts = None
         has_active_legs = False
         
         for leg in legs_data:
-            leg_id = str(leg.get('id'))
+            original_leg_id = str(leg.get('id'))
             
-            # 1. Get status from JSON (potentially stale)
-            json_status = str(leg.get('status')).lower()
+            # === RESOLVE LATEST SUCCESSOR ===
+            # Even if 'original_leg_id' is old/stale in DB, this finds the newest replacement ID.
+            latest_leg_id = get_latest_successor(original_leg_id)
             
-            # 2. Look up ACTUAL status from the separate rows in DB (fresh)
-            # If not found in map, fallback to JSON status
-            real_status = str(status_map.get(leg_id, json_status)).lower()
+            # === GET FRESH DATA ===
+            # Try to find the latest leg in our orders_map (DB dump).
+            # If not found (rare gap), fallback to the JSON data from Parent.
+            fresh_order = orders_map.get(latest_leg_id)
             
-            l_type = str(leg.get('order_type') or leg.get('type')).lower()
-            
-            # Check if the REAL status is live
-            if real_status in live_statuses:
+            if fresh_order:
+                # Use DB data (Preferred)
+                current_status = str(fresh_order.get('status')).lower()
+                l_type = str(fresh_order.get('order_type') or fresh_order.get('type')).lower()
+                limit_px = fresh_order.get('limit_price')
+                stop_px  = fresh_order.get('stop_price')
+                # Capture expiry from fresh row if available
+                if not expiry_ts:
+                    expiry_ts = fresh_order.get('expires_at') or fresh_order.get('expired_at')
+            else:
+                # Fallback to JSON data (Stale but better than nothing)
+                current_status = str(leg.get('status')).lower()
+                l_type = str(leg.get('order_type') or leg.get('type')).lower()
+                limit_px = leg.get('limit_price')
+                stop_px  = leg.get('stop_price')
+                if not expiry_ts:
+                    expiry_ts = leg.get('expires_at')
+
+            # === CHECK IF LIVE ===
+            if current_status in live_statuses:
                 has_active_legs = True
                 
-                # Extract details (Prices/IDs)
+                # Normalize Prices
+                l_limit = float(limit_px) if limit_px is not None else 0.0
+                l_stop  = float(stop_px) if stop_px is not None else 0.0
+                
+                # Classify TP vs SL
                 if l_type == 'limit':
-                    tp_price = float(leg.get('limit_price') or 0.0)
-                    tp_id = leg_id
+                    tp_price = l_limit
+                    tp_id = latest_leg_id
                 elif 'stop' in l_type:
-                    sl_price = float(leg.get('stop_price') or 0.0)
-                    if sl_price == 0.0:
-                        sl_price = float(leg.get('limit_price') or 0.0)
-                    sl_id = leg_id
+                    # Stop orders might store price in stop_price OR limit_price depending on type
+                    sl_price = l_stop if l_stop > 0 else l_limit
+                    sl_id = latest_leg_id
 
-        # --- 6. Build Row ---
+        # --- 6. Build Row (Only if Legs are Live) ---
         if has_active_legs:
             p_id = str(row.get('id'))
             if 'order_id' in row and pd.notna(row['order_id']):
@@ -608,6 +649,8 @@ def build_lot_portfolio(
             
             # Prices
             strategy_entry = float(row.get('filled_avg_price') or 0.0)
+            
+            # Broker average fallback
             m_data = market_data.get(symbol.lower(), {})
             current_price = m_data.get("cur_px", 0.0)
             broker_avg = m_data.get("avg_entry", 0.0)
@@ -629,13 +672,14 @@ def build_lot_portfolio(
                 "Stop_Loss_Price": sl_price,
                 "Take_Profit_ID": tp_id,
                 "Stop_Loss_ID": sl_id,
+                "Expiration Date": expiry_ts,
                 
                 "Source": "Simple",
                 "Current_Price": current_price,
             }
             active_lots.append(pos)
 
-    # --- 7. DataFrame & Calculations ---
+    # --- 7. DataFrame Construction & Metrics ---
     df = pd.DataFrame(active_lots)
     
     final_cols_ordered = [
@@ -643,7 +687,7 @@ def build_lot_portfolio(
         "Buy Price", "Avg Entry (API)", 
         "Take_Profit_Price", "Stop_Loss_Price", 
         "Take_Profit_ID", "Stop_Loss_ID", 
-        "Source", "Holding_Period", 
+        "Source", "Holding_Period", "Days_To_Expire",
         "Current_Price", "Current Market Value", "Profit/Loss", 
         "TP_reach, %", "BrE"
     ]
@@ -651,29 +695,32 @@ def build_lot_portfolio(
     if df.empty:
         return pd.DataFrame(columns=final_cols_ordered)
 
+    # Calculate Time Metrics
     df["Buy Date Obj"] = pd.to_datetime(df["Buy Date"], utc=True)
     now = pd.Timestamp.now(tz=df["Buy Date Obj"].dt.tz)
     df["Holding_Period"] = (now - df["Buy Date Obj"]).dt.days
     df["Buy Date"] = df["Buy Date Obj"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    
+    df["Expiration Obj"] = pd.to_datetime(df["Expiration Date"], utc=True, errors='coerce')
+    df["Days_To_Expire"] = (df["Expiration Obj"] - now).dt.days
 
+    # Financials
     df["Current_Price"] = df["Current_Price"].fillna(0.0)
     df["Current Market Value"] = df["Remaining Qty"] * df["Current_Price"]
-    
-    # Financials
     df["Profit/Loss"] = (df["Current_Price"] - df["Avg Entry (API)"]) * df["Remaining Qty"]
 
-    # Metrics
+    # Technical Metrics
     diff_strategy = df["Current_Price"] - df["Buy Price"]
     tp_dist = df["Take_Profit_Price"] - df["Buy Price"]
     sl_dist = df["Buy Price"] - df["Stop_Loss_Price"]
-    df["TP_reach, %"] = np.nan
     
+    df["TP_reach, %"] = np.nan
     mask_profit = (diff_strategy >= 0) & (tp_dist > 0)
     df.loc[mask_profit, "TP_reach, %"] = (diff_strategy / tp_dist * 100).round(2)
-    
     mask_loss = (diff_strategy < 0) & (sl_dist > 0)
     df.loc[mask_loss, "TP_reach, %"] = (diff_strategy / sl_dist * 100).round(2)
 
+    # Break-Even Flag
     df["BrE"] = df.apply(
         lambda r: 1
         if (
