@@ -4,6 +4,8 @@ The **Risk Manager** is an autonomous execution agent designed to eliminate
 tail-risk on active bracket orders. It runs as a scheduled DAG in Airflow,
 continuously monitoring price action against pre-calculated volatility targets.
 
+![Airflow Control Panel](img/risk_manager_preview.png)
+
 ## Core Logic: The "Break-Even" Mechanism
 
 The primary goal is to move the Stop Loss to the **Entry Price**
