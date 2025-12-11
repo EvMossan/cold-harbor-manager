@@ -59,7 +59,8 @@ def _aggregate_lots(df: pd.DataFrame) -> pd.DataFrame:
         "Avg Entry (API)": "first",
         "_avg_px_symbol": "first",
         # Preserve TP_reach if possible (taking first isn't perfect but sufficient for summary)
-        "TP_reach, %": "first", 
+        "TP_reach, %": "first",
+        "Days_To_Expire": "first",
     }
     
     # Only aggregate columns that actually exist in the DF

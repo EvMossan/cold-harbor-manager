@@ -255,7 +255,8 @@ async def load_orders_from_db(
     # 1. Dates to UTC
     date_cols = [
         "created_at", "updated_at", "submitted_at", 
-        "filled_at", "expired_at", "canceled_at"
+        "filled_at", "expired_at", "canceled_at",
+        'expires_at',
     ]
     for col in date_cols:
         if col in df.columns:

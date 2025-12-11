@@ -437,7 +437,7 @@
     <tfoot>
       <tr>
         <th style="text-align:left">TOTAL</th>
-        <th></th><th></th><th></th><th></th><th></th><th></th>
+        <th></th><th></th><th></th><th></th><th></th><th></th><th></th>
         <th></th><th></th><th></th><th></th><th></th><th></th><th></th>
       </tr>
     </tfoot>
@@ -790,11 +790,11 @@
 
     /* Build columns for Open Positions */
     const posColumns = [
-      { data:'symbol', name:'symbol', title:'Symbol', defaultContent:'' },
-
       { data:'moved_flag', name:'moved_flag', title:'BE&nbsp;?',
         className:'be-flag col-be-flag', defaultContent:'—',
         render: d => d === 'OK' ? '<span class="ok">✔︎</span>' : '—' },
+
+      { data:'symbol', name:'symbol', title:'Symbol', defaultContent:'' },
 
       { data:'tp_sl_reach_pct', name:'tp_sl_reach_pct', title:'TP/SL&nbsp;%',
         defaultContent:0, className:'tp-reach col-tp-sl-pct', type:'num',

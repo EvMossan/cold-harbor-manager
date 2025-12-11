@@ -252,12 +252,12 @@ class BreakevenOrderManager:
             # --- START DATE RESOLUTION (Double Fallback) ---
             try:
                 dates = await fetch_history_meta_dates(self.repo, self.slug)
-                    if dates and dates[0]:
-                        start_date = dates[0]
-                        self.log.info(
-                            "Optimized fetch: using DB meta start date %s",
-                            start_date,
-                        )
+                if dates and dates[0]:
+                    start_date = dates[0]
+                    self.log.info(
+                        "Optimized fetch: using DB meta start date %s",
+                        start_date,
+                    )
                 else:
                     raise ValueError("DB meta returned empty/None dates")
             except Exception as db_exc:

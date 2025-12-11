@@ -26,7 +26,7 @@ async def load_orders_from_db(
             id, client_order_id, parent_id, symbol, side, order_type, status,
             qty, filled_qty, filled_avg_price, limit_price, stop_price,
             created_at, updated_at, submitted_at, filled_at,
-            expired_at, canceled_at, replaced_by, replaces,
+            expires_at, expired_at, canceled_at, replaced_by, replaces,
             legs, raw_json
         FROM {table_name}
         WHERE created_at >= $1
@@ -47,6 +47,7 @@ async def load_orders_from_db(
         "updated_at",
         "submitted_at",
         "filled_at",
+        "expires_at",
         "expired_at",
         "canceled_at",
     ]
