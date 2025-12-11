@@ -65,6 +65,7 @@ async def ensure_schema_and_tables(
             expired_at TIMESTAMPTZ,
             canceled_at TIMESTAMPTZ,
             replaced_at TIMESTAMPTZ,
+            expires_at TIMESTAMPTZ,
             raw_json JSONB,
             legs JSONB,
 
@@ -190,7 +191,8 @@ async def upsert_orders(
         "replaces", "symbol", "side", "order_type", "status",
         "qty", "filled_qty", "filled_avg_price", "limit_price", "stop_price",
         "created_at", "updated_at", "submitted_at", "filled_at",
-        "expired_at", "canceled_at", "replaced_at", "raw_json", "legs",
+        "expired_at", "canceled_at", "replaced_at", "expires_at", "raw_json",
+        "legs",
         "ingested_at"
     ]
     

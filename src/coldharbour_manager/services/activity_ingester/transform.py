@@ -43,6 +43,7 @@ class OrderRecord(TypedDict, total=False):
     expired_at: Optional[datetime]
     canceled_at: Optional[datetime]
     replaced_at: Optional[datetime]
+    expires_at: Optional[datetime]
     raw_json: Optional[str]
     legs: Optional[str]
     ingested_at: datetime
@@ -189,6 +190,7 @@ def normalize_order(raw: Dict[str, Any]) -> OrderRecord:
         "expired_at": _parse_ts(data.get("expired_at")),
         "canceled_at": _parse_ts(data.get("canceled_at")),
         "replaced_at": _parse_ts(data.get("replaced_at")),
+        "expires_at": _parse_ts(data.get("expires_at")),
 
         "raw_json": _serialize_raw(data),
         "legs": legs_json,

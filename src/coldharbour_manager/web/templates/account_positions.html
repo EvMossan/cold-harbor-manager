@@ -800,12 +800,25 @@
 
       { data:'symbol', name:'symbol', title:'Symbol', defaultContent:'' },
 
+      { data:'profit_loss', name:'profit_loss', title:'P/L&nbsp;(FIFO)',
+        className:'col-pl-wac dt-right', defaultContent:0,
+        render:(d,t)=> t==='display' ? num2.display(+d||0) : +d||0 },
+
+      { data:'profit_loss_lot', name:'profit_loss_lot',
+        title:'P/L&nbsp;(Strategy)',
+        className:'col-pl-lot dt-right', defaultContent:0,
+        render:(d,t)=> t==='display' ? num2.display(+d||0) : +d||0 },
+
       { data:'filled_at', name:'filled_at', title:'Buy&nbsp;TS', className:'no-wrap',
         defaultContent:'',
         render:(d,t)=> t==='display' ? fmtUtcMin(d)
                                      : (d ? Date.parse(d) : 0) },
 
       { data:'holding_days', name:'holding_days', title:'Days',
+        defaultContent:0,
+        render:(d,t)=> t==='display' ? num0.display(+d||0) : +d||0 },
+
+      { data:'days_to_expire', name:'days_to_expire', title:'Exp&nbsp;Days',
         defaultContent:0,
         render:(d,t)=> t==='display' ? num0.display(+d||0) : +d||0 },
 
@@ -818,16 +831,7 @@
       { data:'buy_value', name:'buy_value', title:'Buy&nbsp;Value',
         defaultContent:0, render:num2 },
       { data:'mkt_value', name:'mkt_value', title:'Mkt&nbsp;Value',
-        defaultContent:0, render:num2 },
-
-      { data:'profit_loss', name:'profit_loss', title:'P/L&nbsp;(FIFO)',
-        className:'col-pl-wac dt-right', defaultContent:0,
-        render:(d,t)=> t==='display' ? num2.display(+d||0) : +d||0 },
-
-      { data:'profit_loss_lot', name:'profit_loss_lot',
-        title:'P/L&nbsp;(Strategy)',
-        className:'col-pl-lot dt-right', defaultContent:0,
-        render:(d,t)=> t==='display' ? num2.display(+d||0) : +d||0 }
+        defaultContent:0, render:num2 }
     ];
 
     const pos = $('#pos').DataTable({

@@ -244,12 +244,21 @@ async def _ensure_tables(
                 moved_flag       text DEFAULT '—',
                 buy_value        real,
                 holding_days     integer,
+                days_to_expire   integer,
                 mkt_value        real,
                 profit_loss      real,
                 profit_loss_lot  real,
                 tp_sl_reach_pct  real,
                 updated_at       timestamptz DEFAULT now()
             );
+            """,
+        )
+        await _db_execute(
+            repo,
+            logger,
+            f"""
+            ALTER TABLE {tbl_live}
+            ADD COLUMN IF NOT EXISTS days_to_expire integer;
             """,
         )
         await _ensure_table(

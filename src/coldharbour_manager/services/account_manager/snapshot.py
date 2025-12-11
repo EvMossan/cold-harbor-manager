@@ -178,6 +178,8 @@ def _build_live_row(
     sl_child = _normalize_leg_id(entry.get("Stop_Loss_ID"))
     tp_child = _normalize_leg_id(entry.get("Take_Profit_ID"))
 
+    days_expire = _safe_float(entry.get("Days_To_Expire"))
+
     return {
         "parent_id": parent_id,
         "symbol": symbol,
@@ -194,6 +196,7 @@ def _build_live_row(
         "moved_flag": "—",
         "buy_value": buy_value,
         "holding_days": None,
+        "days_to_expire": days_expire,
         "mkt_value": mkt_value,
         "profit_loss": profit_loss,
         "profit_loss_lot": profit_loss_lot,

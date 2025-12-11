@@ -248,20 +248,40 @@ class BreakevenOrderManager:
         if orders.empty:
             self.log.info("Loading orders from API (Fallback)...")
             start_date = None
+
+            # --- START DATE RESOLUTION (Double Fallback) ---
             try:
                 dates = await fetch_history_meta_dates(self.repo, self.slug)
-                if dates[0]:
-                    start_date = dates[0]
-                    self.log.info(
-                        f"Optimized fetch: starting from {start_date}"
-                    )
-                self.log.info(
-                    "Historian StartDate: %s",
-                    start_date or "default (365 days ago)",
+                    if dates and dates[0]:
+                        start_date = dates[0]
+                        self.log.info(
+                            "Optimized fetch: using DB meta start date %s",
+                            start_date,
+                        )
+                else:
+                    raise ValueError("DB meta returned empty/None dates")
+            except Exception as db_exc:
+                self.log.warning(
+                    f"DB meta fetch failed: {db_exc}. Trying API detection..."
                 )
-            except Exception as exc:
-                self.log.warning(f"Failed to fetch meta dates: {exc}")
+                try:
+                    api_dates = await asyncio.to_thread(
+                        account_analytics.get_history_start_dates, self.api
+                    )
+                    if api_dates and api_dates[0]:
+                        start_date = api_dates[0]
+                        self.log.info(
+                            "Optimized fetch: using API-detected start date %s",
+                            start_date,
+                        )
+                except Exception as api_exc:
+                    self.log.warning(
+                        "API date detection failed: %s. Defaulting to 365 days "
+                        "lookback.",
+                        api_exc,
+                    )
 
+            # --- FETCH ORDERS ---
             try:
                 orders = await asyncio.to_thread(
                     fetch_orders,

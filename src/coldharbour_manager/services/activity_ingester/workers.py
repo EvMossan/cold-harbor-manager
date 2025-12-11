@@ -32,14 +32,22 @@ def _get_rest_client(api_key: str, secret_key: str, base_url: str) -> REST:
 
 
 def _timestamp_to_datetime(value: Any) -> Optional[datetime]:
-    """Convert pandas-compatible timestamps to datetimes."""
-    if pd.isna(value):
+    """Convert pandas-compatible timestamps (or strings) to datetimes."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
-    if isinstance(value, pd.Timestamp):
-        return value.to_pydatetime()
+
     if isinstance(value, datetime):
         return value
-    return None
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime()
+
+    try:
+        dt = pd.to_datetime(value, utc=True)
+        if pd.isna(dt):
+            return None
+        return dt.to_pydatetime()
+    except Exception:
+        return None
 
 
 def _df_to_ingest_records(df: pd.DataFrame) -> List[dict[str, Any]]:
@@ -76,6 +84,7 @@ def _df_to_ingest_records(df: pd.DataFrame) -> List[dict[str, Any]]:
                 "expired_at": _timestamp_to_datetime(row.get("expired_at")),
                 "canceled_at": _timestamp_to_datetime(row.get("canceled_at")),
                 "replaced_at": _timestamp_to_datetime(row.get("replaced_at")),
+                "expires_at": _timestamp_to_datetime(row.get("expires_at")),
                 "raw_json": _json_dumper(raw_data),
                 "legs": legs_json,
 

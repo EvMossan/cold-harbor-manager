@@ -222,7 +222,7 @@ async def load_orders_from_db(
             id, client_order_id, parent_id, symbol, side, order_type, status,
             qty, filled_qty, filled_avg_price, limit_price, stop_price,
             created_at, updated_at, submitted_at, filled_at,
-            expired_at, canceled_at, replaced_by, replaces,
+            expired_at, expires_at, canceled_at, replaced_by, replaces,
             legs, raw_json
         FROM {table_name}
         WHERE created_at >= $1
@@ -422,7 +422,9 @@ def fetch_all_activities(api, start_date=None, end_date=None):
         "created_at",
     ]
 
-    df["exec_time"] = pd.NaT
+    df["exec_time"] = pd.Series(
+        pd.NaT, index=df.index, dtype="datetime64[ns, UTC]"
+    )
 
     for col in possible_time_cols:
         if col in df.columns:
@@ -468,6 +470,7 @@ def build_lot_portfolio(
     1. Identifying replacement chains via the 'replaces' column.
     2. Resolving every leg to its latest descendant (Successor).
     3. Using the Successor's Status and Prices instead of the Stale Parent JSON.
+    4. Calculates Days_To_Expire (Explicit or Inferred via 90-day GTC rule).
     """
     # --- 1. Fetch Broker Data (Market Data & Averages) ---
     market_data: Dict[str, Dict[str, float]] = {}
@@ -519,18 +522,14 @@ def build_lot_portfolio(
     # --- 3. BUILD REPLACEMENT CHAIN & LOOKUP MAP (The Logic Upgrade) ---
     
     # A. Index entire DB by ID for fast lookup of "Fresh Data" (Prices/Status)
-    # We convert to dict for O(1) access.
-    # Note: orient='index' keys by the index, so we set index to 'id' first.
     if 'id' not in df_clean.columns:
         return pd.DataFrame()
         
     orders_map = df_clean.set_index('id').to_dict('index')
     
     # B. Build Forward Map: Old_ID -> New_ID
-    # We use the 'replaces' column from NEW orders to find out who they replaced.
     replacement_map = {}
     if 'replaces' in df_clean.columns:
-        # Filter only rows that actually replace something
         replacers = df_clean.dropna(subset=['replaces'])
         for _, row in replacers.iterrows():
             old_id = str(row['replaces'])
@@ -540,13 +539,11 @@ def build_lot_portfolio(
     # Helper to walk the chain to the bitter end
     def get_latest_successor(order_id):
         curr = str(order_id)
-        # Follow the chain as long as there is a newer order
         while curr in replacement_map:
             curr = replacement_map[curr]
         return curr
 
     # --- 4. Filter Parents ---
-    # We only care about Parents that are Filled Buy orders
     parents = df_clean[
         (df_clean['side'] == 'buy') & 
         (df_clean['status'] == 'filled') &
@@ -555,6 +552,9 @@ def build_lot_portfolio(
     
     active_lots = []
     live_statuses = {'new', 'held', 'accepted', 'partially_filled', 'open', 'calculated', 'pending_replace'}
+    
+    # CONSTANT: Alpaca GTC Order Expiration (Days)
+    ALPACA_GTC_DAYS = 90
 
     # --- 5. Iterate & Unpack ---
     for _, row in parents.iterrows():
@@ -566,7 +566,6 @@ def build_lot_portfolio(
             legs_data = legs_raw
         elif isinstance(legs_raw, str):
             try:
-                # Cleanup common Python-string-as-JSON issues
                 clean_json = (
                     legs_raw.replace("'", '"')
                     .replace("None", "null")
@@ -591,17 +590,19 @@ def build_lot_portfolio(
         expiry_ts = None
         has_active_legs = False
         
+        # Parent creation time (fallback for expiry calculation)
+        parent_created_at = row.get('created_at')
+        
         for leg in legs_data:
             original_leg_id = str(leg.get('id'))
             
             # === RESOLVE LATEST SUCCESSOR ===
-            # Even if 'original_leg_id' is old/stale in DB, this finds the newest replacement ID.
             latest_leg_id = get_latest_successor(original_leg_id)
             
             # === GET FRESH DATA ===
-            # Try to find the latest leg in our orders_map (DB dump).
-            # If not found (rare gap), fallback to the JSON data from Parent.
             fresh_order = orders_map.get(latest_leg_id)
+            
+            leg_created_at = None
             
             if fresh_order:
                 # Use DB data (Preferred)
@@ -609,21 +610,40 @@ def build_lot_portfolio(
                 l_type = str(fresh_order.get('order_type') or fresh_order.get('type')).lower()
                 limit_px = fresh_order.get('limit_price')
                 stop_px  = fresh_order.get('stop_price')
-                # Capture expiry from fresh row if available
+                
+                # Capture timestamps from fresh order
                 if not expiry_ts:
                     expiry_ts = fresh_order.get('expires_at') or fresh_order.get('expired_at')
+                leg_created_at = fresh_order.get('created_at')
+                
             else:
-                # Fallback to JSON data (Stale but better than nothing)
+                # Fallback to JSON data (Stale)
                 current_status = str(leg.get('status')).lower()
                 l_type = str(leg.get('order_type') or leg.get('type')).lower()
                 limit_px = leg.get('limit_price')
                 stop_px  = leg.get('stop_price')
+                
+                # Capture timestamps from JSON
                 if not expiry_ts:
                     expiry_ts = leg.get('expires_at')
+                leg_created_at = leg.get('created_at')
 
             # === CHECK IF LIVE ===
             if current_status in live_statuses:
                 has_active_legs = True
+                
+                # --- Expiration Logic Fix ---
+                # If explicit expiry is missing, calculate it: Created + 90 Days
+                if not expiry_ts:
+                    # Prefer leg creation time, fallback to parent creation time
+                    base_time = leg_created_at or parent_created_at
+                    if base_time:
+                        try:
+                            dt_base = pd.to_datetime(base_time, utc=True)
+                            if pd.notna(dt_base):
+                                expiry_ts = dt_base + pd.Timedelta(days=ALPACA_GTC_DAYS)
+                        except Exception:
+                            pass
                 
                 # Normalize Prices
                 l_limit = float(limit_px) if limit_px is not None else 0.0
@@ -634,7 +654,6 @@ def build_lot_portfolio(
                     tp_price = l_limit
                     tp_id = latest_leg_id
                 elif 'stop' in l_type:
-                    # Stop orders might store price in stop_price OR limit_price depending on type
                     sl_price = l_stop if l_stop > 0 else l_limit
                     sl_id = latest_leg_id
 
@@ -701,6 +720,8 @@ def build_lot_portfolio(
     df["Holding_Period"] = (now - df["Buy Date Obj"]).dt.days
     df["Buy Date"] = df["Buy Date Obj"].dt.strftime("%Y-%m-%d %H:%M:%S")
     
+    # Calculate Days To Expire
+    # Use 'coerce' to handle potential parsing errors gracefully
     df["Expiration Obj"] = pd.to_datetime(df["Expiration Date"], utc=True, errors='coerce')
     df["Days_To_Expire"] = (df["Expiration Obj"] - now).dt.days
 
