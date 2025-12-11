@@ -46,101 +46,116 @@ graph TD
     classDef db fill:#eee,stroke:#333,stroke-width:2px,shape:cylinder;
     classDef bus fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,shape:rect;
 
-    %% 1. EXTERNAL SOURCES
+    %% ---------------------------------------------------------
+    %% 1. EXTERNAL SOURCES (Top)
+    %% ---------------------------------------------------------
     subgraph External [External Market Data]
         direction TB
-        AlpacaWS(Alpaca WebSocket<br/>Trade Updates)
-        AlpacaREST(Alpaca REST API<br/>History & Snapshots)
-        ZMQ(ZMQ Price Stream<br/>Real-time Quotes)
+        AlpacaWS(Alpaca WebSocket):::external
+        ZMQ(ZMQ Price Stream):::external
+        AlpacaREST(Alpaca REST API):::external
     end
 
-    %% 2. INGESTION LAYER
+    %% ---------------------------------------------------------
+    %% 2. INGESTION SERVICE
+    %% ---------------------------------------------------------
     subgraph Ingester_Layer [Data Ingester Service]
         direction TB
-        IngesterRun(<b>ingester_run.py</b><br/>Orchestrator):::service
+        IngesterRun(<b>ingester_run.py</b>):::service
+        
+        %% Stack workers vertically
         StreamWork(stream_consumer):::worker
         HealWork(healing_worker):::worker
         
         IngesterRun --> StreamWork
-        IngesterRun --> HealWork
+        StreamWork ~~~ HealWork
     end
 
+    %% ---------------------------------------------------------
     %% 3. RAW STORAGE
-    subgraph Raw_DB [Raw Storage / Data Lake]
-        direction LR
-        RawOrders[(raw_orders<br/>Mutable State)]:::db
-        RawActs[(raw_activities<br/>Immutable Log)]:::db
+    %% ---------------------------------------------------------
+    subgraph Raw_DB [Raw Storage Schema]
+        direction TB
+        RawOrders[(raw_orders_live)]:::db
+        RawActs[(raw_activities_live)]:::db
+        RawOrders ~~~ RawActs
     end
 
-    %% 4. MANAGER LAYER
+    %% ---------------------------------------------------------
+    %% 4. MANAGER SERVICE
+    %% ---------------------------------------------------------
     subgraph Manager_Layer [Account Manager Service]
         direction TB
-        MgrRun(<b>manager_run.py</b><br/>State Machine):::service
+        MgrRun(<b>manager_run.py</b>):::service
         
-        subgraph Mgr_Workers [Background Workers]
-            PriceList(price_listener):::worker
-            SnapLoop(snapshot_loop):::worker
-            EquityWork(equity_intraday):::worker
-            MetricsWork(metrics_worker):::worker
-        end
+        %% Stack workers vertically
+        PriceList(price_listener):::worker
+        SnapLoop(snapshot_loop):::worker
+        MetricsWork(metrics_worker):::worker
+        EquityWork(equity_intraday):::worker
         
+        %% Invisible links to force column layout
         MgrRun --> PriceList
-        MgrRun --> SnapLoop
-        MgrRun --> EquityWork
-        MgrRun --> MetricsWork
+        PriceList ~~~ SnapLoop
+        SnapLoop ~~~ MetricsWork
+        MetricsWork ~~~ EquityWork
     end
 
+    %% ---------------------------------------------------------
     %% 5. LIVE STORAGE
-    subgraph Live_DB [Live State / accounts schema]
-        direction LR
-        TblLive[(open_positions<br/>Live State)]:::db
-        TblClosed[(closed_trades<br/>History)]:::db
-        TblMetrics[(account_metrics<br/>JSON for UI)]:::db
+    %% ---------------------------------------------------------
+    subgraph Live_DB [Live Accounts Schema]
+        direction TB
+        TblLive[(open_positions)]:::db
+        TblClosed[(closed_trades)]:::db
+        TblMetrics[(account_metrics)]:::db
+        TblLive ~~~ TblClosed
+        TblClosed ~~~ TblMetrics
     end
 
-    %% 6. CONSUMERS: RISK & UI
-    subgraph Risk_Layer [Airflow / Risk Manager]
-        RiskDAG(<b>Risk Manager DAG</b><br/>Break-Even Engine):::service
-        LogRisk[(log_breakeven<br/>Audit)]:::db
+    %% ---------------------------------------------------------
+    %% 6. CONSUMERS (Bottom)
+    %% ---------------------------------------------------------
+    subgraph Consumers [Clients & Orchestration]
+        direction TB
+        RiskDAG(<b>Airflow Risk DAG</b>):::service
+        Flask(<b>Flask Dashboard</b>):::service
+        SSE((SSE Stream)):::bus
+        
+        RiskDAG ~~~ Flask
     end
 
-    subgraph Web_Layer [Web Dashboard]
-        Flask(Flask App<br/>routes.py):::service
-        SSE((SSE Stream<br/>Push)):::bus
-    end
+    %% =========================================================
+    %% DATA FLOW CONNECTIONS
+    %% =========================================================
 
-    %% CONNECTIONS (The Flow)
+    %% Inflow
+    AlpacaWS --> StreamWork
+    AlpacaREST --> HealWork
+    ZMQ --> PriceList
+
+    %% Ingestion Writes
+    StreamWork --> RawOrders & RawActs
+    HealWork --> RawOrders & RawActs
+
+    %% Manager Reads/Writes
+    RawOrders & RawActs --> SnapLoop
+    PriceList -- Update Px --> TblLive
+    SnapLoop -- Reconcile --> TblLive
     
-    %% Ingestion Flow
-    AlpacaWS -->|Raw Events| StreamWork
-    AlpacaREST -->|Recovery| HealWork
-    StreamWork -->|Upsert| RawOrders & RawActs
-    HealWork -->|Upsert| RawOrders & RawActs
+    %% Internal Manager Flow
+    TblLive --> MetricsWork & EquityWork
+    MetricsWork --> TblMetrics
+    EquityWork --> TblLive
 
-    %% Manager Flow
-    ZMQ -->|Ticks| PriceList
-    RawOrders & RawActs -->|Read History| SnapLoop
-    PriceList -->|Update Price| TblLive
-    SnapLoop -->|Reconcile| TblLive
-    
-    %% Metrics & Equity
-    TblLive -->|Read| EquityWork & MetricsWork
-    EquityWork -->|Write| TblLive
-    MetricsWork -->|Write| TblMetrics
+    %% Risk Manager Flow
+    TblLive --> RiskDAG
+    RiskDAG -- Patch Order --> AlpacaREST
 
-    %% Risk Flow
-    TblLive -->|Read State| RiskDAG
-    RiskDAG -->|Patch Order| AlpacaREST
-    RiskDAG -->|Audit| LogRisk
-
-    %% UI Flow
-    TblLive & TblMetrics -->|Read| Flask
+    %% Web Flow
+    TblMetrics --> Flask
     TblLive -.->|PG NOTIFY| SSE
-    SSE -->|Update| Flask
-
-    %% Apply Styles
-    class AlpacaWS,AlpacaREST,ZMQ external;
-```
+    SSE --> Flask
 
 1.  **Account Manager (The Brain):**
     An async Python daemon that maintains the "live" state. It reconciles REST API snapshots with WebSocket streams, calculates Greeks/metrics, and pushes updates to the UI via Postgres `NOTIFY`.
