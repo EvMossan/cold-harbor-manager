@@ -233,23 +233,23 @@ class BreakevenOrderManager:
                 self.cfg["CONN_STRING_POSTGRESQL"]
             )
 
-        # try:
-        #     orders = await load_orders_from_db(
-        #         self.repo, self.slug
-        #     )
-        # except Exception as exc:
-        #     self.log.warning("DB load failed: %s", exc)
-        #     orders = pd.DataFrame()
-
-        # if orders.empty:
-        self.log.info("Loading orders from API (Fallback)...")
         try:
-            orders = await asyncio.to_thread(
-                fetch_orders, self.api
+            orders = await load_orders_from_db(
+                self.repo, self.slug
             )
         except Exception as exc:
-            self.log.warning("API load failed: %s", exc)
+            self.log.warning("DB load failed: %s", exc)
             orders = pd.DataFrame()
+
+        if orders.empty:
+            self.log.info("Loading orders from API (Fallback)...")
+            try:
+                orders = await asyncio.to_thread(
+                    fetch_orders, self.api
+                )
+            except Exception as exc:
+                self.log.warning("API load failed: %s", exc)
+                orders = pd.DataFrame()
 
         if orders.empty:
             return pd.DataFrame()
