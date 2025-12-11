@@ -1,53 +1,77 @@
 # Risk Manager Service
 
-The **Risk Manager** is an autonomous service responsible for eliminating
-tail-risk in active trades. It continuously monitors open bracket
-positions and moves Stop-Loss orders to "Break-Even" (entry price) once
-specific favorable conditions are met.
+The **Risk Manager** is an autonomous execution agent designed to eliminate
+tail-risk on active bracket orders. It runs as a scheduled DAG in Airflow,
+continuously monitoring price action against pre-calculated volatility targets.
 
-## Overview
+## Core Logic: The "Break-Even" Mechanism
 
-Unlike the Account Manager (which maintains state), the Risk Manager is an
-**active execution agent** that runs on a schedule.
+The primary goal is to move the Stop Loss to the **Entry Price**
+(Break-Even) once the position has moved sufficiently in our favor.
 
-- **Goal:** Protect capital by neutralizing risk on profitable trades
-  ("free roll").
-- **Mechanism:** Updates the `stop_price` of existing open Stop-Loss legs
-  via the Alpaca API.
-- **Orchestration:** Runs as a series of DAGs inside **Apache Airflow**,
-  triggering every minute during market hours.
+### The Trigger: "TakeProfit 2.1"
+The system uses a volatility-adjusted trigger based on the **Risk Multiple
+(R)**.
+- **R (Risk Unit):** The distance between `Entry Price` and the initial
+  `Stop Loss`.
+- **Trigger Condition:** The break-even logic activates when the price
+  reaches **2.1R** (i.e., `Entry + 2.1 * Risk`).
 
-## Trading Logic
+This level is pre-calculated by the breakout engine and stored in the
+`alpaca_breakouts` table as `takeprofit_2_1_price`.
 
-The logic is defined in `BreakevenOrderManager`.
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| **Trigger Source** | `takeprofit_2_1_price` | The price level that "arms" the move. |
+| **Move Target** | `Entry Price` | The new `stop_price` applied to the order. |
+| **Min Gap** | `0.01` (or tick size) | Ensures the new stop is valid and accepted by the broker. |
 
-1.  **Trigger Level:** A position is "armed" when the price hits a
-    pre-calculated target (e.g., `takeprofit_2_1_price` from the
-    breakouts table).
-2.  **Move Condition:**
-    * **Long:** `Max High >= Trigger` AND `Last Trade >= Entry`.
-    * **Short:** `Min Low <= Trigger` AND `Last Trade <= Entry`.
-3.  **Safety Rails:**
-    * Stops are never lowered (for longs) or raised (for shorts).
-    * If the price has already crossed back through the entry, the move
-      is skipped to avoid immediate stop-outs.
+### Decision Matrix
+Every minute, the manager evaluates each open position against the following
+logic steps:
+
+| Step | Condition | Action / Outcome |
+|:---:|:--- |:--- |
+| **1** | `Current Stop ~= Entry` | **SKIP**: Position is already at Break-Even. |
+| **2** | `Last Trade` is missing | **SKIP**: Market data unavailable. |
+| **3** | `Last Trade < Entry` (Long) | **ABORT**: Price has fallen back below entry. Moving stop now would trigger an immediate loss. |
+| **4** | `Max High >= Trigger` (Long) | **ARMED**: The asset touched the 2.1R target. |
+| **5** | All checks pass | **EXECUTE**: Send `PATCH /v2/orders/{id}` to move stop to Entry. |
+
+---
+
+## Data Resiliency & Fallbacks
+
+The Risk Manager is designed to function even if the local database is lagging
+or empty. It implements a **Tiered Loading Strategy** in
+`_fetch_portfolio_state`:
+
+### 1. Primary Source: Local Database
+* **Attempt:** Query `account_activities.raw_orders_<slug>`.
+* **Pros:** Extremely fast, low latency, reduces API rate limits.
+* **Cons:** Depends on the Ingester service being up-to-date.
+
+### 2. Fallback Source: Alpaca REST API
+* **Trigger:** If the Local Database returns **0 active orders**.
+* **Action:** The manager bypasses the DB and downloads the full order
+  history directly from Alpaca.
+* **Optimization:** To avoid downloading years of history, it checks
+  `raw_history_meta` to find the exact account start date.
+
+| Priority | Source | Mechanism |
+|:---:|:--- |:--- |
+| **A** | **DB Meta** | Checks `earliest_order` timestamp in `raw_history_meta`. |
+| **B** | **API Probe** | If meta is missing, queries Alpaca for the very first order to define the window. |
+| **C** | **Default** | Defaults to `365 days` lookback as a safety net. |
+
+---
 
 ## Infrastructure
 
-The Risk Manager is deployed differently from the persistent services:
-
-* **Execution:** Python Script wrapped in Airflow DAGs
-  (`dags/breakeven_multi_account.py`).
-* **Scheduling:** `*/1 9-16 * * 1-5` (Every minute during NYSE trading
-  hours).
-* **Multi-Account:** Dynamically generates a separate DAG for each
-  account defined in `destinations.py`.
-
-## Data Interaction
-
-* **Input:** Reads open orders from the database/API and market data
-  (1-min bars) to find high/lows since entry.
-* **Output:** Sends `PATCH /v2/orders/{id}` requests to Alpaca to update
-  stop prices.
-* **Audit:** Logs all decisions and moves to the `log_breakeven_<slug>`
-  table in PostgreSQL.
+* **DAG Definition:** `dags/breakeven_multi_account.py`
+* **Schedule:** `*/1 9-16 * * 1-5` (Every minute during NYSE Regular Trading Hours).
+* **Concurrency:** Uses a `ThreadPoolExecutor` (default 10 workers) to
+  parallelize market data fetches and patch requests across hundreds of
+  positions.
+* **Audit Logging:** All decisions (including "Why I skipped this trade") are
+  persisted to the `log_breakeven_<slug>` table for debugging.

@@ -157,6 +157,8 @@ graph TD
     TblLive -.->|PG NOTIFY| SSE
     SSE --> Flask
 
+```
+
 1.  **Account Manager (The Brain):**
     An async Python daemon that maintains the "live" state. It reconciles REST API snapshots with WebSocket streams, calculates Greeks/metrics, and pushes updates to the UI via Postgres `NOTIFY`.
 
