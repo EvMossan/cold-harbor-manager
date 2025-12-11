@@ -47,17 +47,17 @@ Tech Stack:
 | **Infrastructure** | Docker, Docker Compose, **Google Cloud Run**, Cloud Build |
 | **Networking** | **Cloudflare Access** (Zero Trust Tunnels), Alpaca API (Trading) |
 
-### 🛡️ Active Risk Management
+### Active Risk Management
 -   **Break-Even Engine:** Automatically trails Stop-Loss orders to the entry price once a position is "safe" (price > entry + trigger).
 -   **Smart Triggers:** Uses pre-calculated volatility targets (e.g., 30-min breakout levels) to arm the break-even logic, ensuring stops aren't moved prematurely during noise.
 -   **Session Orchestration:** An autonomous Supervisor manages the trading lifecycle, spinning up workers for Pre-Market (04:00 ET) and shutting down after Post-Market close to save resources.
 
-### 📊 Real-Time Analytics
+### Real-Time Analytics
 -   **Hybrid Pricing Model:** Simultaneously tracks **Strategy Price** (technical execution basis) and **Broker WAC** (tax/accounting basis), preventing P&L drift in decision-making.
 -   **Live Greeks & Metrics:** Streaming calculation of Sharpe Ratio (Smart/Rolling), Win Rate, and Drawdown updated every 5 seconds.
 -   **Intraday Equity Curve:** High-resolution (1-minute) charting that reconciles mark-to-market position values with cash flows (dividends, fees) in real-time.
 
-### 🔍 Data Integrity & Execution
+### Data Integrity & Execution
 -   **Deep Chain Tracing:** Resolves complex OTO/Bracket chains, tracking "Grandchild" orders through multiple replacements (e.g., user-modified stops) to maintain correct parentage.
 -   **Orphan Detection:** Identifies "broken" positions where the broker reports exposure but the bot sees no active stop-loss protection.
 -   **Immutable Data Lake:** A dedicated Ingester service captures every WebSocket event into a raw schema using synthetic IDs, ensuring zero data loss even during downtime.
