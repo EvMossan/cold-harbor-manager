@@ -42,10 +42,10 @@ Tech Stack:
 |--------|--------------|
 | **Core & Async** | Python 3.12, `asyncio`, `asyncpg` (DB), ZeroMQ (Data Bus) |
 | **Web & API** | Flask, Server-Sent Events (SSE), Gunicorn (`gevent`), Jinja2 |
-| **Data Engineering** | PostgreSQL 16+, **TimescaleDB** (Time-Series), Pandas, NumPy |
-| **Orchestration** | **Apache Airflow** (DAGs, Scheduling), `supervisord` |
-| **Infrastructure** | Docker, Docker Compose, **Google Cloud Run**, Cloud Build |
-| **Networking** | **Cloudflare Access** (Zero Trust Tunnels), Alpaca API (Trading) |
+| **Data Engineering** | PostgreSQL 16+, TimescaleDB (Time-Series), Pandas, NumPy |
+| **Orchestration** | Apache Airflow (DAGs, Scheduling), `supervisord` |
+| **Infrastructure** | Docker, Docker Compose, Google Cloud Run, Cloud Build |
+| **Networking** | Cloudflare Access (Zero Trust Tunnels), Alpaca API (Trading) |
 
 ### Active Risk Management
 -   **Break-Even Engine:** Automatically trails Stop-Loss orders to the entry price once a position is "safe" (price > entry + trigger).
