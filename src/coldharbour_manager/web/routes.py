@@ -157,7 +157,6 @@ if not log.handlers:
     log.addHandler(handler)
     log.propagate = False
 
-BARS_TABLE = "public.alpaca_bars_1min"
 DISABLE_SSE = False
 
 accounts_bp = Blueprint("accounts", __name__)

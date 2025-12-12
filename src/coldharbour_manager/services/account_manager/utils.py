@@ -14,16 +14,6 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _fmt_ts_alpaca(dt: datetime) -> str:
-    """Return an Alpaca-friendly UTC timestamp string."""
-    return (
-        dt.astimezone(timezone.utc)
-        .replace(tzinfo=None)
-        .isoformat(timespec="seconds")
-        + "Z"
-    )
-
-
 def _json_safe(v: Any) -> Any:
     """Convert DB, numpy, or datetime values to JSON-safe primitives."""
     if isinstance(v, (datetime, date, pd.Timestamp)):
@@ -69,4 +59,3 @@ def _is_at_break_even(
 def _is_flat(qty: float) -> bool:
     """Near-zero test used in order handlers."""
     return abs(qty) < 1e-12
-

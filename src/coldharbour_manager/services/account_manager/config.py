@@ -110,14 +110,3 @@ CLOSED_TRADE_COLS: tuple[str, ...] = (
     "duration_sec",
 )
 
-
-def _build_pg_dsn_from_sqlalchemy_url(sa_url: str) -> str:
-    """Make a libpq DSN from an SQLAlchemy URL (unchanged logic)."""
-    url = make_url(sa_url)
-    return (
-        f"host={url.host} "
-        f"port={url.port or 5432} "
-        f"dbname={url.database} "
-        f"user={url.username} "
-        f"password={url.password}"
-    )
