@@ -9,7 +9,7 @@ from coldharbour_manager.services.account_manager import AccountManager
 
 
 def run_web() -> None:
-    """Convenience dev runner for the Flask web app."""
+    """Run the Flask web app in a simple local development mode."""
 
     app = create_app()
     app.run(
@@ -21,7 +21,7 @@ def run_web() -> None:
 
 
 def run_manager(cfg: Dict[str, Any]) -> AccountManager:
-    """Instantiate and return an AccountManager; caller controls lifecycle."""
+    """Return an AccountManager initialized with the provided config."""
 
     manager = AccountManager(cfg)
 
@@ -29,7 +29,7 @@ def run_manager(cfg: Dict[str, Any]) -> AccountManager:
         await manager.init()
         await manager.run()  # type: ignore[attr-defined]
 
-    # Kick off the async loop in a fire-and-forget manner for quick dev use
+    # Schedule the async loop fire-and-forget for quick local runs
     asyncio.get_event_loop().create_task(_start())
     return manager
 

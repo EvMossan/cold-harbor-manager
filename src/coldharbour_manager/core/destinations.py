@@ -60,14 +60,11 @@ _SAFE_RE = re.compile(r"[^a-z0-9_]")
 
 
 def sanitize_identifier(raw: str) -> str:
-    """Return a safe, unquoted Postgres identifier from an arbitrary name.
+    """Return a safe Postgres identifier derived from ``raw``.
 
-    Rules:
-    - lower-case
-    - replace any character outside ``[a-z0-9_]`` with ``_``
-    - collapse repeated underscores
-    - strip leading/trailing underscores
-    - if the first character is a digit, prefix ``d_``
+    Convert to lowercase, replace non-alphanumeric/underscore chars with
+    single underscores, strip leading/trailing underscores, and prefix
+    digits with ``d_``. Empty results fall back to ``dest``.
     """
     s = raw.lower()
     s = _SAFE_RE.sub("_", s)
@@ -80,7 +77,7 @@ def sanitize_identifier(raw: str) -> str:
 
 
 def _is_paper(dest: Dict[str, Any]) -> bool:
-    """Heuristic: paper if base URL includes 'paper'; otherwise live."""
+    """Return true when the destination URL refers to paper trading."""
     base = (dest.get("base_url") or "").lower()
     if "paper" in base:
         return True
@@ -95,18 +92,14 @@ def _schema_qualify(name: str, schema: str | None) -> str:
 
 
 def slug_for(dest: Dict[str, Any]) -> str:
-    """Return a safe slug for the destination based on its ``name``.
-
-    The slug is used to derive per-account table names and notify channels.
-    It is lower-case, alphanumeric/underscore only, and stable.
-    """
+    """Return a stable slug based on the destination name."""
     return sanitize_identifier(str(dest.get("name", "dest")))
 
 
 def account_tables_for(
     dest: Dict[str, Any], *, schema: str = "accounts"
 ) -> Dict[str, str]:
-    """Return open/closed table names for this destination's account type."""
+    """Return schema-qualified open and closed table names."""
     if _is_paper(dest):
         open_tbl = _schema_qualify("open_trades_paper", schema)
         closed_tbl = _schema_qualify("closed_trades_paper", schema)
@@ -119,7 +112,7 @@ def account_tables_for(
 def equity_table_for(
     dest: Dict[str, Any], *, schema: str = "accounts"
 ) -> str:
-    """Return per-destination equity table name (schema-qualified)."""
+    """Return the schema-qualified equity table for the destination."""
     suffix = sanitize_identifier(str(dest.get("name", "dest")))
     tbl = f"equity_full_{suffix}"
     return _schema_qualify(tbl, schema)
@@ -128,15 +121,7 @@ def equity_table_for(
 def account_table_names(
     dest: Dict[str, Any], *, schema: str = "accounts"
 ) -> Dict[str, str]:
-    """Return per-destination table names using the destination slug.
-
-    This generates fully schema-qualified names:
-    - open:   ``accounts.open_trades_<slug>``
-    - closed: ``accounts.closed_trades_<slug>``
-    - equity: ``accounts.equity_full_<slug>``
-    - metrics: ``accounts.account_metrics_<slug>``
-    - schedule: shared ``accounts.market_schedule`` for all accounts
-    """
+    """Return schema-qualified tables keyed by account role."""
     slug = slug_for(dest)
     open_tbl = _schema_qualify(f"open_trades_{slug}", schema)
     closed_tbl = _schema_qualify(f"closed_trades_{slug}", schema)
@@ -153,11 +138,7 @@ def account_table_names(
 
 
 def notify_channels_for(dest: Dict[str, Any]) -> Dict[str, str]:
-    """Return ``pos`` and ``closed`` channel names for this destination.
-
-    Channels are namespaced by destination slug to isolate SSE streams when
-    running multiple accounts in a single process/container.
-    """
+    """Return namespaced SSE channel names for the destination."""
     slug = slug_for(dest)
     return {
         "pos": f"pos_channel_{slug}",
@@ -166,10 +147,10 @@ def notify_channels_for(dest: Dict[str, Any]) -> Dict[str, str]:
 
 
 def _pg_conn_url_from_env() -> str:
-    """Resolve Postgres SQLAlchemy URL from environment.
+    """Return the Postgres SQLAlchemy URL from the environment.
 
-    Accepts either ``POSTGRESQL_LIVE_SQLALCHEMY`` or
-    ``POSTGRESQL_LIVE_CONN_STRING`` for compatibility.
+    Prefer ``POSTGRESQL_LIVE_SQLALCHEMY`` and fall back to
+    ``POSTGRESQL_LIVE_CONN_STRING``. Raise if neither is set.
     """
     dsn = os.getenv("POSTGRESQL_LIVE_SQLALCHEMY")
     if not dsn:
@@ -185,14 +166,10 @@ def _pg_conn_url_from_env() -> str:
 def build_equity_cfg(
     dest: Dict[str, Any], *, schema: str | None = None
 ) -> Dict[str, Any]:
-    """Build cfg dict for ``rebuild_equity_series`` for this destination.
+    """Return the ``rebuild_equity_series`` config for this destination.
 
-    Keys:
-    - CONN_STRING_POSTGRESQL
-    - API_KEY, SECRET_KEY, ALPACA_BASE_URL
-    - TABLE_ACCOUNT_CLOSED, TABLE_ACCOUNT_POSITIONS
-    - TABLE_ACCOUNT_EQUITY_FULL
-    - EQUITY_INIT_CASH (optional): initial equity override
+    The map includes connection, Alpaca credentials, tables, and optional
+    initial equity overrides derived from the destination or environment.
     """
     schema = schema or os.getenv("ACCOUNT_SCHEMA", "accounts")
     # Use per-destination tables derived from slug (one set per account)
@@ -211,8 +188,7 @@ def build_equity_cfg(
         "TABLE_MARKET_SCHEDULE": tables.get("schedule"),
     }
 
-    # Optional initial equity override. Prefer per-destination value,
-    # then EQUITY_INIT_CASH_<slug>, then EQUITY_INIT_CASH.
+    # Prefer per-destination override, then per-slug env, then default.
     try:
         slug = slug_for(dest)
     except Exception:

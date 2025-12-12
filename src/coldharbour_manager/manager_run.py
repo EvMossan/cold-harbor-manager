@@ -1,9 +1,9 @@
-"""services/account_manager/run_multi.py
-Run multiple AccountManager instances in one process.
+"""Run multiple AccountManager instances in one process.
 
-All accounts are discovered from ``coldharbour_manager.destinations.DESTINATIONS``
-and isolated via per-account tables and NOTIFY channels derived from the
-destination name (slug).
+All accounts are discovered from
+``coldharbour_manager.destinations.DESTINATIONS`` and isolated via
+per-account tables and NOTIFY channels derived from the destination name
+(slug).
 
 Signal handling is centralized here to perform a clean shutdown for all
 managers.
@@ -32,8 +32,8 @@ from coldharbour_manager.core.destinations import (
 def _common_cfg() -> Dict[str, Any]:
     """Return keys shared by all accounts.
 
-    The AccountManager will also derive ``CONN_STRING_POSTGRESQL`` from
-    the SQLAlchemy URL internally; we pass both to keep helpers happy.
+    AccountManager derives ``CONN_STRING_POSTGRESQL`` from the SQLAlchemy URL
+    internally; we pass both entries to match helper expectations.
     """
     return {
         # Prefer local direct connections (bypass Cloudflare) for manager
@@ -67,7 +67,7 @@ def _common_cfg() -> Dict[str, Any]:
 
 
 def _cfg_for(dest: Dict[str, Any]) -> Dict[str, Any]:
-    """Build AccountManager cfg for a single destination.
+    """Build the AccountManager config for a single destination.
 
     Tables and channels are derived from the destination slug; no extra
     keys are required in the destination mapping.
@@ -99,8 +99,8 @@ def _cfg_for(dest: Dict[str, Any]) -> Dict[str, Any]:
         "ENABLE_TRADE_STREAM": dest.get("trade_stream_enabled", False),
     }
 
-    # Ensure schema-qualification – AccountManager will re-qualify if needed
-    # but we keep full names here for clarity across helpers.
+    # Ensure schema qualification; AccountManager re-qualifies if needed.
+    # We keep fully qualified names for clarity across helpers.
     if schema:
         for k in (
             "TABLE_ACCOUNT_POSITIONS",

@@ -1,8 +1,8 @@
-"""Async Postgres helpers used by account manager components.
+"""Provide async Postgres helpers for account manager components.
 
-This module centralises connection handling with ``asyncpg`` and exposes
-lightweight fetch/execute helpers. It also includes a DSN normaliser that
-accepts SQLAlchemy URLs so existing config keys can be reused.
+Centralise asyncpg connection handling and expose lightweight
+fetch/execute helpers. Include DSN normalisation that accepts
+SQLAlchemy URLs so existing config keys can be reused.
 """
 
 from __future__ import annotations
@@ -15,7 +15,8 @@ from sqlalchemy.engine import make_url
 
 
 def _url_from_sqlalchemy(sa_url: str) -> str:
-    """Build a postgres URL (no driver suffix) from an SQLAlchemy URL."""
+    """Build a Postgres URL without a driver suffix from
+    an SQLAlchemy URL."""
 
     url = make_url(sa_url)
     driver = (url.drivername or "postgresql").split("+")[0]
@@ -32,7 +33,7 @@ def _url_from_sqlalchemy(sa_url: str) -> str:
 
 
 def _url_from_libpq(dsn: str) -> str:
-    """Convert libpq-style DSN ('host=.. user=..') to postgres URL."""
+    """Convert a libpq-style DSN to a Postgres URL."""
 
     parts = {}
     for tok in dsn.split():
@@ -54,7 +55,7 @@ def _url_from_libpq(dsn: str) -> str:
 
 
 class AsyncAccountRepository:
-    """Asyncpg-based repository wrapper with small convenience helpers."""
+    """Wrap an asyncpg pool with repository convenience helpers."""
 
     def __init__(self, pool: asyncpg.Pool):
         self.pool = pool
@@ -69,7 +70,7 @@ class AsyncAccountRepository:
         min_size: int = 1,
         max_size: int = 10,
     ) -> "AsyncAccountRepository":
-        """Create a pool from either an SQLAlchemy URL or libpq DSN."""
+        """Create a pool from an SQLAlchemy URL or libpq DSN."""
         if "://" in conn_string:
             dsn = _url_from_sqlalchemy(conn_string)
         elif "host=" in conn_string:
@@ -84,7 +85,7 @@ class AsyncAccountRepository:
         return cls(pool)
 
     async def close(self) -> None:
-        """Close the underlying pool exactly once."""
+        """Close the underlying pool once."""
         async with self._close_lock:
             if self._closed:
                 return
@@ -92,19 +93,19 @@ class AsyncAccountRepository:
             await self.pool.close()
 
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
-        """Run a SELECT and return rows as plain dicts."""
+        """Run SELECT SQL and return rows as dicts."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(sql, *args)
         return [dict(r) for r in rows]
 
     async def fetchrow(self, sql: str, *args: Any) -> Optional[dict[str, Any]]:
-        """Return a single row as a dict or None."""
+        """Return a single row as a dict or ``None``."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(sql, *args)
         return dict(row) if row else None
 
     async def execute(self, sql: str, *args: Any) -> str:
-        """Execute a statement and return asyncpg status string."""
+        """Execute a statement and return the asyncpg status string."""
         async with self.pool.acquire() as conn:
             return await conn.execute(sql, *args)
 

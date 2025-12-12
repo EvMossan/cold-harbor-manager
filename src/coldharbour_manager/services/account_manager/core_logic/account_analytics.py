@@ -57,7 +57,7 @@ def fetch_orders(
     end_date: Optional[datetime] = None,
 ) -> pd.DataFrame:
     """
-    Download orders in fixed windows to avoid cursor pagination issues.
+    Download orders in fixed windows so pagination stays reliable.
 
     Args:
         api: Alpaca-compatible client exposing `list_orders`.
@@ -74,11 +74,8 @@ def fetch_orders(
     Raises:
         Exception: Propagates Alpaca API failures from a window.
     """
-    # print(f">>> ROBUST ORDER DOWNLOAD (last {days_back} days)...")
 
-    # 1. Define time boundaries
-    # Since the simulation is in the future (2025), take 'now' from
-    # the API or system. For reliability, set the end date to tomorrow.
+    # Derive UTC window boundaries; default end is tomorrow.
     now = pd.Timestamp.now(tz=timezone.utc)
     target_end = _normalize_timestamp(
         end_date, default=now + timedelta(days=1)
@@ -90,10 +87,6 @@ def fetch_orders(
         target_start = target_end - timedelta(days=days_back)
 
     actual_days = max(1, (target_end - target_start).days)
-    # print(
-    #     f">>> ROBUST ORDER DOWNLOAD ({target_start.date()} -> "
-    #     f"{target_end.date()}, ~{actual_days} days)..."
-    # )
     all_raw_orders = []
     seen_ids = set()
     window_size = timedelta(days=5)
@@ -134,39 +127,37 @@ def fetch_orders(
     seen_ids = set()
 
     for order_obj in all_raw_orders:
-        # Handle Alpaca object vs dict
-        root = getattr(order_obj, '_raw', order_obj) 
-        
-        # Deduplicate (Window overlap protection)
+        # Accept Alpaca objects and dicts alike.
+        root = getattr(order_obj, '_raw', order_obj)
+
+        # Skip IDs already captured by overlapping windows.
         if root['id'] in seen_ids:
             continue
         seen_ids.add(root['id'])
 
-        # 1. Process Parent
         parent_row = root.copy()
+
+        # Keep legs in parent_row as a fallback; do not remove them.
+        legs_data = parent_row.get('legs')
         
-        # DON'T POP! Just get the data. 
-        # We want 'legs' to remain in parent_row as a backup source of truth.
-        legs_data = parent_row.get('legs', None) 
-        
-        # Ensure parent_id is None for the root (unless it really has one)
+        # Keep parent_id None for root orders unless it already exists.
         if 'parent_id' not in parent_row:
             parent_row['parent_id'] = None
             
         flat_rows.append(parent_row)
 
-        # 2. Process Children (Flattening)
+        # Flatten legs into their own rows.
         if legs_data:
             for leg in legs_data:
                 leg_row = leg.copy()
                 # Explicitly link child to parent
                 leg_row['parent_id'] = root['id'] 
                 
-                # Add child as its own row
-                flat_rows.append(leg_row) 
-                
-                # Add child ID to seen to prevent duplicates if logic runs twice
-                seen_ids.add(leg['id']) 
+                # Retain child row separately.
+                flat_rows.append(leg_row)
+
+                # Track leg IDs to avoid duplicate flattening.
+                seen_ids.add(leg['id'])
 
     df = pd.DataFrame(flat_rows)
 
@@ -187,7 +178,7 @@ def fetch_orders(
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # Sorting for aesthetics
+    # Keep newest records first by creation timestamp.
     if 'created_at' in df.columns:
         df = df.sort_values('created_at', ascending=False)
 
@@ -201,8 +192,7 @@ async def load_orders_from_db(
     days_back: int = 365
 ) -> pd.DataFrame:
     """
-    Adapted function to load orders from DB directly in notebook.
-    Fixes UUID vs String type mismatch for compatibility with portfolio logic.
+    Load raw orders from the database and cast UUIDs to strings.
     """
     if not conn_str:
         raise ValueError("Connection string is empty!")
@@ -216,7 +206,6 @@ async def load_orders_from_db(
     print(f"🔌 Connecting to DB to fetch orders for '{slug}' "
           f"from table '{table_name}'...")
     
-    # SQL Query
     sql = f"""
         SELECT
             id, client_order_id, parent_id, symbol, side, order_type, status,
@@ -272,8 +261,9 @@ async def load_orders_from_db(
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # 3. UUIDs to Strings (CRITICAL FIX)
-    # asyncpg returns uuid.UUID objects, but portfolio logic expects strings.
-    # We explicitly cast them, preserving None values as None (not "None").
+    # asyncpg returns uuid.UUID objects while portfolio logic expects
+    # strings.
+    # We cast them explicitly, keeping None as None instead of "None".
     uuid_cols = ["id", "parent_id", "client_order_id"]
     for col in uuid_cols:
         if col in df.columns:
@@ -346,18 +336,18 @@ def get_history_start_dates(api: REST) -> tuple[datetime, datetime]:
 
 def fetch_all_activities(api, start_date=None, end_date=None):
     """
-    Fetches account activity history (FILL, FEE, DIV, JNLS, etc.) 
-    and normalizes the resulting DataFrame.
+    Fetch account activity history and normalize timestamps.
 
-    This function coalesces multiple potential timestamp fields into 
-    a single 'exec_time' column, ensuring that non-trade activities 
-    (like deposits and fees) are correctly dated even when 
-    'transaction_time' is missing.
+    This coalesces multiple timestamp fields into a single
+    `exec_time` column so non-trade activities stay dated when
+    `transaction_time` is missing.
 
     Args:
         api: Alpaca-compatible client.
-        start_date (datetime, optional): Earliest date to fetch (inclusive).
-        end_date (datetime, optional): Latest date to fetch (exclusive).
+        start_date (datetime, optional): Earliest date to fetch,
+            inclusive.
+        end_date (datetime, optional): Latest date to fetch,
+            exclusive.
 
     Returns:
         pd.DataFrame: Normalized activity history.
@@ -393,7 +383,6 @@ def fetch_all_activities(api, start_date=None, end_date=None):
         try:
             activities = api.get_activities(**params)
         except Exception as e:
-            # log.error should be configured in your analytics logger
             raise e
 
         if not activities:
@@ -412,9 +401,9 @@ def fetch_all_activities(api, start_date=None, end_date=None):
     df = pd.DataFrame(data)
 
     # --- COALESCE STRATEGY FOR TIMESTAMPS ---
-    # We iterate through priority columns to fill gaps in exec_time.
-    # FILL rows usually have transaction_time. 
-    # CSD/FEE rows usually have date.
+    # We iterate through priority columns to fill exec_time gaps.
+    # FILL rows usually have transaction_time.
+    # CSD/FEE rows rely on date.
     possible_time_cols = [
         "transaction_time",
         "activity_time",
@@ -437,7 +426,7 @@ def fetch_all_activities(api, start_date=None, end_date=None):
 
     df["exec_time"] = df["exec_time"].infer_objects(copy=False)
     # --- DATA NORMALIZATION ---
-    # Ensure net_amount is numeric as it powers Equity and Metrics flows.
+    # Ensure net_amount is numeric because it powers equity metrics.
     numeric_cols = [
         "qty",
         "price",
@@ -465,13 +454,10 @@ def build_lot_portfolio(
     api: Any = None
 ) -> pd.DataFrame:
     """
-    Builds a portfolio using a "Latest Successor" logic.
-    
-    It handles database lag by:
-    1. Identifying replacement chains via the 'replaces' column.
-    2. Resolving every leg to its latest descendant (Successor).
-    3. Using the Successor's Status and Prices instead of the Stale Parent JSON.
-    4. Calculates Days_To_Expire (Explicit or Inferred via 90-day GTC rule).
+    Build a lot portfolio by preferring each leg's latest replacement.
+
+    Resolve every leg to its newest successor, use that row for status and
+    pricing, and fall back to the 90-day expiration rule when needed.
     """
     # --- 1. Fetch Broker Data (Market Data & Averages) ---
     market_data: Dict[str, Dict[str, float]] = {}
@@ -483,7 +469,7 @@ def build_lot_portfolio(
                 qty = float(p.qty)
                 cur_px = float(getattr(p, "current_price", 0.0))
                 
-                # Fallback for market value calc
+                # Fallback for market value calculation
                 if cur_px == 0.0 and qty != 0:
                     try:
                         cur_px = float(p.market_value) / qty
@@ -499,18 +485,18 @@ def build_lot_portfolio(
         except Exception as e:
             print(f"Warning: API fetch failed. {e}")
 
-    # --- 2. Pre-process: Clean, Sort & Deduplicate ---
+    # --- 2. Pre-process: Clean, sort, and deduplicate ---
     if orders_df.empty:
         return pd.DataFrame()
     
     df_clean = orders_df.copy()
     
-    # Identify time column and Convert to datetime
+    # Choose updated_at or created_at for datetime conversion.
     sort_col = 'updated_at' if 'updated_at' in df_clean.columns else 'created_at'
     if sort_col in df_clean.columns:
         df_clean[sort_col] = pd.to_datetime(df_clean[sort_col], utc=True, errors='coerce')
     
-    # Sort descending (newest first) to ensure we keep the latest version of each ID
+    # Sort descending to keep the latest version of each ID.
     df_clean.sort_values(by=sort_col, ascending=False, inplace=True)
     
     # Deduplicate primarily by 'id'
@@ -520,15 +506,15 @@ def build_lot_portfolio(
             
     df_clean.drop_duplicates(subset=dedup_subset, keep='first', inplace=True)
 
-    # --- 3. BUILD REPLACEMENT CHAIN & LOOKUP MAP (The Logic Upgrade) ---
+    # --- 3. Build replacement chain and lookup map ---
     
-    # A. Index entire DB by ID for fast lookup of "Fresh Data" (Prices/Status)
+    # Index rows by ID for fast lookup of fresh data.
     if 'id' not in df_clean.columns:
         return pd.DataFrame()
         
     orders_map = df_clean.set_index('id').to_dict('index')
     
-    # B. Build Forward Map: Old_ID -> New_ID
+    # Map old IDs to their replacements.
     replacement_map = {}
     if 'replaces' in df_clean.columns:
         replacers = df_clean.dropna(subset=['replaces'])
@@ -537,7 +523,7 @@ def build_lot_portfolio(
             new_id = str(row['id'])
             replacement_map[old_id] = new_id
 
-    # Helper to walk the chain to the bitter end
+    # Helper that follows replacements to the final ID.
     def get_latest_successor(order_id):
         curr = str(order_id)
         while curr in replacement_map:
@@ -633,10 +619,10 @@ def build_lot_portfolio(
             if current_status in live_statuses:
                 has_active_legs = True
                 
-                # --- Expiration Logic Fix ---
-                # If explicit expiry is missing, calculate it: Created + 90 Days
+                # Adjust expiration when explicit value is missing.
+                # Estimate expiry as created_at plus 90 days.
                 if not expiry_ts:
-                    # Prefer leg creation time, fallback to parent creation time
+                    # Use leg creation time before parent time.
                     base_time = leg_created_at or parent_created_at
                     if base_time:
                         try:
@@ -658,7 +644,7 @@ def build_lot_portfolio(
                     sl_price = l_stop if l_stop > 0 else l_limit
                     sl_id = latest_leg_id
 
-        # --- 6. Build Row (Only if Legs are Live) ---
+        # Build a lot row only when legs remain live.
         if has_active_legs:
             p_id = str(row.get('id'))
             if 'order_id' in row and pd.notna(row['order_id']):
@@ -722,7 +708,7 @@ def build_lot_portfolio(
     df["Buy Date"] = df["Buy Date Obj"].dt.strftime("%Y-%m-%d %H:%M:%S")
     
     # Calculate Days To Expire
-    # Use 'coerce' to handle potential parsing errors gracefully
+    # Use 'coerce' to handle parsing errors.
     df["Expiration Obj"] = pd.to_datetime(df["Expiration Date"], utc=True, errors='coerce')
     df["Days_To_Expire"] = (df["Expiration Obj"] - now).dt.days
 
@@ -766,12 +752,10 @@ def build_closed_trades_df_lot(
     orders_df: Optional[pd.DataFrame] = None
 ) -> pd.DataFrame:
     """
-    Builds CLOSED trades with STRICT priority on Parent-Child linkage.
-    Includes robust FIFO PnL comparison using Per-Share normalization.
-    
-    Fixes:
-    - DeprecationWarning regarding GroupBy.apply.
-    - Performance optimization using vectorized .agg() instead of .apply().
+    Build CLOSED trades with strict parent-child linkage.
+
+    Compress fills and aggregate via `.agg()` so PnL stays aligned with the
+    FIFO engine while avoiding GroupBy.apply.
     """
 
     # === 1. HELPER: COMPRESS FILLS (OPTIMIZED) ===
@@ -779,17 +763,18 @@ def build_closed_trades_df_lot(
         if df.empty or 'order_id' not in df.columns:
             return df
         
-        # Work on a copy to avoid SettingWithCopy warnings on the input df
+        # Work on a copy to avoid SettingWithCopy warnings.
         local_df = df.copy()
         
-        # FIX: Ensure order_id is strictly string
+        # Force order_id to string for consistency.
         local_df['order_id'] = local_df['order_id'].astype(str)
         
         # Pre-calculate Total Value for Weighted Average Price
         # (Math: Sum(Price * Qty) / Sum(Qty))
         local_df['_total_val'] = local_df['price'] * local_df['qty']
         
-        # Use .agg() instead of .apply() -> This fixes the DeprecationWarning and is much faster
+        # Use .agg() instead of .apply() to drop the warning.
+        # This is also faster.
         grouped = local_df.groupby(['order_id', 'side', 'symbol'], as_index=False).agg(
             qty=('qty', 'sum'),
             _total_val=('_total_val', 'sum'),
@@ -816,7 +801,7 @@ def build_closed_trades_df_lot(
     if not pd.api.types.is_datetime64_any_dtype(df_fills['exec_time']):
         df_fills['exec_time'] = pd.to_datetime(df_fills['exec_time'], utc=True)
         
-    # FIX: Ensure global IDs are strings
+    # Ensure global IDs are strings.
     if 'order_id' in df_fills.columns:
         df_fills['order_id'] = df_fills['order_id'].astype(str)
 
@@ -915,12 +900,12 @@ def build_closed_trades_df_lot(
     df_lot = pd.DataFrame(closed_trades)
     
     if not df_lot.empty:
-        # Run pure FIFO engine
-        # Assuming build_closed_trades_df_fifo is available in scope or imported
+        # Run pure FIFO engine.
+        # Assume build_closed_trades_df_fifo is available here.
         df_fifo = build_closed_trades_df_fifo(fills_df, orders_df)
         
         if not df_fifo.empty:
-            # FIX: Ensure IDs are strings here too
+            # Ensure IDs are strings here too.
             df_fifo['exit_order_id'] = df_fifo['exit_order_id'].astype(str)
             df_lot['exit_order_id'] = df_lot['exit_order_id'].astype(str)
 
