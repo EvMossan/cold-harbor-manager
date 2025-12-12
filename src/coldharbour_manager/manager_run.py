@@ -1,12 +1,10 @@
 """Run multiple AccountManager instances in one process.
 
 All accounts are discovered from
-``coldharbour_manager.destinations.DESTINATIONS`` and isolated via
-per-account tables and NOTIFY channels derived from the destination name
-(slug).
+``coldharbour_manager.destinations.DESTINATIONS`` and use per-account
+tables and NOTIFY channels derived from the destination slug.
 
-Signal handling is centralized here to perform a clean shutdown for all
-managers.
+Signal handling is centralized here to stop all managers cleanly.
 """
 
 from __future__ import annotations
@@ -33,7 +31,7 @@ def _common_cfg() -> Dict[str, Any]:
     """Return keys shared by all accounts.
 
     AccountManager derives ``CONN_STRING_POSTGRESQL`` from the SQLAlchemy URL
-    internally; we pass both entries to match helper expectations.
+    internally. We pass both entries to match helper expectations.
     """
     return {
         # Prefer local direct connections (bypass Cloudflare) for manager
@@ -69,8 +67,8 @@ def _common_cfg() -> Dict[str, Any]:
 def _cfg_for(dest: Dict[str, Any]) -> Dict[str, Any]:
     """Build the AccountManager config for a single destination.
 
-    Tables and channels are derived from the destination slug; no extra
-    keys are required in the destination mapping.
+    Tables and channels derive from the destination slug, so no extra keys
+    are required in the destination mapping.
     """
     base = _common_cfg()
     schema = base.get("ACCOUNT_SCHEMA", "accounts")

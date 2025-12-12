@@ -37,7 +37,7 @@ from coldharbour_manager.core.destinations import (
     slug_for,
 )
 
-# ── config reused from AccountManager ────────────────────────────
+# Config reused from AccountManager
 PG_DSN = os.getenv(
     "POSTGRESQL_LIVE_CONN_STRING",
     "postgresql://user:pass@localhost:5432/live",
@@ -60,7 +60,7 @@ def _heartbeat_sec() -> int:
 HEARTBEAT_SEC = _heartbeat_sec()
 
 
-# ----- DSN / URL helper -----------------------------------------
+# DSN/URL helper
 def _make_sa_engine():
     """Return SQLAlchemy engine created from a URL or libpq-style DSN."""
     raw = os.getenv("POSTGRESQL_LIVE_CONN_STRING", "")
