@@ -1,4 +1,4 @@
-"""Pure helper utilities for the AccountManager runtime."""
+"""Provide pure helper utilities for the AccountManager runtime."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pandas as pd
 
 
 def _utcnow() -> datetime:
-    """Return an aware UTC datetime."""
+    """Return a timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
 
 
@@ -40,7 +40,8 @@ def _is_at_break_even(
     stop_px: Optional[float],
     min_stop_gap: float,
 ) -> bool:
-    """Return True if stop is at/inside break-even, respecting ticks."""
+    """Return whether the stop sits at or inside break-even while
+    respecting tick size."""
     if stop_px is None:
         return False
 
@@ -57,5 +58,5 @@ def _is_at_break_even(
 
 
 def _is_flat(qty: float) -> bool:
-    """Near-zero test used in order handlers."""
+    """Return whether qty is effectively zero within a tight tolerance."""
     return abs(qty) < 1e-12

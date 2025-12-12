@@ -1,4 +1,5 @@
-"""Shared helpers to derive the earliest known activity date for an account.
+"""Shared helpers to derive the earliest known activity date for an
+account.
 
 Sources checked (best-effort, tolerant to missing tables/columns):
 - Closed trades: ``entry_time`` and ``exit_time``

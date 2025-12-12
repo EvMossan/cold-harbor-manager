@@ -1,13 +1,14 @@
 """
-Equity Core Analytics (Strict UTC / Ledger Replay).
+Equity Core Analytics (Strict UTC/Ledger Replay).
 
-Rebuilds the account equity curve using a strict Ledger Replay method:
-Equity(t) = Cash(t) + Sum(Qty(t) * Price(t)).
+Rebuild the account equity curve using a strict Ledger Replay
+method: Equity(t) = Cash(t) + Sum(Qty(t) * Price(t)).
 
 Data Sources:
-  - Activities: account_activities.raw_activities_{slug} (Source of Truth)
-  - Prices: Alpaca Historical API
-  - Schedule: market_schedule (Trading days source of truth)
+- Activities: account_activities.raw_activities_{slug} (Source of
+  Truth)
+- Prices: Alpaca Historical API
+- Schedule: market_schedule (Trading days source of truth)
 """
 
 from __future__ import annotations
@@ -28,9 +29,7 @@ from coldharbour_manager.infrastructure.db import AsyncAccountRepository
 log = logging.getLogger("CoreEquity")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Math Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────── Math Helpers ───────────────
 
 def _autocorr_penalty(x: np.ndarray) -> float:
     """Calculate penalty factor for Smart Sharpe based on autocorrelation."""
@@ -74,9 +73,7 @@ def _rolling_sharpe(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Ledger Replay Logic (Strict UTC)
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────── Ledger Replay Logic (UTC) ─────────────
 
 def _calculate_daily_ledger_utc(
     activities_df: pd.DataFrame,
@@ -86,14 +83,13 @@ def _calculate_daily_ledger_utc(
     """
     Reconstruct daily equity using Ledger Replay in UTC.
 
-    Uses 'valid_sessions' (from market_schedule) to determine calculation
-    days. If a day is a holiday (not in valid_sessions), it is skipped
-    entirely, preventing zero-price valuation crashes.
+    Use valid_sessions (from market_schedule) to determine calculation
+    days and skip holidays to avoid zero-price valuation crashes.
     """
     if activities_df.empty:
         return pd.DataFrame()
 
-    # 1. Normalize dates to UTC Date (no time)
+    # 1. Normalize dates to UTC date (no time)
     if activities_df['transaction_time'].dt.tz is None:
         activities_df['transaction_time'] = (
             activities_df['transaction_time'].dt.tz_localize("UTC")
@@ -107,7 +103,7 @@ def _calculate_daily_ledger_utc(
         activities_df['transaction_time'].dt.date
     )
 
-    # 2. Setup Loop Range (UTC)
+    # 2. Setup loop range (UTC)
     min_date = activities_df['ledger_date'].min()
     today = dt.datetime.now(dt.timezone.utc).date()
 
@@ -128,7 +124,8 @@ def _calculate_daily_ledger_utc(
     daily_snapshots = {}
 
     # Define sets for flow classification
-    # Dividends/Fees/Interest are part of Performance (PnL), not External Flow
+    # Dividends, fees, and interest count as performance (PnL), not external
+    # flow.
     pnl_activity_types = {
         'DIV', 'DIVCGL', 'DIVCGS', 'DIVNRA', 'DIVROC',
         'DIVTXEX', 'DIVWH', 'INT', 'INTPNL', 'FEE', 'CFEE'
@@ -144,7 +141,7 @@ def _calculate_daily_ledger_utc(
         daily_external_flow = 0.0
 
         # A. Apply all activities that happened since the last processed
-        #    trading day up to (and including) the current trading 'day'.
+        #    trading day up to and including the current trading day.
         while act_day_idx < len(activity_days):
             act_date = activity_days[act_day_idx]
             if act_date > day:
@@ -161,7 +158,7 @@ def _calculate_daily_ledger_utc(
 
                 if act_type in ('FILL', 'PARTIAL_FILL'):
                     side = str(row.get('side', '')).lower()
-                    # Fills exchange Cash for Inventory (no impact on Equity total)
+                    # Fills exchange cash for inventory (no equity impact).
                     trade_val = abs(qty * price)
                     if side == 'buy':
                         current_cash -= trade_val
@@ -181,15 +178,14 @@ def _calculate_daily_ledger_utc(
                     # Non-trade flows affect cash directly
                     current_cash += net_amt_db
 
-                    # Classify as External Flow vs PnL
-                    # Deposits/Withdrawals (CSD, CSW) are External -> subtracted from Return calc
-                    # Dividends/Fees are PnL -> kept in Return calc
+                    # Classify as external flow (deposits/withdrawals) or PnL
+                    # (dividends/fees). Only net external flows impact returns.
                     if act_type not in pnl_activity_types:
                         daily_external_flow += net_amt_db
 
             act_day_idx += 1
 
-        # B. Mark to Market (Only on this valid trading day)
+        # B. Mark to market (only on this valid trading day)
         market_value = 0.0
 
         if day in price_df.index:
@@ -198,9 +194,8 @@ def _calculate_daily_ledger_utc(
                 if sym in day_prices and pd.notna(day_prices[sym]):
                     market_value += qty * float(day_prices[sym])
 
-        # C. Record Snapshot
-        # 'net_flows' is crucial for calculating returns accurately (TWR)
-        # preventing deposits from looking like massive profit.
+        # C. Record snapshot
+        # net_flows keeps deposits from looking like massive profit.
         daily_snapshots[day] = {
             'deposit': current_cash + market_value,
             'cash_balance': current_cash,
@@ -270,9 +265,7 @@ def _fetch_daily_closes_utc(
     return final.sort_index().ffill()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  DB Async Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────── DB Async Helpers ───────────────
 
 async def _ensure_table_async(
     repo: AsyncAccountRepository,
@@ -389,9 +382,7 @@ async def _save_equity_async(
     await repo.executemany(sql, data_tuples)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Main Async Entrypoint
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────── Main Async Entrypoint ─────────────
 
 async def rebuild_equity_series_async(
     cfg: Dict,
@@ -403,8 +394,8 @@ async def rebuild_equity_series_async(
     repo: Optional[AsyncAccountRepository] = None,
 ) -> pd.DataFrame:
     """
-    Async recompute of equity using Ledger Replay.
-    Consults 'market_schedule' to avoid calculation on holidays.
+    Asynchronously recompute equity using Ledger Replay.
+    Consult market_schedule to avoid holiday calculations.
     """
     if repo is None:
         repo = await AsyncAccountRepository.create(
@@ -495,9 +486,8 @@ async def rebuild_equity_series_async(
             _fetch_daily_closes_utc, rest, all_symbols, start_date, end_date
         )
 
-        # Fix: Ensure today's date exists in price_df via forward fill.
-        # This prevents mark-to-market crashes during pre-market hours when
-        # Alpaca hasn't yet published the daily bar for the current date.
+        # Ensure today's date exists in price_df via forward fill.
+        # This prevents mark-to-market issues when the current bar is missing.
         if not price_df.empty:
             full_range = pd.date_range(
                 start=price_df.index.min(),
@@ -575,9 +565,7 @@ async def rebuild_equity_series_async(
             await repo.close()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Synchronous Wrappers
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────── Synchronous Wrappers ──────────────
 
 def rebuild_equity_series(cfg: Dict, **kwargs) -> pd.DataFrame:
     return asyncio.run(rebuild_equity_series_async(cfg, **kwargs))

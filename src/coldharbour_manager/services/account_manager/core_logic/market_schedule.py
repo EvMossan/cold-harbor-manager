@@ -1,9 +1,10 @@
 """Helpers for building and querying market session schedules.
 
 The AccountManager relies on a dedicated ``market_schedule`` table that
-stores one row per trading day with a pre-market wake time and the actual
-session boundaries. This module centralises the logic required to build
-that table from the Alpaca calendar API and to query it at runtime.
+stores one row per trading day with a pre-market wake time
+and the actual session boundaries. This module centralises the logic
+required to build that table from the Alpaca calendar API
+and to query it at runtime.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ def _parse_calendar(
     if frame.empty:
         return rows
 
-    # Normalise date and open/close columns to timezone-aware datetimes.
+    # Normalize date and open/close columns to timezone-aware datetimes.
     frame["session_date"] = pd.to_datetime(frame["date"], utc=False).dt.date
     frame["open_local"] = (
         pd.to_datetime(frame["date"] + " " + frame["open"] + ":00")
@@ -260,8 +261,8 @@ async def next_session_after_async(
 def market_status(config: dict) -> bool:
     """Return ``True`` when the market is currently open.
 
-    The ``config`` mapping may contain generic keys (``API_KEY`` /
-    ``SECRET_KEY`` / ``ALPACA_BASE_URL``) or the older ``*_JOHNYSSAN``
+    The ``config`` mapping may contain generic keys such as ``API_KEY``,
+    ``SECRET_KEY``, and ``ALPACA_BASE_URL`` or the older ``*_JOHNYSSAN``
     variants. This keeps legacy scripts working while the new schedule
     table is used elsewhere.
     """

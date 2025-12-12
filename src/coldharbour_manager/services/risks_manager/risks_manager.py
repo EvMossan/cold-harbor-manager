@@ -1,106 +1,8 @@
 """
-coldharbour_manager.order_manager
-==========================
+Maintain break-even stops for Alpaca bracket positions.
 
-Break-Even stop-loss manager for Alpaca **bracket** positions
--------------------------------------------------------------
-When a strategy opens a bracket order it receives two exit legs:
-
-* **take-profit** : fixed limit above / below entry  
-* **stop-loss**   : initial “disaster” stop one gap away
-
-After the trade starts working we would like to *eliminate tail-risk* by
-dragging the stop up to **break-even (BE)** — i.e. exactly the entry price —
-*but only after* price had already travelled far enough in our favour.
-
-The manager does that continuously, outside of the strategy itself, so that
-every strategy can “fire and forget” its brackets.
-
-━━━━━━━
-Trading logic
-━━━━━━━━━━━━
-
-1. **Trigger level**  
-   • At signal time the breakout engine pre-computes a 30-minute target  
-     `takeprofit_{R}_1_price`.  
-   • A position is **armed** for BE when the *regular-hours* high/low first
-     touches that trigger.
-
-2. **Stop move conditions** (per symbol)  
-   ┃ long   ┃ short ┃ explanation  
-   ┣━━━━━━━━┻━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  
-   ┃ `max_high ≥ trigger` **and** `last_trade ≥ entry`  
-   ┃ `min_low  ≤ trigger` **and** `last_trade ≤ entry`  → price *has reached*  
-   ┃                                                     trigger **and** is
-   ┃                                                     still on the “good”
-   ┃                                                     side of entry.
-
-3. **Safety rails**  
-   * The stop is **never lowered**.  
-   * If price has already crossed back through entry the move is skipped.  
-   * Setting `FORCE_BE=1` bypasses the entry-range guard for dry-runs.
-
-━━━━━━━
-Data flow per one-minute cycle
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-live positions → symbol list
-┣━ fetch matching orders (parents + legs)
-┃   ┣━ slice open stop-loss legs
-┃   ┗━ slice take-profit legs
-┣━ for each symbol build meta:
-┃     parent_id · fill_ts · entry_px · BE trigger
-┣━ market-data fan-out (ThreadPool):
-┃     • _extrema_for_symbol()  → max_high/min_low
-┃     • last trade snapshot
-┣━ decide → queue PATCH jobs
-┗━ PATCH fan-out (ThreadPool) → audit to Postgres
-
-Market-data optimiser
----------------------
-`_extrema_for_symbol()` **automatically selects the coarsest resolution** that
-still produces a correct high/low:
-
-* **1-min** : fill-day after the timestamp *and* today up to “now”.  
-* **1-day** : last *N* (default 30) regular sessions in between.  
-* **1-week**: anything older is summarised by weekly candles.
-
-That keeps the bar payload tiny even for weeks-old positions.
-
-Concurrency
------------
-*Two* thread pools are used:
-
-| Pool | What for | Default workers | Notes |
-|------|----------|-----------------|-------|
-| MD-fetch | 1-min/day/week bars **and** latest trades | `MAX_WORKERS` (cfg, env) | All HTTP requests are I/O-bound → cheap to over-allocate. |
-| PATCH   | `PATCH /v2/orders/{id}` stop updates        | 16                      | Avoids rate-limit bursts. |
-
-All expensive DB and network calls are done inside the workers; the main thread
-only assembles / filters data frames.
-
-Database touch-points
----------------------
-* **TimescaleDB** – optional, not yet used inside the BE manager.  
-* **Postgres**    – table `cfg["TABLE_BE_EVENTS"]` receives an audit row for
-  *every* decision (`moved`, `skip_…`, `error_…`).  
-  The table is auto-created on first run.
-
-Configuration keys
-------------------
-| Key | Type | Default | Purpose |
-|-----|------|---------|---------|
-| `API_KEY`, `SECRET_KEY`, `ALPACA_BASE_URL` | str | — | Alpaca creds & endpoint |
-| `CONN_STRING_POSTGRESQL`, `CONN_STRING_TIMESCALE` | str | — | DB connections |
-| `MIN_STOP_GAP` | float | 0.01 | Exchange rule: stop must differ from entry |
-| `BE_TRIGGER_R` | int   | 2    | Which TP-column to read in *breakouts* table |
-| `TICK_DEFAULT` | float | 0.01 | Fallback tick size |
-| `MAX_WORKERS`  | int   | 30   | Thread-pool fan-out |
-| `TABLE_BE_EVENTS`, `TABLE_BREAKOUTS` | str | … | Schema/table names |
-
-Author
-------
-Evgenii Mosikhin
+The manager loads bracket and trade data, detects when legs qualify for
+a break-even shift, and records each decision.
 """
 
 from __future__ import annotations
@@ -131,70 +33,58 @@ fetch_orders = account_analytics.fetch_orders
 build_lot_portfolio = account_analytics.build_lot_portfolio
 
 logging.basicConfig(
-    level=logging.INFO,                       # raise to DEBUG for verboser output
+    level=logging.INFO,                       # raise to DEBUG for more verbose output
     format="%(asctime)s │ %(levelname)5s │ %(message)s",
 )
 
 def prev_30m_bar(ts: datetime) -> datetime:
     """
-    Return the *previous* 30-minute bar anchor in UTC.
+    Return the previous 30-minute bar anchor in UTC.
 
-    Example
-    -------
-    18:30:35.746 → 18:00:00
-    18:05:12.000 → 17:30:00
+    Example:
+        18:30:35.746 -> 18:00:00
+        18:05:12.000 -> 17:30:00
     """
-    ts = ts.astimezone(timezone.utc)                   # normalise to UTC
+    ts = ts.astimezone(timezone.utc)                   # Normalize to UTC
     floored = ts.replace(second=0, microsecond=0,
                         minute=(ts.minute // 30) * 30)
     return floored - timedelta(minutes=30)
 
 def round_price(price: float) -> float:
     """
-    Conform *price* to the minimum tick required by Alpaca:
+    Round the price to the minimum tick required by Alpaca.
 
-    • if price < 1 USD  → tick = 0.0001   (4 dp)
-    • else              → tick = 0.01     (2 dp)
-
-    Returns the rounded price as float (already at the correct precision).
+    Use 0.0001 ticks for prices below 1 USD and 0.01 ticks otherwise,
+    double-rounding to avoid trailing floating errors.
     """
     tick = 0.0001 if price < 1 else 0.01
-    # round() twice to avoid issues like 0.199999 -> 0.20
+    # Round twice to avoid issues like 0.199999 -> 0.20
     return round(round(price / tick) * tick, 4 if tick < 0.01 else 2)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OrderManager – portion up to leg refresh
-# ─────────────────────────────────────────────────────────────────────────────
 class BreakevenOrderManager:
     """
-    Manager that, each time it is instantiated and run,
-      • downloads **all** historical orders since 2025-07-01
-      • materialises stop-loss / TP views in memory
-      • (later) will act on live positions & bars
+    Manage break-even stops by building leg views from history.
+
+    Each run downloads historical orders, materializes stop-loss / TP
+    details, and later acts on live brackets.
     """
 
-    # ------------------------------------------------------------------
-    # 0. Construction & housekeeping
-    # ------------------------------------------------------------------
     def __init__(self, cfg: Dict[str, Any]):
         """
-        Parameters
-        ----------
-        cfg
-            Must provide at least:
-              API_KEY, SECRET_KEY, ALPACA_BASE_URL,
-              CONN_STRING_POSTGRESQL
+        Store config and open API/DB connections.
+
+        Config must provide API keys, the Alpaca endpoint, and the PostgreSQL
+        connection strings.
         """
         self.cfg = cfg
         self.api = REST(cfg["API_KEY"], cfg["SECRET_KEY"], cfg["ALPACA_BASE_URL"])
 
-        # Databases
-        self.pg = psycopg2.connect(cfg["CONN_STRING_POSTGRESQL"])  # logs
-        self.pg_ts = psycopg2.connect(cfg["CONN_STRING_TIMESCALE"])  # bars
+        self.pg = psycopg2.connect(cfg["CONN_STRING_POSTGRESQL"])  # log events
+        self.pg_ts = psycopg2.connect(cfg["CONN_STRING_TIMESCALE"])  # historical bars
         self.pg.autocommit = True
         self.pg_ts.autocommit = True
 
-        # data cache refreshed every run
+        # In-memory cache refreshed each run.
         self.orders_df: pd.DataFrame = pd.DataFrame()
 
         self.log = logging.getLogger("BE_Manager")
@@ -227,10 +117,10 @@ class BreakevenOrderManager:
 
     async def _fetch_portfolio_state(self) -> pd.DataFrame:
         """
-        Load orders (DB → fallback API) and build the lot portfolio.
-        Optimized to use stored history start date.
+        Load orders (DB then API) and build the lot portfolio.
 
-        Returns the DataFrame with every active lot.
+        Use stored-history start dates when available and return every
+        active lot as a DataFrame.
         """
         if not self.repo:
             self.repo = await AsyncAccountRepository.create(
@@ -249,7 +139,6 @@ class BreakevenOrderManager:
             self.log.info("Loading orders from API (Fallback)...")
             start_date = None
 
-            # --- START DATE RESOLUTION (Double Fallback) ---
             try:
                 dates = await fetch_history_meta_dates(self.repo, self.slug)
                 if dates and dates[0]:
@@ -281,7 +170,6 @@ class BreakevenOrderManager:
                         api_exc,
                     )
 
-            # --- FETCH ORDERS ---
             try:
                 orders = await asyncio.to_thread(
                     fetch_orders,
@@ -309,10 +197,10 @@ class BreakevenOrderManager:
 
     def fetch_be_trigger_price(self, symbol: str, created_at: datetime) -> float | None:
         """
-        Look up *takeprofit_{BE_TRIGGER_R}_1_price* in `TABLE_BREAKOUTS`
-        for the (symbol, 30-min-timestamp) that corresponds to this order.
+        Look up the breakout row for the symbol / timestamp and return
+        the configured BE trigger price.
 
-        Returns the price as float, or **None** if no matching breakout row.
+        Return None if no matching breakout row exists.
         """
         ts_floor = prev_30m_bar(created_at)
         self.log.debug(">> DEBUG: created_at=%s  prev30m=%s", created_at, ts_floor)
@@ -337,13 +225,15 @@ class BreakevenOrderManager:
     
     def _last_trade_for_symbol(self, sym: str) -> tuple[str, float | None]:
         """
-        Worker run in a thread: return (symbol, last_trade_price or None).
-        Falls back to snapshot close if real-time helpers are missing.
+        Return (symbol, last trade price) from a worker thread.
+
+        Fall back to the snapshot close price when real-time helpers are
+        missing.
         """
         try:
-            if hasattr(self.api, "get_last_trade"):          # older SDK
+            if hasattr(self.api, "get_last_trade"):          # older SDK method
                 price = self.api.get_last_trade(sym).price
-            elif hasattr(self.api, "get_latest_trade"):      # newer SDK
+            elif hasattr(self.api, "get_latest_trade"):      # newer SDK method
                 price = self.api.get_latest_trade(sym).price
             else:                                            # snapshot fallback
                 price = self.api.get_snapshot(sym).last_trade.price
@@ -352,7 +242,6 @@ class BreakevenOrderManager:
             self.log.warning("last-trade fetch failed for %s: %s", sym, exc)
             return sym, None
 
-    # ------------------------------------------------------------------
     def _fetch_last_trade_prices_parallel(
         self,
         symbols: list[str],
@@ -360,8 +249,8 @@ class BreakevenOrderManager:
         max_workers: int = 32,
     ) -> dict[str, float]:
         """
-        Fan-out wrapper around `_last_trade_for_symbol`.  Returns the same
-        {symbol: price} mapping the single-threaded version produced.
+        Fan out to `_last_trade_for_symbol` and return the {symbol: price}
+        mapping.
         """
         prices: dict[str, float] = {}
         max_workers = max(1, min(max_workers, len(symbols)))
@@ -375,16 +264,12 @@ class BreakevenOrderManager:
 
         return prices
     
-    # ───────────────────────────────────────────────────────────────────
-    # 2a. Parallel extrema helpers   (Step-1)
-    # ───────────────────────────────────────────────────────────────────
     def _extrema_for_symbol(self, sym: str, since_ts: datetime) -> tuple[str, float, float]:
         """
-        High/low from `since_ts` → now, with automatic resolution:
+        Gather high/low since the fill timestamp using automatic resolution.
 
-        • 1-min bars:   fill-day (after entry) and today
-        • 1-day bars:   latest 30 sessions in between
-        • 1-week bars:  anything older than that
+        Use 1-min bars for the fill day and today, 1-day bars for recent
+        sessions, and weekly bars for older history.
         """
         try:
             ny   = ZoneInfo("America/New_York")
@@ -396,7 +281,7 @@ class BreakevenOrderManager:
 
             highs, lows = [], []
 
-            # ── 1) fill-day minute slice (only if filled after 09:30) ──────────
+            # 1) fill-day minute slice (only if filled after 09:30)
             if fill.date() < today and fill.time() > dtime(9, 30):
                 end_fill = datetime.combine(fill.date(), dtime(16, 0), tzinfo=ny)
                 bars = self.api.get_bars(
@@ -415,7 +300,7 @@ class BreakevenOrderManager:
                         highs.append(intraday["high"].max())
                         lows.append(intraday["low"].min())
 
-            # determine cutoff dates -------------------------------------------
+            # Determine cutoff dates for daily vs weekly windows.
             first_day_after_fill = (fill.date() if fill.time() == dtime(9, 30)
                                     else fill.date() + timedelta(days=1))
             last_daily_day  = today - timedelta(days=1)
@@ -427,7 +312,7 @@ class BreakevenOrderManager:
                 first_daily_day  = first_day_after_fill
                 first_weekly_day = None  # no weekly layer needed
 
-            # ── 2) older history → weekly bars (if any) ───────────────────────
+            # 2) older history -> weekly bars (if any)
             if first_weekly_day and first_weekly_day < first_daily_day:
                 weekly = self.api.get_bars(
                     sym, TimeFrame(1, TimeFrameUnit.Week),
@@ -439,7 +324,7 @@ class BreakevenOrderManager:
                     highs.append(weekly["high"].max())
                     lows.append(weekly["low"].min())
 
-            # ── 3) recent sessions → daily bars (≤ DAILY_WINDOW) ──────────────
+            # 3) recent sessions -> daily bars (≤ DAILY_WINDOW)
             if first_daily_day <= last_daily_day:
                 daily = self.api.get_bars(
                     sym, TimeFrame(1, TimeFrameUnit.Day),
@@ -451,7 +336,7 @@ class BreakevenOrderManager:
                     highs.append(daily["high"].max())
                     lows.append(daily["low"].min())
 
-            # ── 4) today 09:30 → now (minute bars) ────────────────────────────
+            # 4) today 09:30 -> now (minute bars)
             start_today = datetime.combine(today, dtime(9, 30), tzinfo=ny)
             if now > start_today.astimezone(timezone.utc):
                 today_bars = self.api.get_bars(
@@ -467,7 +352,7 @@ class BreakevenOrderManager:
                         highs.append(rth["high"].max())
                         lows.append(rth["low"].min())
 
-            # ── return (or safe fallback) ─────────────────────────────────────
+            # Return a safe fallback when no bars are found.
             if not highs:
                 return sym, 0.0, 1e9
 
@@ -477,7 +362,6 @@ class BreakevenOrderManager:
             self.log.warning("extrema fetch failed for %s: %s", sym, exc)
             return sym, 0.0, 1e9
 
-    # ------------------------------------------------------------------
     def _fetch_price_extrema_parallel(
         self,
         symbols: list[str],
@@ -486,8 +370,8 @@ class BreakevenOrderManager:
         max_workers: int = 32,
     ) -> pd.DataFrame:
         """
-        Thread-pool wrapper around `_extrema_for_symbol`.  Returns the same
-        DataFrame shape as the old single-threaded fetcher.
+        Fan out `_extrema_for_symbol` calls in a thread pool and return their
+        results as a DataFrame.
         """
         rows: list[tuple[str, float, float]] = []
 
@@ -502,24 +386,19 @@ class BreakevenOrderManager:
 
         return pd.DataFrame(rows, columns=["symbol", "max_high", "min_low"])
 
-    # ------------------------------------------------------------------
     def tick_size(self, symbol: str) -> float:
         """
-        Tick increment.  For US equities 0.01 is sufficient; cfg override wins.
+        Return the tick increment, defaulting to 0.01 unless cfg overrides it.
         """
         return float(self.cfg.get("TICK_DEFAULT", 0.01))
 
-    # ───────────────────────────────────────────────────────────────────
-    # 3. Stop-loss replacement helpers
-    # ───────────────────────────────────────────────────────────────────
-    # ------------------------------------------------------------------
     def replace_stop_loss(self, child_id: str, new_px_raw: float, symbol: str) -> bool:
         """
-        Patch the active stop-loss child leg to new_px, honouring the leg’s
-        true order_type:
+        Patch the active stop-loss child leg to the new price, respecting
+        the true order type.
 
-        • stop_limit  → send stop_price *and* limit_price
-        • stop        → send stop_price only
+        Send stop_price and limit_price for stop_limit legs, otherwise send
+        stop_price only.
         """
         new_px = round_price(new_px_raw)
 
@@ -532,17 +411,17 @@ class BreakevenOrderManager:
             )
             return True
 
-        # find the leg row so we know which style it is
+        # Look up the leg row to read its order type
         leg = self.orders_df[self.orders_df["id"] == child_id]
         if leg.empty:
             self.log.error("replace_stop_loss: child_id %s not found in cache", child_id)
             return False
 
-        # 'order_type' present for parents, 'type' for some children – check both
+        # 'order_type' for parents, 'type' for some children; check both
         kind = (leg["order_type"].iloc[0] or leg["type"].iloc[0]).lower()
 
         params = dict(stop_price=new_px)
-        if kind == "stop_limit":          # only then add limit_price
+        if kind == "stop_limit":          # add limit_price only for stop_limit
             params["limit_price"] = new_px
 
         self.log.debug("PATCH %s → %.4f (%s)", child_id, new_px, kind)
@@ -556,14 +435,14 @@ class BreakevenOrderManager:
         
     def _tightest_legal_stop(self, entry_px: float, is_long: bool) -> float:
         """
-        Closest stop Alpaca will accept.
+        Return the closest stop price Alpaca will accept for the side.
 
-            • LONG  → stop ≤ entry − gap
-            • SHORT → stop ≥ entry + gap
+        Longs move the stop to entry minus the gap, while shorts add the gap
+        to the entry price.
         """
         bp = Decimal(str(entry_px))                    # entry as Decimal
 
-        # cfg value may be str, int, or float → normalise then bound-check
+        # cfg value may be str, int, or float -> normalize then bound-check
         gap_cfg = Decimal(str(self.cfg.get("MIN_STOP_GAP", 0.01)))
         min_gap = Decimal("0.01") if entry_px >= 1 else Decimal("0.0001")
         gap = max(gap_cfg, min_gap)                    # still a Decimal
@@ -587,15 +466,11 @@ class BreakevenOrderManager:
         mkt_note : str,
     ) -> tuple[str, bool]:
         """
-        Try to replace the stop-loss on the *child* leg and return:
-
-            (parent_id,  True/False)
-
-        so the caller can mark exactly which parent moved.
+        Try to replace the stop-loss on the child leg and return
+        (parent_id, moved flag) so the caller can mark moved parents.
         """
         moved = self.replace_stop_loss(child_id, new_px, sym)
 
-        # ---------- structured audit message ------------------------
         self.log_event(
             "STOP_MOVED" if moved else "ERROR_REPLACE",
             sym,
@@ -605,13 +480,11 @@ class BreakevenOrderManager:
             note = f"child_id={child_id} {mkt_note}",
         )
 
-        # ---------- human console line ------------------------------
         tag = "✅" if moved else "✗ "
         self.log.info("%s %s stop ⇒ %.4f", tag, sym, new_px)
 
         return parent_id, moved
 
-    # ------------------------------------------------------------------
     def _apply_replacements_parallel(
         self,
         jobs: list[dict],
@@ -619,8 +492,8 @@ class BreakevenOrderManager:
         max_workers: int = 16,
     ) -> set[str]:
         """
-        Fire all PATCH requests concurrently and return **the set of
-        parent_ids whose stops were really moved**.
+        Fire PATCH requests concurrently and return the set of parent_ids
+        whose stops were moved.
         """
         if not jobs:
             return set()
@@ -639,12 +512,9 @@ class BreakevenOrderManager:
 
         return moved_parent_ids
     
-    # ───────────────────────────────────────────────────────────────────
-    # 4. Audit log
-    # ───────────────────────────────────────────────────────────────────
     def _ensure_be_table(self) -> None:
         """
-        CREATE TABLE IF NOT EXISTS …  (run once per OrderManager instance).
+        Ensure TABLE_BE_EVENTS exists for audit rows in this process.
         """
         if getattr(self, "_be_table_ready", False):
             return  # already created in this process
@@ -665,9 +535,6 @@ class BreakevenOrderManager:
         self.pg.commit()
         self._be_table_ready = True
 
-    # ------------------------------------------------------------------
-    # 4. Audit log
-    # ------------------------------------------------------------------
     def log_event(
             self,
             action      : str,
@@ -679,8 +546,8 @@ class BreakevenOrderManager:
             note: str = "",
     ) -> None:
         """
-        Emit a DEBUG/INFO line only – no database insert.
-        (We now persist snapshots elsewhere.)
+        Log the event without inserting into the database; snapshots live
+        elsewhere.
         """
         if self.dry_run:
             dry_parts = [action, symbol, position_id]
@@ -692,7 +559,6 @@ class BreakevenOrderManager:
             self.log.info("[DRY RUN EVENT] %s", " ".join(dry_parts))
             return
 
-        # ── human-readable line ──────────────────────────────────────────
         parts = [action, symbol]
         if old is not None and new is not None:
             parts.append(f"old={old:.2f}  new={new:.2f}")
@@ -704,7 +570,7 @@ class BreakevenOrderManager:
 
     def _build_meta(self, portfolio_df: pd.DataFrame) -> dict[tuple[str, str], dict]:
         """
-        Adapt the portfolio view into the classic (symbol,parent) meta map.
+        Build the classic (symbol, parent) meta map from the portfolio view.
         """
         meta: dict[tuple[str, str], dict] = {}
         if portfolio_df.empty:
@@ -792,13 +658,11 @@ class BreakevenOrderManager:
 
         return meta
     
-    # ───────────────────────────────────────────────────────────────────
-    #  Snapshot-table helper: one TEXT column with the full line
-    # ───────────────────────────────────────────────────────────────────
     def _ensure_be_table(self) -> None:
         """
-        Ensure TABLE_BE_EVENTS (= log_stop_manager) exists **with the new
-        snapshot-layout**. All earlier audit columns are dropped here.
+        Ensure TABLE_BE_EVENTS exists with the new snapshot layout.
+
+        Earlier audit columns are dropped here.
         """
         if getattr(self, "_be_table_ready", False):
             return                                  # already checked in this process
@@ -833,12 +697,9 @@ class BreakevenOrderManager:
         already_parent_ids: set[str],
     ) -> None:
         """
-        One INFO line **and** one DB row per *(symbol, parent_id)*.
+        Log one INFO line and insert a DB row for each (symbol, parent_id).
 
-        Flags:
-            moved_flag = 'OK'       → stop updated in this cycle
-                       = 'Already'  → was at BE before the cycle
-                       = '—'        → nothing done
+        Set moved_flag to 'OK', 'Already', or '—' to describe the action.
         """
         self._ensure_be_table()
         tbl = self.cfg["TABLE_BE_EVENTS"]
@@ -849,7 +710,6 @@ class BreakevenOrderManager:
 
         for (sym, pid), m in meta.items():
 
-            # ---- parent-specific details -----------------------------
             qty = int(m.get("remaining_qty", 0))
             sl_px = m["current_sl"]
             mkt_px   = last_px.get(sym)
@@ -858,7 +718,6 @@ class BreakevenOrderManager:
             elif pid in already_parent_ids: flag = "Already"
             else:                           flag = "—"
 
-            # ---- DB payload ---------------------------------------------
             rows.append((
                 pid,
                 sym,
@@ -906,8 +765,9 @@ class BreakevenOrderManager:
 
     def _prune_old_snapshots(self, *, days: int = 30) -> None:
         """
-        Keep only <days> worth of rows in TABLE_BE_EVENTS / log_stop_manager.
-        Runs fast because we have an index on ts.
+        Keep only `days` worth of rows in TABLE_BE_EVENTS / log_stop_manager.
+
+        The index on timestamp keeps the delete fast.
         """
         tbl = self.cfg["TABLE_BE_EVENTS"]
         with self.pg.cursor() as cur:
@@ -932,11 +792,9 @@ class BreakevenOrderManager:
         extrema: dict,
     ) -> tuple[dict | None, str]:
         """
-        Decide what to do with <sym> and emit log_events along the way.
+        Decide how to handle sym, emit log events, and return the status.
 
-        Returns
-        -------
-        (job-dict | None, status)   where status ∈ {"todo","already","noop"}
+        Return a job dict or None plus a status in {"todo","already","noop"}.
         """
         pid      = meta["parent_id"]
         entry_px = meta["entry_px"]
@@ -949,7 +807,7 @@ class BreakevenOrderManager:
             self.log_event("ALREADY_AT_BE", sym, pid)
             return None, "already"
 
-        # ── market-price guard ────────────────────────────────────────────
+        # Market-price guard
         if mkt is None:
             self.log_event("PRICE_UNKNOWN", sym, pid)
             return None, "noop"
@@ -960,13 +818,12 @@ class BreakevenOrderManager:
                         note=f"mkt={mkt:.2f} entry={entry_px:.2f}")
             return None, "noop"
 
-        # ── armed?  (hit BE trigger) ──────────────────────────────────────
+        # Armed? hit the BE trigger
         hi, lo = extrema["max_high"], extrema["min_low"]
         armed  = hi >= meta["be_tp"] if is_long else lo <= meta["be_tp"]
         if not armed:
             return None, "noop"
 
-        # build PATCH job
         job = {
             "child_id":  child,
             "new_px":    legal_be,
@@ -985,16 +842,11 @@ class BreakevenOrderManager:
         last_px   : dict[str, float],
     ) -> tuple[list[dict], set[str]]:
         """
-        Iterate over **every (symbol, parent_id)** pair and decide:
+        Iterate over every (symbol, parent_id) pair and decide on patch jobs.
 
-            • jobs               → list[dict]  (PATCH payloads)
-            • already_parent_ids → set[str]
-
-        NOTE
-        ----
-        *extrema* and *last_px* are keyed by **symbol only** – they were fetched
-        once per ticker (Step 6).  That is fine here: every parent of the same
-        symbol shares the identical high/low snapshot and last trade.
+        Return both the job list and the set of parent_ids already at BE.
+        `extrema` and `last_px` are keyed by symbol because every parent
+        of the same ticker shares the same snapshots.
         """
         jobs: list[dict] = []
         already_pids: set[str] = set()
@@ -1010,7 +862,7 @@ class BreakevenOrderManager:
                 pos_side = pos_by_sym.at[sym, "side"],
                 meta     = m,
                 mkt      = last_px.get(sym),
-                extrema  = extrema[sym],              # ← per-symbol lookup
+                extrema  = extrema[sym],              # per-symbol lookup
             )
 
             if status == "already":
@@ -1020,12 +872,9 @@ class BreakevenOrderManager:
 
         return jobs, already_pids
 
-    # ───────────────────────────────────────────────────────────────
-    #  orchestrator
-    # ───────────────────────────────────────────────────────────────
     async def run_async(self) -> None:
         """
-        Execute one break-even cycle (async entry point).
+        Execute one break-even cycle asynchronously.
         """
         self.log.info("— Break-Even manager cycle start —")
 
@@ -1094,10 +943,9 @@ class BreakevenOrderManager:
 
 
     def run(self) -> None | Coroutine[Any, Any, None]:
-        """Blocking wrapper for ``run_async``.
-
-        When an existing loop is running this returns the coroutine for
-        awaiting.
+        """
+        Blocking wrapper for run_async, returning the coroutine when a loop is
+        active.
         """
         try:
             asyncio.get_running_loop()

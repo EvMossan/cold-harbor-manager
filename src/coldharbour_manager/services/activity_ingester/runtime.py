@@ -1,6 +1,6 @@
 """
-Runtime orchestrator for the Data Ingester Service.
-Manages lifecycle of workers for multiple accounts defined in DESTINATIONS.
+Runtime orchestrator for the Data Ingester service covering all
+configured destination accounts.
 """
 
 from __future__ import annotations
@@ -20,17 +20,14 @@ log = logging.getLogger("IngesterRuntime")
 
 
 class IngesterService:
-    """
-    Main service class that orchestrates data ingestion for multiple accounts.
-    """
+    """Drive ingestion across the configured destinations."""
 
     def __init__(self) -> None:
         self.repo: Optional[AsyncAccountRepository] = None
         self._tasks: List[asyncio.Task] = []
         self._stop_event = asyncio.Event()
         
-        # Resolve DB connection string from environment
-        # Prefer local connection before falling back to tunnel values.
+        # Prefer the local Postgres DSN before falling back to tunnels.
         self._db_dsn = (
             os.getenv("POSTGRESQL_LIVE_LOCAL_CONN_STRING")
             or os.getenv("POSTGRESQL_LIVE_CONN_STRING")
@@ -42,15 +39,13 @@ class IngesterService:
             )
 
     async def init(self) -> None:
-        """Initialize database connection pool."""
+        """Initialize the database connection pool."""
         log.info("Initializing Ingester Service...")
         self.repo = await AsyncAccountRepository.create(self._db_dsn)
         log.info("Database connection established.")
 
     async def _start_account_workers(self, dest: Dict[str, Any]) -> None:
-        """
-        Bootstrap and launch workers for a single destination/account.
-        """
+        """Launch workers for a destination account."""
         assert self.repo is not None
         
         name = dest.get("name", "unknown")
@@ -66,11 +61,10 @@ class IngesterService:
 
         log.info(f"[{slug}] Bootstrapping account storage...")
         
-        # 1. Ensure DB Schema/Tables exist for this account
+        # Ensure schema and tables exist before spinning up workers.
         await storage.ensure_schema_and_tables(self.repo, slug)
 
-        # 1.5. Run Metadata Check (History Dates)
-        # Ensures raw_history_meta table is created and populated.
+        # Kick off the metadata check so raw_history_meta exists.
         meta_task = asyncio.create_task(
             workers.run_startup_meta_check(
                 self.repo, api_key, secret_key, base_url, slug
@@ -79,8 +73,7 @@ class IngesterService:
         )
         self._tasks.append(meta_task)
 
-        # 2. Check if Backfill is needed (run as background task)
-        # We spawn this separately so it doesn't block stream startup
+        # Run backfill without blocking stream startup.
         backfill_task = asyncio.create_task(
             workers.run_backfill_task(
                 self.repo, api_key, secret_key, base_url, slug
@@ -89,7 +82,7 @@ class IngesterService:
         )
         self._tasks.append(backfill_task)
 
-        # 3. Start Stream Consumer (Infinite Loop)
+        # Run the stream consumer loop with automatic restart logic.
         stream_task = self._spawn_guarded(
             f"stream-{slug}",
             lambda: workers.run_stream_consumer(
@@ -98,7 +91,7 @@ class IngesterService:
         )
         self._tasks.append(stream_task)
 
-        # 4. Start Healing Worker (Infinite Loop)
+        # Run the healing loop with the same restart guard.
         healing_task = self._spawn_guarded(
             f"healing-{slug}",
             lambda: workers.run_healing_worker(
@@ -114,9 +107,7 @@ class IngesterService:
         name: str,
         factory: Any
     ) -> asyncio.Task:
-        """
-        Run a task in a restart loop to handle crashes gracefully.
-        """
+        """Run a task loop that restarts failed workers."""
         async def _runner() -> None:
             while not self._stop_event.is_set():
                 try:
@@ -133,44 +124,42 @@ class IngesterService:
         return asyncio.create_task(_runner(), name=name)
 
     async def run(self) -> None:
-        """
-        Main entry point. Starts everything and waits for stop signal.
-        """
+        """Start all workers and await a termination signal."""
         await self.init()
 
-        # Register signal handlers for graceful shutdown
+        # Register signal handlers for graceful shutdown.
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, self._stop_event.set)
             except NotImplementedError:
-                # Signal handlers might not work in all environments (e.g. Windows)
+                # Some environments lack support for these handlers.
                 pass
 
         log.info(f"Found {len(DESTINATIONS)} destinations configuration.")
 
-        # Launch workers for all accounts
+        # Launch workers for each configured destination.
         for dest in DESTINATIONS:
             await self._start_account_workers(dest)
 
         log.info("Ingester Service running. Press Ctrl+C to stop.")
         
-        # Wait until stop signal
+        # Wait until stop signal.
         await self._stop_event.wait()
         await self.shutdown()
 
     async def shutdown(self) -> None:
-        """Clean up resources."""
+        """Cancel running work and close resources."""
         log.info("Shutting down Ingester Service...")
         
-        # Cancel all running tasks
+        # Cancel all running tasks.
         for t in self._tasks:
             t.cancel()
         
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
             
-        # Close DB pool
+        # Close the DB pool.
         if self.repo:
             await self.repo.close()
             

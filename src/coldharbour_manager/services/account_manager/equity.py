@@ -186,17 +186,14 @@ async def _rebuild_equity_full(mgr: "AccountManager") -> None:
 
 async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
     """
-    Rebuild intraday deposits using strict 'Mark-to-Market' Delta from Yesterday Close.
-    
-    Logic:
-    Intraday Equity(t) = Prev_Equity + PnL(t) + Flows(t)
-    
-    Where PnL(t) is calculated differently for Old vs New positions:
-    1. Held from yesterday: (Price(t) - Yesterday_Close) * Qty
-    2. Opened today:        (Price(t) - Entry_Price) * Qty
-    
-    Flows(t) now includes ALL non-trade activities (Fees, Divs, etc.) 
-    to match the Daily Ledger logic.
+    Rebuild intraday equity by marking positions to market relative to
+    the previous close and applying flows.
+
+    Intraday equity(t) = prev_equity + delta_series(t) + flows(t).
+    Open positions use yesterday's close when carried overnight.
+    Intraday trades compare to their entry price, and realized PnL is
+    tallied after exit.
+    External flows update the balance without affecting cumulative returns.
     """
     try:
         now_dt = _utcnow()
@@ -256,7 +253,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
         )
         open_df = pd.DataFrame(open_rows)
 
-        # 4. Fetch Flows (split into PnL vs external deposits/withdrawals)
+        # 4. Fetch flows split into PnL vs other cash movements
         pnl_types = {
             "DIV",
             "DIVCGL",

@@ -1,6 +1,7 @@
 """
-Entrypoint for the Cold Harbour Data Ingester Service.
-Run with: python -m coldharbour_manager.ingester_run
+Entrypoint for the Cold Harbour Data Ingester service.
+
+Invoke with ``python -m coldharbour_manager.ingester_run``.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import logging
 import os
 import sys
 
-# Apply nest_asyncio if needed (e.g. notebooks); harmless otherwise.
+# Apply nest_asyncio when running inside notebooks; safe always.
 try:
     import nest_asyncio
     nest_asyncio.apply()

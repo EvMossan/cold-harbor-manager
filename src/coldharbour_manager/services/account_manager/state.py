@@ -24,7 +24,7 @@ async def upsert_live_row(
     *,
     force_push: bool = False,
 ) -> None:
-    """Upsert a live parent row and push NOTIFY if needed."""
+    """Upsert a live parent row and push pg_notify if thresholds met."""
 
     cols = DB_COLS
     vals = [row.get(c) for c in cols]
@@ -92,7 +92,7 @@ async def delete_parent_row(
     exit_px: Optional[float] = None,
     exit_type: str = "MANUAL",
 ) -> None:
-    """Delete a parent row, write closed row, and notify clients."""
+    """Delete a parent row, record the closed trade, and notify clients."""
 
     row = mgr.state.get(parent_id)
 

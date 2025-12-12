@@ -1,4 +1,4 @@
-"""Async workers for Data Ingester: Stream, Backfill, and Healing."""
+"""Async workers for the data ingester stream, backfill, and healing."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def _timestamp_to_datetime(value: Any) -> Optional[datetime]:
 
 
 def _df_to_ingest_records(df: pd.DataFrame) -> List[dict[str, Any]]:
-    """Transform fetched order table into storage-ready records."""
+    """Transform the fetched order table into storage-ready records."""
     ingest_time = datetime.now(timezone.utc)
     records: List[dict[str, Any]] = []
     df_clean = df.astype(object).where(pd.notnull(df), None)
@@ -98,7 +98,7 @@ def _df_to_activity_records(
     df: pd.DataFrame,
     default_time: Optional[datetime] = None,
 ) -> List[dict[str, Any]]:
-    """Transform fetched activity table into storage-ready records."""
+    """Transform the fetched activity table into storage-ready records."""
     ingest_time = datetime.now(timezone.utc)
     records: List[dict[str, Any]] = []
     df_clean = df.astype(object).where(pd.notnull(df), None)
@@ -155,7 +155,7 @@ def _df_to_activity_records(
 # Helper for JSON Logging
 # -------------------------------------------------------------------------
 def _json_dumper(obj: Any) -> str:
-    """Safe JSON dumper for logging purposes."""
+    """Dump objects to JSON safely for logging."""
     def _default(o):
         if isinstance(o, (datetime, pd.Timestamp)):
             return o.isoformat()
@@ -175,9 +175,7 @@ async def run_startup_meta_check(
     base_url: str,
     slug: str,
 ) -> None:
-    """
-    Fetch and persist account history boundaries on startup.
-    """
+    """Persist account history boundaries on startup."""
     try:
         log.info(f"[{slug}] Checking account history boundaries...")
         await storage.ensure_history_meta_table(repo, slug)
@@ -208,10 +206,7 @@ async def run_backfill_task(
     base_url: str,
     slug: str,
 ) -> None:
-    """
-    One-off task on startup.
-    Uses DB meta or API detection for start dates.
-    """
+    """Perform the startup backfill using DB meta or API dates."""
     try:
         log.info(f"[{slug}] Starting Backfill/Catch-up check...")
         rest = _get_rest_client(api_key, secret_key, base_url)
@@ -293,10 +288,7 @@ async def run_healing_worker(
     base_url: str,
     slug: str,
 ) -> None:
-    """
-    Periodic background task.
-    Polls REST API for recent history to fix any gaps ("heals" the data).
-    """
+    """Heal recent history gaps by polling the REST API periodically."""
     log.info(f"[{slug}] Healing worker started.")
     rest = _get_rest_client(api_key, secret_key, base_url)
     while True:
@@ -354,11 +346,7 @@ async def run_stream_consumer(
     base_url: str,
     slug: str,
 ) -> None:
-    """
-    Real-time WebSocket consumer.
-    Listens for 'trade_updates', transforms them, and upserts to DB immediately.
-    Logs payload details to assist debugging.
-    """
+    """Consume trade updates over WebSocket and persist them immediately."""
     log.info(f"[{slug}] Stream consumer starting...")
     
     async def _on_trade_update(*args: Any):
@@ -367,8 +355,7 @@ async def run_stream_consumer(
             raw = args[-1]
             event = raw._raw if hasattr(raw, "_raw") else raw
             
-            # --- DEBUG LOGGING: RAW INCOMING ---
-            # Using INFO level so you can see it without changing env vars
+            # Log raw payload at INFO so it is visible with the current level
             log.info(f"[{slug}] >>> STREAM RAW: {_json_dumper(event)}")
 
             event_type = event.get("event")
@@ -379,7 +366,6 @@ async def run_stream_consumer(
             if order_data:
                 try:
                     norm_order = transform.normalize_order(order_data)
-                    # --- DEBUG LOGGING: NORMALIZED ORDER ---
                     log.info(f"[{slug}] NORM ORDER: {_json_dumper(norm_order)}")
                     
                     cnt = await storage.upsert_orders(repo, slug, [norm_order])
@@ -392,7 +378,6 @@ async def run_stream_consumer(
             if event_type in ("fill", "partial_fill"):
                 try:
                     norm_activity = transform.normalize_stream_activity(event)
-                    # --- DEBUG LOGGING: NORMALIZED ACTIVITY ---
                     log.info(f"[{slug}] NORM ACTIVITY (ID={norm_activity.get('id')}): {_json_dumper(norm_activity)}")
                     
                     cnt = await storage.upsert_activities(repo, slug, [norm_activity])

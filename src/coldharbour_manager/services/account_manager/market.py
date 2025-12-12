@@ -31,7 +31,7 @@ def _session_start_utc(
     mgr: "AccountManager",
     now_ts: Optional[datetime] = None,
 ) -> tuple[pd.Timestamp, date]:
-    """Return the 04:00 New York start for the active session."""
+    """Compute the 04:00 New York start for the active session."""
     tz_ny = ZoneInfo("America/New_York")
     now_ts = now_ts or _utcnow()
     session_date = trading_session_date(now_ts)
@@ -43,7 +43,7 @@ def _session_start_utc(
 
 
 async def _refresh_market_schedule(mgr: "AccountManager") -> int:
-    """Synchronise the market schedule table with Alpaca."""
+    """Synchronize market schedule table with Alpaca."""
 
     try:
         assert mgr.repo is not None
@@ -105,7 +105,7 @@ async def _schedule_next(
 
 
 async def _needs_recovery(mgr: "AccountManager") -> bool:
-    """Return True when core tables are empty and need recovery."""
+    """Detect whether core tables are empty and require recovery."""
 
     try:
         row = await mgr._db_fetchrow(
@@ -132,7 +132,7 @@ async def _needs_recovery(mgr: "AccountManager") -> bool:
 
 
 async def _market_schedule_worker(mgr: "AccountManager") -> None:
-    """Keep the market schedule table in sync with Alpaca."""
+    """Keep market schedule table synchronized with Alpaca."""
 
     interval = mgr.MARKET_REFRESH_SEC
     first = True
@@ -150,7 +150,7 @@ async def _market_schedule_worker(mgr: "AccountManager") -> None:
 
 
 async def _bootstrap_for_session(mgr: "AccountManager") -> None:
-    """Run the bootstrap sequence before a trading session starts."""
+    """Run the bootstrap sequence before trading session starts."""
 
     async with mgr._snap_lock:
         mgr._snapshot_ready = False
@@ -181,7 +181,7 @@ async def _bootstrap_for_session(mgr: "AccountManager") -> None:
 
 
 async def _deactivate_session(mgr: "AccountManager") -> None:
-    """Cancel active workers and reset the session state."""
+    """Cancel active workers and reset session state."""
 
     if not mgr._active_tasks:
         mgr._active_session = None
@@ -204,7 +204,7 @@ async def _activate_session(
     mgr: "AccountManager",
     session: SessionWindow,
 ) -> None:
-    """Ensure workers are running for the provided session."""
+    """Start workers for the provided session if needed."""
 
     current = mgr._active_session
     if current and current.session_date == session.session_date:

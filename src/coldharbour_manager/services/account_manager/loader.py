@@ -69,7 +69,7 @@ async def load_orders_from_db(
     uuid_cols = ["id", "parent_id", "client_order_id", "replaced_by", "replaces"]
     for col in uuid_cols:
         if col in df.columns:
-            # Convert to str, preserving None as None (not "None")
+            # Convert to str while leaving None unchanged.
             df[col] = df[col].apply(lambda x: str(x) if x else None)
 
     return df
@@ -129,10 +129,8 @@ async def fetch_history_meta_dates(
     repo: AsyncAccountRepository,
     slug: str,
 ) -> Tuple[Optional[datetime], Optional[datetime]]:
-    """
-    Retrieve cached earliest order and activity timestamps.
-
-    Returns (None, None) if the table or rows do not exist.
+    """Return cached earliest order and activity timestamps or
+    (None, None) when table data is absent.
     """
     safe_slug = slug.replace("-", "_").lower()
     table_name = f"account_activities.raw_history_meta_{safe_slug}"

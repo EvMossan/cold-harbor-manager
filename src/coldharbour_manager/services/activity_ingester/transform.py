@@ -1,7 +1,7 @@
-"""
-Pure data transformation logic for the Data Ingester.
-Handles normalization of Stream/REST data into DB-ready structures
-and generation of idempotent IDs.
+"""Provide data transformation logic for the Data Ingester.
+
+Normalize Stream/REST data into DB-ready structures and generate
+idempotent identifiers.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def _json_default(obj: Any) -> Any:
     if isinstance(obj, (datetime, pd.Timestamp)):
         return obj.isoformat()
     if isinstance(obj, Decimal):
-        return float(obj)  # or str(obj) depending on preference
+        return float(obj)
     try:
         return str(obj)
     except Exception:
@@ -108,18 +108,16 @@ def _serialize_raw(data: Any) -> str:
 
 
 def _generate_synthetic_activity_id(timestamp: datetime, execution_id: str) -> str:
-    """
-    Reconstruct Alpaca's REST API Activity ID format from Stream data.
-    
-    Format: YYYYMMDDHHMMSSmmm::execution_id
-    Timezone: America/New_York (ET)
-    
+    """Recreate Alpaca REST activity IDs from stream data.
+
+    Format: YYYYMMDDHHMMSSmmm::execution_id in America/New_York time.
+
     Args:
         timestamp: Aware datetime (UTC) from the stream event.
-        execution_id: The UUID of the execution.
+        execution_id: UUID of the execution.
     """
     if not timestamp or not execution_id:
-        # Fallback if critical data is missing (should not happen in valid stream)
+        # Fall back when critical data is missing (should not happen)
         return f"unknown::{execution_id}"
 
     # Convert UTC to Eastern Time (Alpaca's server time for IDs)
@@ -137,16 +135,14 @@ def _generate_synthetic_activity_id(timestamp: datetime, execution_id: str) -> s
 
 
 def normalize_order(raw: Dict[str, Any]) -> OrderRecord:
-    """
-    Normalize REST or stream orders for insertion into `raw_orders`.
+    """Normalize REST or stream orders for `raw_orders`.
 
     Args:
         raw: Raw API payload containing order metadata.
 
     Returns:
-        OrderRecord where prices, quantities, and timestamps are coerced
-        into Decimal/UTC datetime, `symbol` is upper-cased, `side` is
-        lower-case, and `ingested_at` records the timestamp of ingestion.
+        OrderRecord with Decimal/UTC coerced amounts and timestamps,
+        normalized symbol and side casing, and ingestion timestamp.
     """
     data = raw
 
@@ -200,17 +196,15 @@ def normalize_order(raw: Dict[str, Any]) -> OrderRecord:
 
 
 def normalize_rest_activity(raw: Dict[str, Any]) -> ActivityRecord:
-    """
-    Normalize REST activity rows for idempotent inserts.
+    """Normalize REST activity rows for idempotent inserts.
 
     Args:
         raw: Response from `GET /v2/account/activities`.
 
     Returns:
-        ActivityRecord with parsed amounts, UTC timestamps, and extracted
-        execution IDs when the REST ID embeds them.
+        ActivityRecord with parsed amounts, UTC timestamps, and execution
+        IDs extracted when the REST ID embeds them.
     """
-    # REST API provides the ID natively
     activity_id = raw.get("id")
     
     # Extract execution_id from the ID string if possible (format: time::uuid)
@@ -241,34 +235,28 @@ def normalize_rest_activity(raw: Dict[str, Any]) -> ActivityRecord:
 
 
 def normalize_stream_activity(event: Dict[str, Any]) -> ActivityRecord:
-    """
-    Normalize a WebSocket `trade_updates` event for ingestion.
+    """Normalize a WebSocket `trade_updates` event for ingestion.
 
     Args:
         event: Alpaca WebSocket payload describing a fill or partial.
 
     Returns:
-        ActivityRecord with synthetic `id` (YYYYMMDDHHMMSSmmm::exec_id),
-        UTC-normalized `transaction_time`, Decimal amounts, and signed
-        `net_amount` where buys are negative.
+        ActivityRecord with synthetic id (YYYYMMDDHHMMSSmmm::exec_id),
+        UTC-normalized transaction_time, Decimal amounts, and signed
+        net_amount where buys are negative.
     """
-    # Event structure: {"event": "fill", "execution_id": "...", "order": {...}, ...}
+    # Event structure includes event, execution_id, and nested order.
     event_type = event.get("event")
     execution_id = event.get("execution_id")
     timestamp = _parse_ts(event.get("timestamp"))
-    
-    # Order details are nested
     order = event.get("order", {})
-    
-    # Generate the synthetic ID
     if timestamp and execution_id:
         synthetic_id = _generate_synthetic_activity_id(timestamp, execution_id)
     else:
-        # Should not happen for valid fills, but safe fallback
+        # Should not happen for valid fills but offers safe fallback.
         synthetic_id = f"stream_{execution_id or datetime.now().timestamp()}"
 
-    # Calculate net_amount approximation for FILL (cash impact)
-    # Logic: buy = negative cash, sell = positive cash
+    # Estimate net_amount for fills; buys reduce cash, sells add.
     qty = _to_decimal(event.get("qty")) or Decimal(0)
     price = _to_decimal(event.get("price")) or Decimal(0)
     side = str(order.get("side") or "").lower()

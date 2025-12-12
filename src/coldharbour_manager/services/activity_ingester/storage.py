@@ -1,6 +1,8 @@
 """
 Database storage layer for the Data Ingester.
-Handles dynamic table creation per account slug and UPSERT operations.
+
+Handles dynamic table creation per account slug and UPSERT
+operations.
 """
 
 from __future__ import annotations
@@ -27,17 +29,15 @@ async def ensure_schema_and_tables(
     slug: str
 ) -> None:
     """
-    Idempotently create the schema and per-account tables.
+    Ensure the schema and per-account tables exist idempotently.
     """
     schema = IngesterConfig.DB_SCHEMA
     t_orders = _table_name("raw_orders", slug)
     t_activities = _table_name("raw_activities", slug)
 
-    # 1. Ensure Schema
     await repo.execute(f"CREATE SCHEMA IF NOT EXISTS {schema};")
 
-    # 2. Table: Orders (Mutable state)
-    # We store the full lifecycle of an order here.
+    # Orders table stores the mutable state of each order lifecycle.
     ddl_orders = f"""
         CREATE TABLE IF NOT EXISTS {t_orders} (
             id UUID PRIMARY KEY,
@@ -77,8 +77,7 @@ async def ensure_schema_and_tables(
     """
     await repo.execute(ddl_orders)
 
-    # 3. Table: Activities (Append-only history)
-    # ID is the synthetic "Time::UUID" key for deduplication.
+    # Activities table stores append-only history keyed by Time::UUID.
     ddl_activities = f"""
         CREATE TABLE IF NOT EXISTS {t_activities} (
             id TEXT PRIMARY KEY,
@@ -111,7 +110,7 @@ async def ensure_history_meta_table(
 ) -> None:
     """
     Ensure the history metadata table exists for the account slug.
-    Structure: key-value store for timestamps.
+    Store timestamps as a key-value metric record.
     """
     t_meta = _table_name("raw_history_meta", slug)
 
@@ -155,8 +154,8 @@ async def get_latest_order_time(
     slug: str
 ) -> Optional[datetime]:
     """
-    Find the timestamp of the most recently updated order.
-    Used to determine if backfill is needed or where to start 'healing'.
+    Return the timestamp of the most recently updated order.
+    Use it to decide if backfill is needed or where to begin healing.
     """
     t_orders = _table_name("raw_orders", slug)
     try:
@@ -178,7 +177,7 @@ async def upsert_orders(
     orders: List[Dict[str, Any]]
 ) -> int:
     """
-    Batch UPSERT orders. Fully overwrites existing row on conflict.
+    Batch UPSERT orders, fully overwriting existing rows on conflict.
     """
     if not orders:
         return 0
@@ -196,16 +195,13 @@ async def upsert_orders(
         "ingested_at"
     ]
     
-    # Prepare values list
     values = []
     for o in orders:
         values.append(tuple(o.get(c) for c in cols))
 
-    # Construct placeholders ($1, $2, ...)
     placeholders = ",".join(f"${i+1}" for i in range(len(cols)))
     
-    # Build UPDATE clause for ON CONFLICT
-    # FORCE FULL OVERWRITE: Update ALL columns except 'id'
+    # Force full overwrite: update every column except `id`.
     update_cols = [c for c in cols if c != "id"]
     updates = ",".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
 
@@ -226,7 +222,7 @@ async def upsert_activities(
     activities: List[Dict[str, Any]]
 ) -> int:
     """
-    Batch INSERT activities. Ignores duplicates (idempotent).
+    Batch insert activities while ignoring duplicates.
     """
     if not activities:
         return 0
@@ -246,8 +242,8 @@ async def upsert_activities(
 
     placeholders = ",".join(f"${i+1}" for i in range(len(cols)))
 
-    # ON CONFLICT DO NOTHING because activities are immutable history events.
-    # If we already have this ID (Time::UUID), we skip it.
+    # ON CONFLICT DO NOTHING keeps the history append-only and skips
+    # Time::UUID duplicates.
     sql = f"""
         INSERT INTO {t_activities} ({",".join(cols)})
         VALUES ({placeholders})

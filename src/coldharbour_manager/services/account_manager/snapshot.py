@@ -20,34 +20,28 @@ from coldharbour_manager.services.account_manager.utils import (
 
 
 def _aggregate_lots(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate separate fill lots into a single parent row.
-    Necessary because the DB uses parent_id as PK, but build_lot_portfolio
-    returns one row per fill.
-    """
+    """Aggregate fill lots by Parent ID so callers see one row per parent."""
     if df.empty or "Parent ID" not in df.columns:
         return df
 
-    # Filter out rows without a Parent ID
     valid = df[df["Parent ID"].notna() & (df["Parent ID"] != "")].copy()
     if valid.empty:
         return df
 
-    # Pre-calculate weighted value for accurate Avg Price reconstruction
-    # We use Remaining Qty because that represents the currently held portion.
+    # Pre-calc weighted value for accurate Avg Price reconstruction.
+    # Use Remaining Qty because it represents the held portion.
     # Ensure columns exist and fill NaNs to avoid math errors.
     if "Buy Price" in valid.columns and "Remaining Qty" in valid.columns:
         valid["_w_val"] = valid["Buy Price"].fillna(0.0) * valid["Remaining Qty"].fillna(0.0)
     else:
         valid["_w_val"] = 0.0
 
-    # Define aggregation rules
     aggs = {
         "Symbol": "first",
-        "Buy Date": "first",      # Keep earliest date
-        "Buy Qty": "sum",         # Sum original size
-        "Remaining Qty": "sum",   # Sum active size
-        "_w_val": "sum",          # Sum weighted value for price calc
+        "Buy Date": "first",
+        "Buy Qty": "sum",
+        "Remaining Qty": "sum",
+        "_w_val": "sum",
         "Current Market Value": "sum",
         "Profit/Loss": "sum",
         "Current_Price": "first",
@@ -58,15 +52,13 @@ def _aggregate_lots(df: pd.DataFrame) -> pd.DataFrame:
         "Source": "first",
         "Avg Entry (API)": "first",
         "_avg_px_symbol": "first",
-        # Preserve TP_reach if possible (taking first isn't perfect but sufficient for summary)
+        # Preserve TP_reach when possible; the first entry suffices.
         "TP_reach, %": "first",
         "Days_To_Expire": "first",
     }
-    
-    # Only aggregate columns that actually exist in the DF
+
     actual_aggs = {k: v for k, v in aggs.items() if k in valid.columns}
 
-    # Group by Parent ID
     grouped = valid.groupby("Parent ID", as_index=False).agg(actual_aggs)
 
     # Re-calculate weighted average Buy Price
@@ -76,7 +68,6 @@ def _aggregate_lots(df: pd.DataFrame) -> pd.DataFrame:
             if r["Remaining Qty"] and r["Remaining Qty"] > 1e-9 else 0.0, 
             axis=1
         )
-        # Drop temp column to keep it clean
         grouped.drop(columns=["_w_val"], inplace=True)
     else:
         grouped["Buy Price"] = 0.0
@@ -164,7 +155,8 @@ def _build_live_row(
     mkt_px = _safe_float(entry.get("Current_Price"))
     if mkt_px is None:
         mkt_px = price_cache.get(symbol)
-        # Fallback: rely on Timescale rows; keep None if the tick is missing.
+        # Fall back to Timescale rows when the live tick is missing.
+        # Leave None if the lookup still fails.
 
     buy_value = _safe_float(entry.get("Buy_Value"))
     mkt_value = _safe_float(entry.get("Current Market Value"))

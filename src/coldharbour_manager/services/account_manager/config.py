@@ -19,7 +19,7 @@ class _Config:
 
     POSTGRESQL_LIVE_SQLALCHEMY: str = ""
     CONN_STRING_POSTGRESQL: Optional[str] = None
-    # passed through unchanged
+    # Connection string passed verbatim to SQLAlchemy.
 
     TABLE_ACCOUNT_POSITIONS: str = "account_open_positions"
     TABLE_ACCOUNT_CLOSED: str = "account_closed"
@@ -35,7 +35,7 @@ class _Config:
     EQUITY_UPDATE_INTERVAL_S: int = 60
     UI_PUSH_PCT_THRESHOLD: float = 0.01
     ZMQ_SIP_STREAM_ENDPOINT: str = "tcp://127.0.0.1:5558"
-    # UI streaming knobs
+    # UI streaming parameters follow.
     UI_SNAPSHOT_SEC: int = 30
     UI_BATCH_MS: int = 200
     UI_PUSH_MIN_INTERVAL_S: float = 2.0
@@ -109,4 +109,3 @@ CLOSED_TRADE_COLS: tuple[str, ...] = (
     "return_pct",
     "duration_sec",
 )
-

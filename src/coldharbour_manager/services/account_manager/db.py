@@ -17,16 +17,13 @@ async def _db_fetch(
 async def fetch_latest_prices(
     repo: Optional[AsyncAccountRepository], symbols: list[str]
 ) -> dict[str, float]:
-    """
-    Fetch the latest price tick for a list of symbols from TimescaleDB.
-    Returns a dict {symbol: price}.
-    """
+    """Return latest price per symbol from TimescaleDB."""
     if not repo or not symbols:
         return {}
 
     symbols_upper = [s.upper() for s in symbols]
 
-    # Use DISTINCT ON to grab the newest row per symbol.
+    # Use DISTINCT ON to fetch the newest row per symbol.
     # Adjust the timestamp column name if the schema uses 'time'.
     sql = """
         SELECT DISTINCT ON (symbol) symbol, price

@@ -66,10 +66,9 @@ def fetch_orders(
         end_date: Optional exclusive upper bound (UTC).
 
     Returns:
-        DataFrame with flattened parent/leg rows including `id`,
-        `parent_id`, `symbol`, `side`, `qty`, `order_type`, `status`,
-        `created_at`, `updated_at`, `filled_at`, `limit_price`, and
-        `stop_price`.
+        DataFrame with flattened parent/leg rows that include id,
+        parent_id, symbol, side, qty, order_type, status, created_at,
+        updated_at, filled_at, limit_price, and stop_price.
 
     Raises:
         Exception: Propagates Alpaca API failures from a window.
@@ -119,7 +118,7 @@ def fetch_orders(
                 all_raw_orders.append(order_obj)
         current_start = current_end
 
-    # --- UNPACKING AND CLEANING ---
+    # Flatten parent and leg rows while keeping parent metadata.
     if not all_raw_orders:
         return pd.DataFrame()
 
@@ -239,9 +238,7 @@ async def load_orders_from_db(
     data = [dict(row) for row in rows]
     df = pd.DataFrame(data)
     
-    # --- Type Conversion ---
-    
-    # 1. Dates to UTC
+    # Convert columns to the expected pandas dtypes.
     date_cols = [
         "created_at", "updated_at", "submitted_at", 
         "filled_at", "expired_at", "canceled_at",
@@ -251,7 +248,7 @@ async def load_orders_from_db(
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], utc=True)
             
-    # 2. Numbers (Decimal to float)
+    # Convert numeric Decimal columns to floats.
     num_cols = [
         "qty", "filled_qty", "filled_avg_price", 
         "limit_price", "stop_price"
@@ -260,10 +257,7 @@ async def load_orders_from_db(
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # 3. UUIDs to Strings (CRITICAL FIX)
-    # asyncpg returns uuid.UUID objects while portfolio logic expects
-    # strings.
-    # We cast them explicitly, keeping None as None instead of "None".
+    # Cast UUID columns to strings because downstream logic expects str.
     uuid_cols = ["id", "parent_id", "client_order_id"]
     for col in uuid_cols:
         if col in df.columns:
@@ -400,10 +394,7 @@ def fetch_all_activities(api, start_date=None, end_date=None):
     data = [x._raw if hasattr(x, '_raw') else x for x in all_activities]
     df = pd.DataFrame(data)
 
-    # --- COALESCE STRATEGY FOR TIMESTAMPS ---
-    # We iterate through priority columns to fill exec_time gaps.
-    # FILL rows usually have transaction_time.
-    # CSD/FEE rows rely on date.
+    # Populate exec_time from the first available timestamp column.
     possible_time_cols = [
         "transaction_time",
         "activity_time",
@@ -425,8 +416,7 @@ def fetch_all_activities(api, start_date=None, end_date=None):
             df["exec_time"] = df["exec_time"].fillna(current_col_dates)
 
     df["exec_time"] = df["exec_time"].infer_objects(copy=False)
-    # --- DATA NORMALIZATION ---
-    # Ensure net_amount is numeric because it powers equity metrics.
+    # Normalize numeric fields used for equity metrics.
     numeric_cols = [
         "qty",
         "price",
@@ -456,10 +446,11 @@ def build_lot_portfolio(
     """
     Build a lot portfolio by preferring each leg's latest replacement.
 
-    Resolve every leg to its newest successor, use that row for status and
-    pricing, and fall back to the 90-day expiration rule when needed.
+    Resolve each leg to its newest successor so status and pricing
+    reflect the freshest data, and fall back to the 90-day expiration
+    window when explicit expiry information is missing.
     """
-    # --- 1. Fetch Broker Data (Market Data & Averages) ---
+    # Fetch broker data for pricing fallbacks.
     market_data: Dict[str, Dict[str, float]] = {}
     
     if api:
@@ -485,7 +476,7 @@ def build_lot_portfolio(
         except Exception as e:
             print(f"Warning: API fetch failed. {e}")
 
-    # --- 2. Pre-process: Clean, sort, and deduplicate ---
+    # Pre-process orders by sorting and deduplicating.
     if orders_df.empty:
         return pd.DataFrame()
     
@@ -506,7 +497,7 @@ def build_lot_portfolio(
             
     df_clean.drop_duplicates(subset=dedup_subset, keep='first', inplace=True)
 
-    # --- 3. Build replacement chain and lookup map ---
+    # Build replacement chain for fresh leg data.
     
     # Index rows by ID for fast lookup of fresh data.
     if 'id' not in df_clean.columns:
@@ -530,7 +521,7 @@ def build_lot_portfolio(
             curr = replacement_map[curr]
         return curr
 
-    # --- 4. Filter Parents ---
+    # Select parent orders that are filled with legs.
     parents = df_clean[
         (df_clean['side'] == 'buy') & 
         (df_clean['status'] == 'filled') &
@@ -540,15 +531,15 @@ def build_lot_portfolio(
     active_lots = []
     live_statuses = {'new', 'held', 'accepted', 'partially_filled', 'open', 'calculated', 'pending_replace'}
     
-    # CONSTANT: Alpaca GTC Order Expiration (Days)
+    # Alpaca GTC expiration window in days.
     ALPACA_GTC_DAYS = 90
 
-    # --- 5. Iterate & Unpack ---
+    # Iterate parents and resolve their legs.
     for _, row in parents.iterrows():
         legs_raw = row.get('legs')
         legs_data = []
         
-        # Safe JSON Parsing
+        # Parse legs data safely into JSON.
         if isinstance(legs_raw, list):
             legs_data = legs_raw
         elif isinstance(legs_raw, str):
@@ -569,7 +560,7 @@ def build_lot_portfolio(
         if not legs_data:
             continue
 
-        # Init Leg Placeholders
+        # Initialize leg placeholders for TP/SL tracking.
         tp_price = None
         tp_id = None
         sl_price = None
@@ -583,10 +574,10 @@ def build_lot_portfolio(
         for leg in legs_data:
             original_leg_id = str(leg.get('id'))
             
-            # === RESOLVE LATEST SUCCESSOR ===
+            # Resolve the latest successor for this leg.
             latest_leg_id = get_latest_successor(original_leg_id)
             
-            # === GET FRESH DATA ===
+            # Prefer the freshest order data when available.
             fresh_order = orders_map.get(latest_leg_id)
             
             leg_created_at = None
@@ -615,7 +606,7 @@ def build_lot_portfolio(
                     expiry_ts = leg.get('expires_at')
                 leg_created_at = leg.get('created_at')
 
-            # === CHECK IF LIVE ===
+            # Check if this leg is still live.
             if current_status in live_statuses:
                 has_active_legs = True
                 
@@ -685,7 +676,7 @@ def build_lot_portfolio(
             }
             active_lots.append(pos)
 
-    # --- 7. DataFrame Construction & Metrics ---
+    # Build DataFrame from active lots and derive metrics.
     df = pd.DataFrame(active_lots)
     
     final_cols_ordered = [
@@ -758,7 +749,7 @@ def build_closed_trades_df_lot(
     FIFO engine while avoiding GroupBy.apply.
     """
 
-    # === 1. HELPER: COMPRESS FILLS (OPTIMIZED) ===
+    # Helper to compress fills for aggregation.
     def _compress_fills(df: pd.DataFrame) -> pd.DataFrame:
         if df.empty or 'order_id' not in df.columns:
             return df
@@ -793,7 +784,7 @@ def build_closed_trades_df_lot(
         # Clean up temporary column
         return grouped.drop(columns=['_total_val'])
 
-    # === 2. DATA PREPARATION ===
+    # Prepare fills data before inventory matching.
     if fills_df.empty:
         return pd.DataFrame()
 
@@ -818,7 +809,7 @@ def build_closed_trades_df_lot(
                 'type': row.get('type') or row.get('order_type') or 'unknown'
             }
 
-    # === 3. INVENTORY & MATCHING ===
+    # Build inventory and match sells to buys.
     buys_dict = {} 
     sells_list = []
 
@@ -896,7 +887,7 @@ def build_closed_trades_df_lot(
             sell['remaining'] -= match_qty
             buy['remaining'] -= match_qty
 
-    # === 4. ROBUST FIFO PnL CALCULATION ===
+    # Adjust PnL against robust FIFO totals.
     df_lot = pd.DataFrame(closed_trades)
     
     if not df_lot.empty:
@@ -932,7 +923,7 @@ def build_closed_trades_df_lot(
             df_lot['pnl_cash_fifo'] = 0.0
             df_lot['diff_pnl'] = df_lot['pnl_cash']
 
-    # === 5. FINAL FORMATTING ===
+    # Format the closed trades output.
     cols = [
         "entry_lot_id", "exit_order_id", "exit_parent_id", "symbol", "side", 
         "qty", "entry_time", "entry_price", "exit_time", "exit_price", 
@@ -959,11 +950,11 @@ def build_closed_trades_df_fifo(
     orders_df: Optional[pd.DataFrame] = None
 ) -> pd.DataFrame:
     """
-    Constructs a DataFrame of CLOSED trades based on PURE FIFO matching.
-    Strictly matches Sells against the oldest Buys based on execution time.
+    Construct a DataFrame of CLOSED trades using pure FIFO matching.
+    Strictly match sells against the oldest buys based on execution time.
     """
 
-    # === 1. VALIDATION ===
+    # Validate required columns before matching.
     required_cols = ['symbol', 'side', 'qty', 'price', 'exec_time']
     if fills_df.empty or not all(c in fills_df.columns for c in required_cols):
         return pd.DataFrame(columns=[
@@ -991,7 +982,7 @@ def build_closed_trades_df_fifo(
 
     closed_trades = []
 
-    # === 2. MATCHING ===
+    # Match sells against FIFO buy inventory.
     for symbol, sym_data in df.groupby('symbol'):
         inventory = []
 
@@ -1046,7 +1037,7 @@ def build_closed_trades_df_fifo(
                     if lot['qty'] < 1e-9:
                         inventory.pop(0)
 
-    # === 3. FORMATTING ===
+    # Format FIFO results for output.
     if not closed_trades:
         return pd.DataFrame()
 
@@ -1073,14 +1064,14 @@ def calculate_metrics(
 
     Args:
         trades_df: DataFrame with `qty`, `entry_price`, `exit_price`,
-            `pnl_cash`, `pnl_cash_fifo`, etc.
+            `pnl_cash`, and `pnl_cash_fifo`.
         open_trades_df: Optional DataFrame with open positions.
         activities_df: Optional DataFrame of account activities.
         value_weighted: Whether to weight averages by invested volume.
 
     Returns:
         pd.DataFrame: Transposed DataFrame containing equity totals and
-        performance metrics.
+            performance metrics.
     """
     total_buy_closed = 0.0
     total_sell_closed = 0.0
@@ -1389,4 +1380,3 @@ def calculate_metrics(
     }
 
     return pd.DataFrame([result]).T.rename(columns={0: "Value"})
-

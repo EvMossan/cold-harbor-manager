@@ -332,8 +332,7 @@ async def _build_metrics_payload(
         elif last_cum_ret is not None:
             metrics["Total Return %"] = last_cum_ret * 100.0
 
-    # --- NEW LOGIC: Override Total Return from Intraday Table ---
-    # account_equity_intraday is the trusted source for cumulative return.
+    # Use account_equity_intraday as the trusted cumulative return source.
     try:
         intraday_row = await mgr._db_fetchrow(
             f"""

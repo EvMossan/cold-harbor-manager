@@ -1,15 +1,14 @@
 """
-Async account/position manager for Alpaca backed by Postgres.
+Sync Alpaca account state to Postgres and notify UI consumers.
 
-Keeps the DB in sync with Alpaca and emits NOTIFY for UI consumers.
 Public API: ``AccountManager(cfg)``, ``run()``, ``close()``.
-Runtime tasks: price listener, DB worker, snapshot, closed sync, equity,
-trade stream.
+Runtime work spans price listener, DB worker, and snapshot loop.
+Closed sync, equity, and trade stream round out the set.
 
 NOTIFY payloads:
-- pos_channel upsert → ``{"row": {<DB_COLS>}}``
-- pos_channel delete → ``{"op":"delete","parent_id":"..."}``
-- closed_channel refresh → ``'refresh'``
+- pos_channel upsert -> ``{"row": {<DB_COLS>}}``
+- pos_channel delete -> ``{"op":"delete","parent_id":"..."}``
+- closed_channel refresh -> ``'refresh'``
 """
 
 from __future__ import annotations
@@ -66,7 +65,7 @@ class AccountLoggerAdapter(logging.LoggerAdapter):
         return f"{prefix} {msg}", kwargs
 
     def with_module(self, module: str) -> "AccountLoggerAdapter":
-        """Return a short-lived adapter that reports `<module>` in the prefix."""
+        """Return an adapter that reports `<module>` in the prefix."""
         return AccountLoggerAdapter(self.logger, self._account_label, default_module=module)
 
 #  AccountManager
@@ -78,32 +77,12 @@ CLOSED_CHANNEL_PREFIX = "closed_channel_"
 
 
 class AccountManager:
-    """Realtime account-state synchronizer with managed background workers.
+    """Sync Alpaca account state to Postgres and notify UI clients.
 
-    Attributes:
-        cfg: Original configuration dictionary supplied by the caller.
-        c: Normalized, typed configuration (_Config) that backs runtime knobs.
-        log: Logger that tags account labels and module names.
-        rest: Alpaca REST client used for fills/orders market calls.
-        repo: AsyncAccountRepository for the live Postgres schema.
-        ts_repo: Optional repository pointing at Timescale.
-        tbl_live: Qualified table name for open trades.
-        tbl_closed: Qualified table name for closed trades.
-        tbl_equity, tbl_equity_intraday, tbl_cash_flows, tbl_metrics:
-            Tables used for equity/flow updating plus KPIs.
-        pos_channel, closed_channel: NOTIFY channels broadcast to SSE clients.
-        state, sym2pid: In-memory caches for open positions.
-        HEARTBEAT_SEC, SNAPSHOT_SEC, CLOSED_SYNC_SEC, EQUITY_INTRADAY_SEC:
-            Execution intervals exposed to background tasks.
-        _active_tasks: List of asyncio Tasks spawned by ``run()``.
-
-    The manager spawns several persistent workers:
-        * Market schedule polling (`_market_schedule_worker` / `_schedule_supervisor`).
-        * Snapshot loop (`_snapshot_loop`).
-        * Closed trade refresh (`_closed_sync_worker`).
-        * Equity background reporter (`_equity_worker` and intraday updater).
-        * Price streamer + order ingestion (`_price_worker` / `_orders_worker`).
-        * UI push/flush thread (`_ui_flush_worker`).
+    Public API: ``AccountManager(cfg)``, ``run()``, ``close()``.
+    Workers span the price listener, DB worker, and snapshot loop.
+    Closed-sync refresh, equity reporting, and trade stream complete the
+    worker set.
     """
 
     DEFAULT_TABLE = "account_open_positions"
@@ -197,13 +176,13 @@ class AccountManager:
             ),
         )
 
-        # Temporary logger; replaced with a per-account logger once
-        # tables/channels are initialised below.
+        # Use the root logger until per-account logging is configured.
         self.log = logging.getLogger("AccountMgr")
         self.disable_session_sleep = bool(self.c.DISABLE_SESSION_SLEEP)
         self.cfg["DISABLE_SESSION_SLEEP"] = self.disable_session_sleep
 
-        # Postgres (asyncpg via repository; initialised lazily in init()).
+        # Postgres connection string used to create AsyncAccountRepository
+        # lazily in init().
         raw_conn = (
             cfg.get("POSTGRESQL_LIVE_SQLALCHEMY")
             or cfg.get("CONN_STRING_POSTGRESQL")
@@ -231,12 +210,11 @@ class AccountManager:
             self._pg_conn_string or self.c.POSTGRESQL_LIVE_SQLALCHEMY
         )
 
-        # Alpaca REST client (unchanged).
         self.rest = REST(
             self.c.API_KEY, self.c.SECRET_KEY, self.c.ALPACA_BASE_URL
         )
 
-        # Effective table names (allow runtime overrides).
+        # Derive table names while honoring runtime overrides.
         def _qualify(schema: Optional[str], name: str) -> str:
             if not name:
                 return name
@@ -248,7 +226,7 @@ class AccountManager:
         self.tbl_live = _qualify(schema, self.c.TABLE_ACCOUNT_POSITIONS)
         self.tbl_closed = _qualify(schema, self.c.TABLE_ACCOUNT_CLOSED)
         self.tbl_equity = _qualify(schema, self.c.TABLE_ACCOUNT_EQUITY_FULL)
-        # Derive intraday equity table alongside full equity
+        # Build the intraday equity table name from the full equity table.
 
         def _derive_intraday(full_name: str) -> str:
             try:
@@ -268,7 +246,7 @@ class AccountManager:
 
         self.tbl_equity_intraday = _derive_intraday(self.tbl_equity)
 
-        # Derive cash-flows table alongside equity (accounts.cash_flows_<slug>)
+        # Build the cash-flows table name from the derived equity table.
         def _derive_cash_flows(full_name: str) -> str:
             try:
                 if not full_name:
@@ -300,7 +278,7 @@ class AccountManager:
             """Derive per-account metrics table using live suffix."""
             if "." in base_metrics:
                 return base_metrics
-            # If caller supplied a custom name, respect it verbatim.
+            # Respect any custom metrics table name as provided.
             if base_metrics != _Config.TABLE_ACCOUNT_METRICS:
                 return _qualify(sch, base_metrics)
             try:
@@ -327,33 +305,32 @@ class AccountManager:
             self.c.TABLE_ACCOUNT_METRICS, self.tbl_live, schema
         )
 
-        # Per-account NOTIFY channels.
+        # Store the per-account NOTIFY channel names.
         self.pos_channel = self.c.POS_CHANNEL
         self.closed_channel = self.c.CLOSED_CHANNEL
 
         # ---------------- Logging: per-account label + local timestamps
-        # Derive a human-friendly label to disambiguate logs when multiple
-        # accounts/managers run in the same process.
+        # Derive a human-friendly label when multiple managers share a process.
         label = str(self.cfg.get("ACCOUNT_LABEL") or "").strip()
         if not label:
-            # Try to infer from channel name like "pos_channel_<slug>"
+            # Try to infer the label from channel names like
+            # "pos_channel_<slug>".
             ch = str(self.pos_channel or "")
             if ch.startswith(POS_CHANNEL_PREFIX) and len(ch) > len(
                 POS_CHANNEL_PREFIX
             ):
                 label = ch.split(POS_CHANNEL_PREFIX, 1)[1]
         if not label:
-            # Fallback to table suffix after the last underscore, e.g.
-            # accounts.account_open_positions_<slug> → <slug>
+            # Fallback to the suffix after the final underscore when needed.
+            # accounts.account_open_positions_<slug> -> <slug>
             t = str(self.tbl_live or "")
             base = t.split(".")[-1]
             if "_" in base:
                 label = base.rsplit("_", 1)[-1]
         self.account_label = label or "default"
 
-        # Configure a dedicated logger per account. We attach a local-time
-        # formatter and disable propagation to avoid double-printing when the
-        # root logger already has handlers (e.g. under Airflow).
+        # Configure a dedicated logger per account with local timestamps.
+        # Disable propagation to avoid duplicate output when root handlers exist.
         log_name = f"AccountMgr[{self.account_label}]"
         base_logger = logging.getLogger(log_name)
         self.log = base_logger
@@ -432,13 +409,12 @@ class AccountManager:
         self._ui_out_dels: list[str] = []
         self._active_tasks: list[asyncio.Task] = []
         self._active_session: SessionWindow | None = None
-        # Pending realised PnL captured from trade updates before DB sync
+        # Capture pending realised PnL from trade updates until DB sync.
         self._pending_realised: list[tuple[date, float]] = []
 
-        # Exclusion set for SIP trade condition codes used by the ZMQ
-        # price listener. Accepts list/tuple/set or CSV/space-separated
-        # string via cfg["TRADE_CONDITIONS_EXCLUDE"]. Defaults to the
-        # unified set used by the notebook resampler.
+        # Exclusion set for SIP trade condition codes used by the ZMQ listener.
+        # Accept list/tuple/set or CSV/space-separated string from cfg.
+        # Fall back to the shared set used by the notebook resampler.
         def _norm_excl(v: Any) -> set[str]:
             try:
                 if isinstance(v, (list, tuple, set)):
@@ -454,10 +430,8 @@ class AccountManager:
             self.cfg.get("TRADE_CONDITIONS_EXCLUDE")
         )
 
-        # Snapshot readiness flag to gate per-symbol refreshes until the
-        # initial snapshot completes. This prevents early trade updates
-        # (legs without parents) from triggering symbol refresh against
-        # an uninitialised open-positions view.
+        # Delay per-symbol refresh until the initial snapshot completes.
+        # This keeps legs without parents from hitting an uninitialised view.
         self._snapshot_ready: bool = False
         self._snapshot_last_complete: datetime | None = None
         self._last_price_tick: datetime | None = None
@@ -863,14 +837,14 @@ class AccountManager:
         """Start background workers and the trade-updates stream.
 
         If ``stop_event`` is provided, the manager waits on it for
-        shutdown. When running many managers in one process, pass a
-        shared event and set ``install_signal_handlers=False`` so only
-        the orchestrator installs signal handlers.
+        shutdown. When running many managers in one process, pass a shared
+        event. Disable ``install_signal_handlers`` so only the orchestrator
+        installs signal handlers.
         """
         await self.init()
         await self._refresh_market_schedule()
 
-        # Graceful shutdown: either use provided event or install handlers.
+        # Handle shutdown through the provided event or signal handlers.
         loop = asyncio.get_running_loop()
         _stop_evt = stop_event or asyncio.Event()
 
