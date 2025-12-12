@@ -14,8 +14,9 @@ from collections import deque
 
 
 def fetch_all_orders(api: REST, days_back: int = 365) -> pd.DataFrame:
-    """Walk Alpaca orders in fixed windows, flatten parents with legs,
-    and normalize common numeric/timestamp columns."""
+    """Walk Alpaca orders in fixed windows, flatten parents and legs,
+    and normalize numeric and timestamp columns.
+    """
     window_len = timedelta(days=5)
     end_date = pd.Timestamp.now(tz=timezone.utc) + timedelta(days=1)
     start_date = end_date - timedelta(days=days_back)
@@ -103,21 +104,17 @@ def closed_trades_fifo_from_orders(
     debug: bool = False,
     debug_symbols: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
-    """
-    Build per-lot closed trades from an *already parent-linked* flat
-    orders table (parents + legs), using parent_id to ensure that each
-    exit leg closes its own parent lot.
+    """Build per-lot closed trades from an already parent-linked table.
 
-    Matching priority for SELL legs:
-      (1) parent_id match (strict)
-      (2) unique qty match (only if exactly one open lot has the same
-          original qty as SELL qty and can fully absorb it)
-      (3) FIFO fallback
+    SELL legs close parent lots by matching priority:
+      1. parent_id match
+      2. unique-qty match when only one candidate can absorb the leg
+      3. FIFO fallback
 
-    Returns one row per matched slice with:
-      symbol · side · qty · entry_time · entry_price · exit_time ·
-      exit_price · exit_type · pnl_cash · pnl_pct · duration_sec ·
-      entry_lot_id · exit_order_id · exit_parent_id
+    Returns one row per matched slice with fields:
+      symbol, side, qty, entry_time, entry_price, exit_time, exit_price,
+      exit_type, pnl_cash, pnl_pct, duration_sec, entry_lot_id,
+      exit_order_id, exit_parent_id.
     """
     # --- helpers ------------------------------------------------------
     def _d(msg: str) -> None:
@@ -371,19 +368,9 @@ def closed_trades_fifo_from_orders(
 
 
 def realized_pnl_fifo_from_orders(orders: pd.DataFrame) -> float:
-    """
-    Realized P&L computed via **FIFO** using the order stream (parents +
-    legs).
+    """Return realized FIFO P&L for the supplied orders DataFrame.
 
-    Parameters
-    ----------
-    orders : pd.DataFrame
-        Output of `fetch_all_orders(...)`.
-
-    Returns
-    -------
-    float
-        Sum of FIFO matched trade P&L (in cash), rounded to 2 decimals.
+    The sum gives FIFO matched trade P&L in cash rounded to two decimals.
     """
     trades = closed_trades_fifo_from_orders(orders)
     if trades.empty:
@@ -397,16 +384,16 @@ STOP_TYPES = {"stop", "stop_limit"}
 
 
 def _expand_replacement_chain(orders_flat: pd.DataFrame, seed_ids: List[str]) -> set:
-    """
-    BFS-расширение: стартуем от набора seed_ids (id ног родителя плюс их replaces/replaced_by),
-    добавляем все ордера, которые связаны через поля id/replaces/replaced_by.
-    Возвращает множество всех id в цепочке (включая актуальные).
+    """Expand replacement chains for seed ids using BFS across links.
+
+    Walk id/replaces/replaced_by/client_order_id and return the set of
+    real order ids included in the chain.
     """
     if orders_flat is None or orders_flat.empty or not seed_ids:
         return set()
 
     df = orders_flat.copy()
-    # Приводим к строкам, NA-safe
+    # Normalize string fields safely for NA values.
     for c in ("id", "replaces", "replaced_by", "client_order_id"):
         if c in df.columns:
             df[c] = df[c].astype(str)
@@ -421,7 +408,7 @@ def _expand_replacement_chain(orders_flat: pd.DataFrame, seed_ids: List[str]) ->
             continue
         seen.add(cur)
 
-        # Любые строки, где cur фигурирует как id/replaces/replaced_by/client_order_id
+        # Rows where cur appears in id, replaces, replaced_by, or client_order_id.
         rows = df[
             (df["id"] == cur)
             | (df.get("replaces", "") == cur)
@@ -432,22 +419,22 @@ def _expand_replacement_chain(orders_flat: pd.DataFrame, seed_ids: List[str]) ->
         if rows.empty:
             continue
 
-        # В граф добавляем все связанные поля
+        # Add all related fields to the exploration queue.
         for _, rr in rows.iterrows():
             for k in ("id", "replaces", "replaced_by", "client_order_id"):
                 v = str(rr.get(k) or "")
                 if v and v not in seen:
                     q.append(v)
 
-    # Из seen нам интересны именно реальные order.id,
-    # поэтому дополнительно вытащим те, что существуют как id в df
+    # Keep only seen ids that match df["id"] values.
     chain_ids = set(df[df["id"].isin(list(seen))]["id"].unique())
     return chain_ids
 
 def _live_tp_sl_from_chain(orders_flat: pd.DataFrame, chain_ids: set) -> tuple[float, float, str, str]:
-    """
-    Ищет LIVE sell-ордера в пределах replacement-цепочки.
-    limit → TP, stop/stop_limit → SL. Берём самый «свежий» по updated/submitted/created.
+    """Find live SELL orders within a replacement chain.
+
+    Treat limit orders as TP, stop/stop_limit as SL, and use the most
+    recent updated/submitted/created timestamp when selecting prices.
     """
     tp = np.nan; sl = np.nan; tp_src = ""; sl_src = ""
     if not chain_ids or orders_flat is None or orders_flat.empty:
@@ -484,9 +471,10 @@ def _live_tp_sl_from_chain(orders_flat: pd.DataFrame, chain_ids: set) -> tuple[f
 
 
 def _now_utc() -> pd.Timestamp:
-    """
-    Return a tz-aware UTC Timestamp robustly across pandas versions.
-    pandas>=2 returns tz-aware for utcnow(); older versions return naive.
+    """Return a tz-aware UTC Timestamp across pandas versions.
+
+    pandas>=2 returns tz-aware utcnow(); older versions return naive
+    timestamps, so localize to UTC when needed.
     """
     ts = pd.Timestamp.utcnow()
     # pandas Timestamps expose .tz (alias of .tzinfo)
@@ -550,9 +538,8 @@ def _time_window_from_orders(df: pd.DataFrame) -> Tuple[pd.Timestamp, pd.Timesta
 
 
 def _build_leg_to_parent_map(nested_df: pd.DataFrame) -> Dict[str, str]:
-    """
-    From nested parents, collect all child ids (id, client_order_id,
-    replaced_by, replaces) → parent_id.
+    """Map nested parent children (id, client_order_id, replaces,
+    replaced_by) to their parent_id.
     """
     m: Dict[str, str] = {}
     if nested_df is None or nested_df.empty:
@@ -581,9 +568,9 @@ def _build_leg_to_parent_map(nested_df: pd.DataFrame) -> Dict[str, str]:
 
 def _fill_missing_parent_ids_with_legs(orders_flat: pd.DataFrame,
                                        leg2parent: Dict[str, str]) -> pd.DataFrame:
-    """
-    For SELL rows with NA parent_id, infer the parent via leg ids.
-    NA-safe (does not use 'or' on pd.NA).
+    """Infer missing parent_id values for SELL rows from leg ids.
+
+    Handles pandas NA values safely without using 'or' on pd.NA.
     """
     if not leg2parent:
         return orders_flat
@@ -612,12 +599,9 @@ def _fill_missing_parent_ids_with_legs(orders_flat: pd.DataFrame,
 def _fifo_owner_first(df_symbol: pd.DataFrame,
                       parents_symbol: pd.DataFrame,
                       parent_child_ids: Dict[str, set]) -> Dict[str, float]:
-    """
-    Subtract filled SELLs with priority:
-      (1) owner-first: if SELL id belongs to a parent → subtract there;
-      (2) remainder → FIFO across remaining open lots.
+    """Subtract filled SELLs with owner-first priority, then FIFO.
 
-    Returns {parent_id: qty_remaining}
+    Remaining quantities are returned as {parent_id: qty_remaining}.
     """
     # Build list of open parent lots (in time order)
     lots = []
@@ -707,18 +691,10 @@ def build_open_positions_df(
     debug: bool = False,
     debug_symbols: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
-    """
-    Build open positions per *parent buy lot* with deterministic TP/SL
-    linking. This version scopes replacement-chain lookups to the
-    current symbol to avoid cross-symbol leakage of TP/SL.
+    """Build open positions per parent buy lot with deterministic TP/SL.
 
-    Key changes vs. previous version:
-      • children_flat is taken from df_sym (not from global df)
-      • replacement-chain expansion is performed on df_sym
-      • live TP/SL extraction from chain is performed on df_sym
-
-    Everything else (owner-first netting, reconciliation to broker
-    snapshot, derived columns) is unchanged.
+    Replacement-chain lookups stay within the current symbol to avoid
+    cross-symbol leakage of TP/SL data.
     """
     def _D(sym: Optional[str], msg: str) -> None:
         if not debug:
@@ -992,9 +968,9 @@ _nyse = mcal.get_calendar("XNYS")  # same holidays as Nasdaq
 
 
 def _trading_days(start: pd.Timestamp, end: pd.Timestamp) -> int:
-    """
-    Inclusive of *start* date, exclusive of *end* date.
-    Works even if both fall on non-trading days.
+    """Return trading days from start (inclusive) to end (exclusive).
+
+    Works even if start or end fall on non-trading days.
     """
     series = _trading_days_batch(
         pd.Series([start]),
@@ -1006,7 +982,7 @@ def _trading_days(start: pd.Timestamp, end: pd.Timestamp) -> int:
 def _trading_days_batch(
     entries: pd.Series, exits: pd.Series
 ) -> pd.Series:
-    """Vectorised trading-day span for aligned entry/exit timestamps."""
+    """Vectorized trading-day span for aligned entry/exit timestamps."""
     if entries.empty:
         return pd.Series(dtype="int64")
 
@@ -1059,43 +1035,13 @@ def calculate_trade_metrics(
     use_pct: bool = False,
     value_weighted: bool = False,
 ) -> pd.DataFrame:
-    """
-    Compute the KPI block **per original entry lot** ("one trade") and
-    classify exits as TP/SL when available.
+    """Compute KPI block per original entry lot and classify exits.
 
-    If `entry_lot_id` exists, collapse rows by that id so each lot
-    contributes at most one row. Aggregation per lot:
-      • qty           → sum of slice qty
-      • entry_time    → first slice entry_time
-      • entry_price   → first slice entry_price
-      • exit_time     → last slice exit_time (max)
-      • exit_price    → qty-weighted average of slice exit_price
-      • pnl_cash      → sum of slice pnl_cash
-      • pnl_pct       → pnl_cash / (entry_price * qty) * 100
-      • duration_sec  → (exit_time − entry_time) seconds
-      • exit_class    → qty-weighted **mode** of slice exit_type
-                         (TP/SL/MANUAL/OTHER); falls back to 'UNKNOWN'
-
-    Mean Stop / Mean Take are computed over trades whose `exit_class`
-    is SL/TP respectively when such labels are present. If there are no
-    TP/SL labels at all (e.g., fills-based view), we fall back to
-    sign-based winners/losers by `pnl_cash`.
-
-    When include_manual is True, a HYBRID bucket policy is used for
-    performance ratios: label (TP/SL) is respected only if it agrees
-    with pnl sign; otherwise sign decides. MANUAL exits are included via
-    sign. When include_manual is False (default), MANUAL exits are
-    excluded from winners/losers bucket metrics (R/R, breakeven, P/L
-    ratio), but totals still include all trades.
-
-    Additional options:
-      • collapse_by_exit: if True and 'exit_order_id' exists, coalesce
-        multiple slices of the same SELL order into a single row using
-        coalesce_exit_slices() before computing metrics.
-      • use_pct: compute Mean Stop/Take on pnl_pct (percent) instead of
-        cash P/L. Helpful to normalize out lot-size differences.
-      • value_weighted: compute cash Mean Stop/Take as value-weighted
-        means (weights = qty * entry_price). Ignored if use_pct=True.
+    When entry_lot_id exists, collapse slices so each lot yields one row
+    and compute qty, entry/exit data, pnl, duration, and exit_class.
+    include_manual toggles whether MANUAL exits count in bucket metrics.
+    collapse_by_exit, use_pct, and value_weighted tune aggregation
+    before the metric stage runs.
     """
     if trades.empty:
         return pd.DataFrame()
@@ -1418,24 +1364,11 @@ def calculate_trade_metrics(
 
 
 def coalesce_exit_slices(trades: pd.DataFrame) -> pd.DataFrame:
-    """
-    Collapse multiple partial fills that belong to the *same SELL order*
-    into a single row. This is useful for fair TP/SL counts on the fills
-    pipeline, where one SELL order can consume several entry lots and
-    therefore produce many slice-rows.
+    """Collapse partial fills from the same SELL order into a single row.
 
-    Grouping key: (symbol, exit_order_id)
-
-    Aggregation:
-      • qty           → sum
-      • entry_price   → qty-weighted average
-      • exit_price    → qty-weighted average
-      • pnl_cash      → sum
-      • entry_time    → earliest
-      • exit_time     → latest
-      • exit_type     → qty-weighted mode (TP/SL/MANUAL)
-      • pnl_pct       → pnl_cash / (w_entry * qty)
-      • duration_sec  → (exit_time − entry_time) seconds
+    Aggregates qty, entry/exit prices, pnl, and durations by
+    (symbol, exit_order_id) while deriving exit_type via the
+    qty-weighted mode.
     """
     if trades is None or trades.empty or "exit_order_id" not in trades.columns:
         return trades.copy() if trades is not None else pd.DataFrame()
@@ -1520,12 +1453,9 @@ def coalesce_exit_slices(trades: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------
 
 def summarise_open_positions(pos_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Return a one-line summary table of the current floating P/L across
-    *all* still-open parent orders.
+    """Return a one-line summary of floating P/L for open parents.
 
-    If no rows are supplied, the function yields an empty DataFrame with
-    the expected column name so the caller can rely on it.
+    Returns an empty schema when no rows are supplied.
     """
     if pos_df.empty:
         return pd.DataFrame(columns=["Current Parents Total Profit/Loss"])
@@ -1645,15 +1575,11 @@ def closed_trades_fifo_from_fills(
     debug: bool = False,
     debug_symbols: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
-    """
-    Rebuild closed trades using FIFO directly from execution activities
-    (FILL). Returns one row per matched slice:
+    """Rebuild closed trades from fills using FIFO matching.
 
-    If `orders` is provided, SELL fills with a matching `order_id` are
-    annotated: 'SL' for stop/stop_limit, 'TP' for limit; otherwise 'MANUAL'.
-
-    symbol · side · qty · entry_time · entry_price · exit_time ·
-    exit_price · exit_type · pnl_cash · pnl_pct · duration_sec
+    SELL fills use order info (if provided) so limit → TP, stop → SL,
+    and others stay MANUAL. Returns one row per matched slice with
+    symbol, qty, entry/exit times/prices, exit_type, pnl, and duration.
     """
     def _d(msg: str) -> None:
         if debug:
@@ -1923,12 +1849,9 @@ def closed_trades_fifo_from_fills(
 
 
 def realized_wac_and_open_cost_from_fills(fills: pd.DataFrame):
-    """
-    Alpaca-style realized P/L and open cost using Weighted Average Cost
-    (WAC).
+    """Compute Alpaca-style realized P/L and open cost using WAC.
 
-    Returns:
-      (realized_pl: float, open_cost_by_symbol: Dict[str, float])
+    Returns the realized P/L and open cost per symbol.
     """
     if fills is None or fills.empty:
         return 0.0, {}
@@ -1975,13 +1898,10 @@ def realized_pnl_wac_from_api(
     end: str,
     show_progress: bool = False,
 ) -> float:
-    """
-    Realized P&L computed the same way Alpaca reports it (Weighted
-    Average Cost, WAC) for the window [`start`, `end`], using execution
-    activities (FILL) fetched from the API.
+    """Return realized WAC P&L for the window using API fills.
 
-    This matches the broker's Realized P&L to the cent, provided the
-    FILL activity feed is complete for the window.
+    Matches Alpaca's realized P&L to the cent when the FILL feed is
+    complete for the window.
     """
     fills = fetch_all_fills(
         api_key, secret_key, base_url, start, end, show_progress=show_progress
@@ -1999,11 +1919,7 @@ def closed_trades_fifo_from_api(
     end: str,
     show_progress: bool = False,
 ) -> pd.DataFrame:
-    """
-    Convenience wrapper: fetch execution activities (FILL) in the window
-    and rebuild FIFO closed trades from **fills** (not orders). Useful
-    for trade‑level analytics with exact execution matching.
-    """
+    """Fetch fills and rebuild FIFO closed trades for the window."""
     fills = fetch_all_fills(
         api_key, secret_key, base_url, start, end, show_progress=show_progress
     )
@@ -2012,15 +1928,12 @@ def closed_trades_fifo_from_api(
 
 
 def alpaca_day_tiles(rest: REST) -> pd.DataFrame:
-    """
-    Exact 'day' tiles as Alpaca shows:
+    """Return Alpaca-style day tiles and lifetime unrealized data.
 
-        day_total       = equity - last_equity
-        day_unrealized  = sum(position.unrealized_intraday_pl)
-        day_realized    = day_total - day_unrealized
-
-    Also returns the lifetime unrealized (sum of
-    position.unrealized_pl) for reference.
+    day_total = equity - last_equity
+    day_unrealized = sum(position.unrealized_intraday_pl)
+    day_realized = day_total - day_unrealized
+    Also include lifetime unrealized (sum of position.unrealized_pl).
     """
     acct = rest.get_account()
     equity = float(getattr(acct, "equity", 0.0) or 0.0)
@@ -2067,16 +1980,11 @@ def fetch_all_activities(
     page_size: int = 100,
     show_progress: bool = True,
 ) -> pd.DataFrame:
-    """
-    Download ALL account activities (not just FILL) between `start` and
-    `end`. This includes FILL, JNLC (cash journal), FEE, DIV/SDIV, INT,
-    etc.
+    """Download all account activities between start and end.
 
-    Returns a DataFrame with normalized columns:
-        id · activity_type · symbol · side · qty · price · amount · ts
-    Where:
-        - amount is signed cash impact. For FILL, if not provided by API,
-          we compute it as ± qty * price (buys negative, sells positive).
+    Returns a DataFrame with id, activity_type, symbol, side, qty, price,
+    amount, and ts. The amount column is the signed cash impact, and for
+    FILL entries we compute ± qty * price when the API omits it.
     """
     url = f"{base_url.rstrip('/')}/v2/account/activities"
     headers = {
@@ -2208,17 +2116,9 @@ def fetch_all_activities(
 def reconcile_equity(
     rest: REST, fills: pd.DataFrame, activities: pd.DataFrame
 ) -> Dict[str, pd.DataFrame]:
-    """
-    Full-account reconciliation:
-      equity_now  ≈  starting_cash_at_START
-                    + external_cashflows_since_START
-                    + realized_wac_since_START
-                    + current_unrealized_pl
+    """Reconcile equity with cashflows, realized, and unrealized P&L.
 
-    Returns a dict with:
-      • 'summary'          → one-row snapshot of the identity above
-      • 'open_cost_cmp'    → per-symbol open-cost: API vs WAC (delta)
-      • 'activities_totals'→ totals by activity_type (cash impact)
+    Returns dict with 'summary', 'open_cost_cmp', and 'activities_totals'.
     """
     # --- realized (WAC) + open-cost (WAC) from fills ---
     realized_wac, open_cost_wac = realized_wac_and_open_cost_from_fills(
