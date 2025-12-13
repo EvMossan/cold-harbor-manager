@@ -99,6 +99,8 @@ services:
       - ./airflow_simple_auth_passwords.json:/opt/airflow/simple_auth_manager_passwords.json
       - ./src:/opt/airflow/src
     environment:
+      - AIRFLOW_LOG_SERVER_HOST=airflow
+      - AIRFLOW__CORE__HOSTNAME_CALLABLE=coldharbour_manager.airflow_utils.get_airflow_hostname
       - PYTHONPATH=/opt/airflow/src
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor

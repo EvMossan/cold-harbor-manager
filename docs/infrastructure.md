@@ -40,3 +40,8 @@ Manager):
 The DAGs in `dags/breakeven_multi_account.py` dynamically import account
 configurations from `src/coldharbour_manager/core/destinations.py` to
 spawn parallel risk-management tasks for every active destination.
+
+The Airflow log server hostname defaults to `localhost` so that the API
+and scheduler can reach the local webserver. Override it in Docker or
+Cloud Run by setting `AIRFLOW_LOG_SERVER_HOST` when a different host is
+required.
