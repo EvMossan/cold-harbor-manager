@@ -73,11 +73,11 @@ flows:
 ```mermaid
 graph TD
     %% Global Styles
-    classDef external fill:#f9f,stroke:#333,stroke-width:2px;
-    classDef service fill:#e1f5fe,stroke:#0277bd,stroke-width:2px;
-    classDef worker fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px;
-    classDef db fill:#eee,stroke:#333,stroke-width:2px,shape:cylinder;
-    classDef bus fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,shape:rect;
+    classDef external fill:#faf3c7,stroke:#b58900,stroke-width:2px,color:#3e1f04;
+    classDef service fill:#e0f2f1,stroke:#00695c,stroke-width:2px,color:#00332a;
+    classDef worker fill:#f1f8e9,stroke:#33691e,stroke-width:1px,color:#1b5e20;
+    classDef db fill:#f8f4f0,stroke:#4e342e,stroke-width:2px,shape:cylinder,color:#3e2723;
+    classDef bus fill:#fff8e1,stroke:#ff9800,stroke-width:2px,shape:rect,color:#e65100;
 
     %% ---------------------------------------------------------
     %% 1. EXTERNAL SOURCES (Top)
