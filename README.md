@@ -79,20 +79,23 @@ graph TD
     classDef db fill:#f8f4f0,stroke:#4e342e,stroke-width:2px,shape:cylinder,color:#3e2723;
     classDef bus fill:#fff8e1,stroke:#ff9800,stroke-width:2px,shape:rect,color:#e65100;
 
-    %% ---------------------------------------------------------
-    %% 1. EXTERNAL SOURCES
-    %% ---------------------------------------------------------
+    %% =========================================================
+    %% 1. EXTERNAL SOURCES (Top Left / Center)
+    %% =========================================================
     subgraph External [External Market Data]
         direction TB
         AlpacaWS(Alpaca WebSocket):::external
-        ZMQ(ZMQ Price Stream):::external
         AlpacaREST(Alpaca REST API):::external
+        ZMQ(ZMQ Price Stream):::external
+        
+        %% Force vertical stacking inside External
+        AlpacaWS ~~~ ZMQ ~~~ AlpacaREST
     end
 
-    %% ---------------------------------------------------------
-    %% 2. INGESTION SERVICE
-    %% ---------------------------------------------------------
-    subgraph Ingester_Layer [Data Ingester Service]
+    %% =========================================================
+    %% 2. INGESTER STACK (Right Column)
+    %% =========================================================
+    subgraph Ingester_Stack [Data Ingester Service]
         direction TB
         IngesterRun(<b>ingester_run.py</b>):::service
         
@@ -100,24 +103,26 @@ graph TD
         StreamWork(stream_consumer):::worker
         HealWork(healing_worker):::worker
         
+        %% Raw DB
+        subgraph Raw_DB [Raw Storage Schema]
+            direction TB
+            RawOrders[(raw_orders_live)]:::db
+            RawActs[(raw_activities_live)]:::db
+        end
+        
+        %% Flow within Ingester
         IngesterRun --> StreamWork
         StreamWork ~~~ HealWork
+        
+        %% Writes
+        StreamWork --> RawOrders & RawActs
+        HealWork --> RawOrders & RawActs
     end
 
-    %% ---------------------------------------------------------
-    %% 3. RAW STORAGE
-    %% ---------------------------------------------------------
-    subgraph Raw_DB [Raw Storage Schema]
-        direction TB
-        RawOrders[(raw_orders_live)]:::db
-        RawActs[(raw_activities_live)]:::db
-        RawOrders ~~~ RawActs
-    end
-
-    %% ---------------------------------------------------------
-    %% 4. MANAGER SERVICE
-    %% ---------------------------------------------------------
-    subgraph Manager_Layer [Account Manager Service]
+    %% =========================================================
+    %% 3. MANAGER STACK (Center Column)
+    %% =========================================================
+    subgraph Manager_Stack [Account Manager Service]
         direction TB
         MgrRun(<b>manager_run.py</b>):::service
         
@@ -129,87 +134,82 @@ graph TD
         ClosedWork(closed_trades_worker):::worker
         CashFlowWork(cash_flows_worker):::worker
         
-        %% Layout hints
+        %% Live DB
+        subgraph Live_DB [Live Accounts Schema]
+            direction TB
+            TblLive[(open_positions)]:::db
+            TblClosed[(closed_trades)]:::db
+            TblMetrics[(account_metrics)]:::db
+            TblEquity[(equity_tables)]:::db
+            TblCash[(cash_flows)]:::db
+        end
+
+        %% Invisible links for ordering workers vertically
         MgrRun --> PriceList
         PriceList ~~~ SnapLoop
         SnapLoop ~~~ MetricsWork
         MetricsWork ~~~ EquityWork
         EquityWork ~~~ ClosedWork
         ClosedWork ~~~ CashFlowWork
-    end
 
-    %% ---------------------------------------------------------
-    %% 5. LIVE STORAGE
-    %% ---------------------------------------------------------
-    subgraph Live_DB [Live Accounts Schema]
-        direction TB
-        TblLive[(open_positions)]:::db
-        TblClosed[(closed_trades)]:::db
-        TblMetrics[(account_metrics)]:::db
-        TblEquity[(equity_tables)]:::db
-        TblCash[(cash_flows)]:::db
+        %% Internal Logic Writes
+        PriceList --> TblLive
+        SnapLoop --> TblLive
+        MetricsWork --> TblMetrics
+        EquityWork --> TblEquity
+        ClosedWork --> TblClosed
+        CashFlowWork --> TblCash
         
-        TblLive ~~~ TblClosed
-        TblClosed ~~~ TblMetrics
-        TblMetrics ~~~ TblEquity
-        TblEquity ~~~ TblCash
+        %% Dependencies inside DB (Logic flow)
+        TblLive --> MetricsWork
+        TblLive --> EquityWork
+        TblLive --> ClosedWork
+        TblCash --> EquityWork
     end
 
-    %% ---------------------------------------------------------
-    %% 6. CONSUMERS
-    %% ---------------------------------------------------------
-    subgraph Consumers [Clients & Orchestration]
+    %% =========================================================
+    %% 4. CLIENTS & ORCHESTRATION (Left Column)
+    %% =========================================================
+    subgraph Clients_Stack [Clients & Orchestration]
         direction TB
         RiskDAG(<b>Airflow Risk DAG</b>):::service
         Flask(<b>Flask Dashboard</b>):::service
         SSE((SSE Stream)):::bus
         
-        RiskDAG ~~~ Flask
+        RiskDAG ~~~ SSE ~~~ Flask
     end
 
     %% =========================================================
-    %% DATA FLOW CONNECTIONS
+    %% CROSS-COMPONENT CONNECTIONS
     %% =========================================================
 
-    %% --- INGESTER FLOWS ---
+    %% --- External Inputs ---
     AlpacaWS --> StreamWork
-    AlpacaREST -->|Poll History/Healing| HealWork
-    StreamWork -->|Write Event| RawOrders & RawActs
-    HealWork -->|Upsert Missing| RawOrders & RawActs
-
-    %% --- MANAGER INPUTS ---
     ZMQ --> PriceList
-    RawOrders & RawActs -->|Replay History| SnapLoop
-    RawActs -->|Ingest Dividends| CashFlowWork
+    
+    %% [NEW] API Connections (Ingester & Manager)
+    AlpacaREST -->|Healing/Backfill| HealWork
     AlpacaREST -->|Sync State| SnapLoop
+    
+    %% --- Manager Reading Raw Data ---
+    RawOrders & RawActs -->|Replay| SnapLoop
+    RawActs -->|Ingest Dividends| CashFlowWork
 
-    %% --- MANAGER WRITES ---
-    PriceList -- Update Px --> TblLive
-    SnapLoop -- Reconcile --> TblLive
-    CashFlowWork -- Write Flows --> TblCash
-    
-    %% --- MANAGER INTERNAL CALCS ---
-    TblLive --> MetricsWork & EquityWork & ClosedWork
-    TblCash --> EquityWork
-    
-    MetricsWork -- Calc KPIs --> TblMetrics
-    EquityWork -- Calc Curve --> TblEquity
-    ClosedWork -- Archive Trade --> TblClosed
-    
-    %% --- RISK MANAGER ---
-    RawOrders -.->|Read Deep History| RiskDAG
+    %% --- Risk Manager Flow ---
+    RawOrders -.->|Read History| RiskDAG
     RiskDAG -- Patch Order --> AlpacaREST
 
-    %% --- DASHBOARD READS ---
-    TblMetrics --> Flask
-    TblLive <-->|SQL Select| Flask
-    TblClosed <-->|SQL Select| Flask
-    TblEquity -->|SQL Select| Flask
-
-    %% --- DASHBOARD PUSH ---
+    %% --- Dashboard / Web Flow ---
     TblLive -.->|PG NOTIFY| SSE
     TblClosed -.->|PG NOTIFY| SSE
     SSE --> Flask
+    
+    %% [NEW] Dashboard SQL Reads
+    TblMetrics --> Flask
+    TblLive <-->|SQL| Flask
+    TblClosed <-->|SQL| Flask
+    TblEquity -->|SQL| Flask
+    TblCash -->|SQL| Flask
 
 ```
 
