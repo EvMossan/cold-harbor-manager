@@ -200,26 +200,6 @@ graph TD
 
 ---
 
-The architecture consists of five core distinct services. See the documentation for details:
-
-- **[Account Manager](docs/account_manager.md)**: Real-time state synchronization and metric calculation.
-- **[Data Ingester](docs/ingester.md)**: Immutable data lake and stream capture.
-- **[Risk Manager](docs/risk_manager.md)**: Airflow-based break-even engine.
-- **[Web Dashboard](docs/web_architecture.md)**: Flask/SSE frontend.
-- **Infrastructure**: Postgres, TimescaleDB, and Cloudflare Tunnels.
-
-## Repository Layout
-
-- `src/coldharbour_manager/` – Application source code.
-  - `services/account_manager/` – Core trading logic and state management.
-  - `services/activity_ingester/` – Raw data capture service.
-  - `web/` – Flask blueprint and Jinja2 templates.
-  - `core/` – Shared financial math (Smart Sharpe, FIFO/LIFO matching).
-  - `services/risks_manager/` – Break-even logic and order modification engine.
-- `docs/` – Detailed architectural documentation.
-- `docker-compose.yml` – Full local development stack (Manager + Web + Ingester).
-- `dags/` – Airflow DAG definitions for multi-account risk management.
-
 ## Getting Started
 
 ### Prerequisites
