@@ -125,13 +125,15 @@ graph TD
         PriceList(price_listener):::worker
         SnapLoop(snapshot_loop):::worker
         MetricsWork(metrics_worker):::worker
-        EquityWork(equity_intraday):::worker
+        EquityWork(equity_intraday_worker):::worker
+        ClosedWork(closed_trades_worker):::worker
         
         %% Invisible links to force column layout
         MgrRun --> PriceList
         PriceList ~~~ SnapLoop
         SnapLoop ~~~ MetricsWork
         MetricsWork ~~~ EquityWork
+        EquityWork ~~~ ClosedWork
     end
 
     %% ---------------------------------------------------------
@@ -142,8 +144,11 @@ graph TD
         TblLive[(open_positions)]:::db
         TblClosed[(closed_trades)]:::db
         TblMetrics[(account_metrics)]:::db
+        TblEquity[(equity_tables)]:::db
+        
         TblLive ~~~ TblClosed
         TblClosed ~~~ TblMetrics
+        TblMetrics ~~~ TblEquity
     end
 
     %% ---------------------------------------------------------
@@ -171,23 +176,32 @@ graph TD
     StreamWork --> RawOrders & RawActs
     HealWork --> RawOrders & RawActs
 
-    %% Manager Reads/Writes
+    %% Manager Reads (Rebuild State)
     RawOrders & RawActs --> SnapLoop
+    
+    %% Manager Updates (Writes)
     PriceList -- Update Px --> TblLive
     SnapLoop -- Reconcile --> TblLive
+    MetricsWork -- Calc KPIs --> TblMetrics
+    EquityWork -- Calc Curve --> TblEquity
+    ClosedWork -- Archive Trade --> TblClosed
     
-    %% Internal Manager Flow
+    %% Internal Manager Flow Dependencies
     TblLive --> MetricsWork & EquityWork
-    MetricsWork --> TblMetrics
-    EquityWork --> TblLive
 
-    %% Risk Manager Flow (Reads RAW for independence)
-    RawOrders --> RiskDAG
+    %% Risk Manager Flow
+    RawOrders -.->|Read History| RiskDAG
     RiskDAG -- Patch Order --> AlpacaREST
 
-    %% Web Flow
+    %% Web/Dashboard Flow (Reads)
     TblMetrics --> Flask
+    TblLive <-->|SQL Select| Flask
+    TblClosed <-->|SQL Select| Flask
+    TblEquity -->|SQL Select| Flask
+
+    %% Web/Dashboard Flow (Push/Notify)
     TblLive -.->|PG NOTIFY| SSE
+    TblClosed -.->|PG NOTIFY| SSE
     SSE --> Flask
 
 ```
