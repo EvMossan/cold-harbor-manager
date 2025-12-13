@@ -4,13 +4,10 @@
 **Cold Harbour** is an integrated trading operations system for Alpaca
 accounts. It maintains a local, authoritative view of account state
 (positions, equity, orders) in real time, backed by PostgreSQL/TimescaleDB.
-Trading logic interacts with this local ledger, reducing sensitivity to
-broker latency and making order lifecycles observable and reproducible.
 
 The system includes a dedicated **Risk Manager** service. It monitors open
 exposure, manages stop-loss orders, and automatically trails stops to
-break-even once price reaches a pre-calculated 2R volatility target. Risk
-handling is executed independently from the core strategy code.
+break-even once price reaches a pre-calculated 2R volatility target.
 
 
 ## Preview
