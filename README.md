@@ -20,9 +20,7 @@ break-even once price reaches a pre-calculated 2R volatility target.
 
 ![Platform preview](docs/img/dashboard_preview.png)
 
-## Key Features
-
-Tech Stack:
+## Tech Stack
 
 | Domain | Technologies |
 |--------|--------------|
