@@ -6,3 +6,4 @@ __pycache__/
 src/cold_harbour/core/destinations_local.py
 src/cold_harbour/core/destinations.py
 airflow_simple_auth_passwords.json
+src/coldharbour_manager.egg-info/
