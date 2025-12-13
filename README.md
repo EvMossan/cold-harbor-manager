@@ -1,4 +1,4 @@
-# Cold Harbour: Real-Time Trading Analytics & Risk Management Platform
+# Cold Harbour: Real-Time Trading Analytics & Risk Management
 
 
 **Cold Harbour** is an integrated trading operations system for Alpaca
