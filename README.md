@@ -80,7 +80,7 @@ graph TD
     classDef bus fill:#fff8e1,stroke:#ff9800,stroke-width:2px,shape:rect,color:#e65100;
 
     %% ---------------------------------------------------------
-    %% 1. EXTERNAL SOURCES (Top)
+    %% 1. EXTERNAL SOURCES
     %% ---------------------------------------------------------
     subgraph External [External Market Data]
         direction TB
@@ -96,7 +96,7 @@ graph TD
         direction TB
         IngesterRun(<b>ingester_run.py</b>):::service
         
-        %% Stack workers vertically
+        %% Workers
         StreamWork(stream_consumer):::worker
         HealWork(healing_worker):::worker
         
@@ -121,19 +121,21 @@ graph TD
         direction TB
         MgrRun(<b>manager_run.py</b>):::service
         
-        %% Stack workers vertically
+        %% Workers
         PriceList(price_listener):::worker
         SnapLoop(snapshot_loop):::worker
         MetricsWork(metrics_worker):::worker
         EquityWork(equity_intraday_worker):::worker
         ClosedWork(closed_trades_worker):::worker
+        CashFlowWork(cash_flows_worker):::worker
         
-        %% Invisible links to force column layout
+        %% Layout hints
         MgrRun --> PriceList
         PriceList ~~~ SnapLoop
         SnapLoop ~~~ MetricsWork
         MetricsWork ~~~ EquityWork
         EquityWork ~~~ ClosedWork
+        ClosedWork ~~~ CashFlowWork
     end
 
     %% ---------------------------------------------------------
@@ -145,14 +147,16 @@ graph TD
         TblClosed[(closed_trades)]:::db
         TblMetrics[(account_metrics)]:::db
         TblEquity[(equity_tables)]:::db
+        TblCash[(cash_flows)]:::db
         
         TblLive ~~~ TblClosed
         TblClosed ~~~ TblMetrics
         TblMetrics ~~~ TblEquity
+        TblEquity ~~~ TblCash
     end
 
     %% ---------------------------------------------------------
-    %% 6. CONSUMERS (Bottom)
+    %% 6. CONSUMERS
     %% ---------------------------------------------------------
     subgraph Consumers [Clients & Orchestration]
         direction TB
@@ -167,39 +171,42 @@ graph TD
     %% DATA FLOW CONNECTIONS
     %% =========================================================
 
-    %% Inflow
+    %% --- INGESTER FLOWS ---
     AlpacaWS --> StreamWork
-    AlpacaREST --> HealWork
+    AlpacaREST -->|Poll History/Healing| HealWork
+    StreamWork -->|Write Event| RawOrders & RawActs
+    HealWork -->|Upsert Missing| RawOrders & RawActs
+
+    %% --- MANAGER INPUTS ---
     ZMQ --> PriceList
+    RawOrders & RawActs -->|Replay History| SnapLoop
+    RawActs -->|Ingest Dividends| CashFlowWork
+    AlpacaREST -->|Sync State| SnapLoop
 
-    %% Ingestion Writes
-    StreamWork --> RawOrders & RawActs
-    HealWork --> RawOrders & RawActs
-
-    %% Manager Reads (Rebuild State)
-    RawOrders & RawActs --> SnapLoop
-    
-    %% Manager Updates (Writes)
+    %% --- MANAGER WRITES ---
     PriceList -- Update Px --> TblLive
     SnapLoop -- Reconcile --> TblLive
+    CashFlowWork -- Write Flows --> TblCash
+    
+    %% --- MANAGER INTERNAL CALCS ---
+    TblLive --> MetricsWork & EquityWork & ClosedWork
+    TblCash --> EquityWork
+    
     MetricsWork -- Calc KPIs --> TblMetrics
     EquityWork -- Calc Curve --> TblEquity
     ClosedWork -- Archive Trade --> TblClosed
     
-    %% Internal Manager Flow Dependencies
-    TblLive --> MetricsWork & EquityWork
-
-    %% Risk Manager Flow
-    RawOrders -.->|Read History| RiskDAG
+    %% --- RISK MANAGER ---
+    RawOrders -.->|Read Deep History| RiskDAG
     RiskDAG -- Patch Order --> AlpacaREST
 
-    %% Web/Dashboard Flow (Reads)
+    %% --- DASHBOARD READS ---
     TblMetrics --> Flask
     TblLive <-->|SQL Select| Flask
     TblClosed <-->|SQL Select| Flask
     TblEquity -->|SQL Select| Flask
 
-    %% Web/Dashboard Flow (Push/Notify)
+    %% --- DASHBOARD PUSH ---
     TblLive -.->|PG NOTIFY| SSE
     TblClosed -.->|PG NOTIFY| SSE
     SSE --> Flask
