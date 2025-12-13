@@ -20,17 +20,6 @@ break-even once price reaches a pre-calculated 2R volatility target.
 
 ![Platform preview](docs/img/dashboard_preview.png)
 
-## Table of Contents
-
-- **[Key Features](#key-features)**
-- **[System Architecture](#system-components)**
-- **Documentation:**
-  - **Logic:** [Core Analytics](docs/core_analytics.md) | [Risk Manager](docs/risk_manager.md) | [Account Manager](docs/account_manager.md)
-  - **Infra:** [Ingester](docs/ingester.md) | [Infrastructure](docs/infrastructure.md)
-  - **Web/Ops:** [Frontend Logic](docs/frontend_logic.md) | [Web Architecture](docs/web_architecture.md) | [Operations Guide](docs/operations_guide.md)
-- **[Getting Started](#getting-started)**
-- **[Deployment](#deployment)**
-
 ## Key Features
 
 Tech Stack:
@@ -43,27 +32,6 @@ Tech Stack:
 | **Orchestration** | Apache Airflow (DAGs, Scheduling), `supervisord` |
 | **Infrastructure** | Docker, Docker Compose, Google Cloud Run, Cloud Build |
 | **Networking** | Cloudflare Access (Zero Trust Tunnels), Alpaca API (Trading) |
-
-### Active Risk Management
--   **Break-Even Engine:** Automatically trails Stop-Loss orders to the entry price once a position is "safe" (price > entry + trigger).
--   **Smart Triggers:** Uses pre-calculated volatility targets (e.g., 30-min breakout levels) to arm the break-even logic, ensuring stops aren't moved prematurely during noise.
--   **Session Orchestration:** An autonomous Supervisor manages the trading lifecycle, spinning up workers for Pre-Market (04:00 ET) and shutting down after Post-Market close to save resources.
-
-### Real-Time Analytics
--   **Hybrid Pricing Model:** Simultaneously tracks **Strategy Price** (technical execution basis) and **Broker WAC** (tax/accounting basis), preventing P&L drift in decision-making.
--   **Live Greeks & Metrics:** Streaming calculation of Sharpe Ratio (Smart/Rolling), Win Rate, and Drawdown updated every 5 seconds.
--   **Intraday Equity Curve:** High-resolution (1-minute) charting that reconciles mark-to-market position values with cash flows (dividends, fees) in real-time.
-
-### Data Integrity & Execution
--   **Deep Chain Tracing:** Resolves complex OTO/Bracket chains, tracking "Grandchild" orders through multiple replacements (e.g., user-modified stops) to maintain correct parentage.
--   **Orphan Detection:** Identifies "broken" positions where the broker reports exposure but the bot sees no active stop-loss protection.
--   **Immutable Data Lake:** A dedicated Ingester service captures every WebSocket event into a raw schema using synthetic IDs, ensuring zero data loss even during downtime.
-
-### ⚡ Technical Architecture
--   **Event-Driven UI:** Server-Sent Events (SSE) push updates to the dashboard with sub-second latency.
--   **Secure Tunnels:** Integrated **Cloudflare Access** tunnels expose local PostgreSQL/TimescaleDB instances securely without public IPs.
-
----
 
 ## System Components
 
@@ -212,6 +180,27 @@ graph TD
     TblCash -->|SQL| Flask
 
 ```
+
+### Active Risk Management
+-   **Break-Even Engine:** Automatically trails Stop-Loss orders to the entry price once a position is "safe" (price > entry + trigger).
+-   **Smart Triggers:** Uses pre-calculated volatility targets (e.g., 30-min breakout levels) to arm the break-even logic, ensuring stops aren't moved prematurely during noise.
+-   **Session Orchestration:** An autonomous Supervisor manages the trading lifecycle, spinning up workers for Pre-Market (04:00 ET) and shutting down after Post-Market close to save resources.
+
+### Real-Time Analytics
+-   **Hybrid Pricing Model:** Simultaneously tracks **Strategy Price** (technical execution basis) and **Broker WAC** (tax/accounting basis), preventing P&L drift in decision-making.
+-   **Live Greeks & Metrics:** Streaming calculation of Sharpe Ratio (Smart/Rolling), Win Rate, and Drawdown updated every 5 seconds.
+-   **Intraday Equity Curve:** High-resolution (1-minute) charting that reconciles mark-to-market position values with cash flows (dividends, fees) in real-time.
+
+### Data Integrity & Execution
+-   **Deep Chain Tracing:** Resolves complex OTO/Bracket chains, tracking "Grandchild" orders through multiple replacements (e.g., user-modified stops) to maintain correct parentage.
+-   **Orphan Detection:** Identifies "broken" positions where the broker reports exposure but the bot sees no active stop-loss protection.
+-   **Immutable Data Lake:** A dedicated Ingester service captures every WebSocket event into a raw schema using synthetic IDs, ensuring zero data loss even during downtime.
+
+### ⚡ Technical Architecture
+-   **Event-Driven UI:** Server-Sent Events (SSE) push updates to the dashboard with sub-second latency.
+-   **Secure Tunnels:** Integrated **Cloudflare Access** tunnels expose local PostgreSQL/TimescaleDB instances securely without public IPs.
+
+---
 
 The architecture consists of five core distinct services. See the documentation for details:
 
