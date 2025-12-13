@@ -1,6 +1,6 @@
 # Account Manager Service
 
-The **Account Manager** is a core service in Cold Harbour responsible for synchronizing trading account state between the Alpaca Brokerage API and the local PostgreSQL database in real-time. It acts as the "source of truth" for the application's understanding of current positions, equity, and order history.
+The **Account Manager** is a core service in Cold Harbor responsible for synchronizing trading account state between the Alpaca Brokerage API and the local PostgreSQL database in real-time. It acts as the "source of truth" for the application's understanding of current positions, equity, and order history.
 
 ## Overview
 

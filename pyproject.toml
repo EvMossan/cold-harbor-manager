@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "coldharbour-manager"
 version = "0.1.0"
-description = "Management and dashboard modules for the Cold Harbour stack"
+description = "Management and dashboard modules for the Cold Harbor stack"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "Cold Harbour", email = "info@coldharbour.local" }]
+authors = [{ name = "Cold Harbor", email = "info@coldharbour.local" }]
 dependencies = []
 
 [project.urls]

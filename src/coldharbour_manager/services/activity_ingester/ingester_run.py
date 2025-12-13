@@ -1,5 +1,5 @@
 """
-Entrypoint for the Cold Harbour Data Ingester service.
+Entrypoint for the Cold Harbor Data Ingester service.
 
 Invoke with ``python -m coldharbour_manager.ingester_run``.
 """

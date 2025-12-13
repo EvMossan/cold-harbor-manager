@@ -1,7 +1,7 @@
 # Contributing Guidelines
 
 This document describes how we work with code, branches, and pull requests
-for the Cold Harbour dashboard project.
+for the Cold Harbor dashboard project.
 ---
 
 ## 1. General principles

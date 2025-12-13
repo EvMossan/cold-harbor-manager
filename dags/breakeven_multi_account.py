@@ -44,7 +44,7 @@ def create_dag(destination: dict):
     """
     
     # 1. Generate a unique ID (slug)
-    # slug_for makes names safe: "Cold Harbour v1.0" -> "cold_harbour_v1_0"
+    # slug_for makes names safe: "Cold Harbor v1.0" -> "cold_harbour_v1_0"
     account_slug = slug_for(destination)
     dag_id = f"Risk_Manager_{account_slug}"
     # Get the account name for logging/UI

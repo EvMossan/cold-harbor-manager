@@ -1,7 +1,7 @@
-# Cold Harbour: Real-Time Trading Analytics & Risk Management
+# Cold Harbor: Real-Time Trading Analytics & Risk Management
 
 
-**Cold Harbour** is an integrated trading operations system for Alpaca
+**Cold Harbor** is an integrated trading operations system for Alpaca
 accounts. It maintains a local, authoritative view of account state
 (positions, equity, orders) in real time, backed by PostgreSQL/TimescaleDB.
 
