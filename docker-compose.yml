@@ -4,6 +4,7 @@ services:
   manager:
     build:
       context: .
+      dockerfile: docker/app/Dockerfile
     image: coldharbour_manager/manager:dev
     container_name: manager
     working_dir: /app
@@ -25,6 +26,7 @@ services:
   web:
     build:
       context: .
+      dockerfile: docker/app/Dockerfile
     image: coldharbour_manager/web:dev
     container_name: web
     working_dir: /app
@@ -40,6 +42,7 @@ services:
   ingester:
     build:
       context: .
+      dockerfile: docker/app/Dockerfile
     image: coldharbour_manager/ingester:dev
     container_name: ingester
     working_dir: /app
@@ -94,9 +97,12 @@ services:
       - "8082:8080"
     env_file: .env
     volumes:
-      - ./airflow.cfg:/opt/airflow/airflow.cfg
+      # Updated path to airflow.cfg
+      - ./config/airflow.cfg:/opt/airflow/airflow.cfg
       - ./dags:/opt/airflow/dags
-      - ./airflow_simple_auth_passwords.json:/opt/airflow/simple_auth_manager_passwords.json
+      # Updated path to auth passwords example (or actual file if renamed)
+      # Note: Ensure the actual json file exists in config/ if you renamed it from example
+      - ./config/airflow_simple_auth_passwords.example.json:/opt/airflow/simple_auth_manager_passwords.json
       - ./src:/opt/airflow/src
     environment:
       - AIRFLOW_LOG_SERVER_HOST=airflow

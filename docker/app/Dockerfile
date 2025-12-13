@@ -1,3 +1,4 @@
+# docker/app/Dockerfile
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -17,12 +18,14 @@ RUN curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/c
     -o /usr/local/bin/cloudflared \
     && chmod +x /usr/local/bin/cloudflared
 
-COPY requirements_dashboard.txt requirements.txt
+# Update path to requirements file (moved to requirements/)
+COPY requirements/requirements_dashboard.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src
-COPY entrypoint.sh .
 
+# Update path to entrypoint (moved to docker/app/)
+COPY docker/app/entrypoint.sh .
 RUN chmod +x entrypoint.sh
 
 EXPOSE ${PORT}
