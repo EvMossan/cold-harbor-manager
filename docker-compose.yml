@@ -104,6 +104,7 @@ services:
       # Note: Ensure the actual json file exists in config/ if you renamed it from example
       - ./config/airflow_simple_auth_passwords.example.json:/opt/airflow/simple_auth_manager_passwords.json
       - ./src:/opt/airflow/src
+      - ./logs:/opt/airflow/logs
     environment:
       - AIRFLOW_LOG_SERVER_HOST=airflow
       - AIRFLOW__CORE__HOSTNAME_CALLABLE=coldharbour_manager.airflow_utils.get_airflow_hostname

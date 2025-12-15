@@ -8,3 +8,4 @@ src/cold_harbour/core/destinations.py
 airflow_simple_auth_passwords.json
 config/airflow_simple_auth_passwords.json
 src/coldharbour_manager.egg-info/
+./logs
