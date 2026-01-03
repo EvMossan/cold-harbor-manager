@@ -1063,3 +1063,4 @@
 {"timestamp":"2026-01-03T08:55:33.851349Z","level":"info","event":"Filling up the DagBag from dags/breakeven_multi_account.py","logger":"airflow.models.dagbag.DagBag","filename":"dagbag.py","lineno":593}
 {"timestamp":"2026-01-03T08:56:04.080625Z","level":"info","event":"Filling up the DagBag from dags/breakeven_multi_account.py","logger":"airflow.models.dagbag.DagBag","filename":"dagbag.py","lineno":593}
 {"timestamp":"2026-01-03T08:56:34.315561Z","level":"info","event":"Filling up the DagBag from dags/breakeven_multi_account.py","logger":"airflow.models.dagbag.DagBag","filename":"dagbag.py","lineno":593}
+{"timestamp":"2026-01-03T08:57:04.564627Z","level":"info","event":"Filling up the DagBag from dags/breakeven_multi_account.py","logger":"airflow.models.dagbag.DagBag","filename":"dagbag.py","lineno":593}
