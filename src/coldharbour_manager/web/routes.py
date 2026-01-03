@@ -930,6 +930,36 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         else:
             fser = pd.Series(0.0, index=idx)
 
+        live_delta = 0.0
+        live_ts = None
+        with engine.begin() as conn:
+            try:
+                live_df = pd.read_sql(
+                    text(
+                        f"""
+                        SELECT qty, mkt_px, bar_px, updated_at
+                          FROM {tables['open']}
+                         WHERE qty <> 0
+                        """
+                    ),
+                    conn,
+                )
+            except Exception:
+                live_df = pd.DataFrame()
+
+        if not live_df.empty:
+            qty = pd.to_numeric(live_df.get("qty"), errors="coerce").fillna(0.0)
+            mkt = pd.to_numeric(live_df.get("mkt_px"), errors="coerce")
+            bar = pd.to_numeric(live_df.get("bar_px"), errors="coerce")
+            bar = bar.where(bar.notna(), mkt)
+            live_delta = ((mkt - bar) * qty).fillna(0.0).sum()
+            try:
+                live_ts = pd.to_datetime(
+                    live_df.get("updated_at"), utc=True, errors="coerce"
+                ).max()
+            except Exception:
+                live_ts = None
+
         pl = series - float(prev_deposit) - fser
         out = pd.DataFrame(
             {
@@ -948,23 +978,23 @@ def _make_blueprint_for_dest(dest: dict) -> Blueprint:
         current_flows = float(fser.iloc[-1]) if not fser.empty else 0.0
         
         latest_val = out["deposit"].iloc[-1] if not out.empty else 0.0
-        true_live_deposit = float(latest_val)
+        true_live_deposit = float(latest_val) + float(live_delta or 0.0)
 
         series_payload = json.loads(
             out.to_json(orient="records", date_format="iso")
         )
-        latest_dep = _to_float(true_live_deposit, None)
-        latest_ts = _to_iso(
-            out.iloc[-1]["ts"] if not out.empty else None
-        )
+        latest_dep = _to_float(latest_val, None)
+        latest_ts = _to_iso(out.iloc[-1]["ts"] if not out.empty else None)
         baseline_dep = _to_float(prev_deposit, None)
         baseline_ts = _to_iso(start_utc)
         session_flows = _to_float(
             fser.iloc[-1] if not fser.empty else 0.0, 0.0
         )
         session_realised = _to_float(current_realized, 0.0)
-        live_dep = latest_dep
-        live_ts = latest_ts
+        live_dep = _to_float(true_live_deposit, None)
+        live_ts = _to_iso(
+            live_ts if live_ts is not None else (out.iloc[-1]["ts"] if not out.empty else None)
+        )
         meta = {
             "baseline_deposit": baseline_dep,
             "baseline_ts": baseline_ts,

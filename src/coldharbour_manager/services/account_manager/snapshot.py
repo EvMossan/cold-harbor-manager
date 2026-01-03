@@ -186,6 +186,8 @@ def _build_live_row(
         "tp_child": tp_child,
         "tp_px": tp_px,
         "mkt_px": mkt_px,
+        "bar_px": None,
+        "bar_ts": None,
         "moved_flag": "—",
         "buy_value": buy_value,
         "holding_days": None,

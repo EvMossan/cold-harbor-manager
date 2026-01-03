@@ -78,6 +78,8 @@ DB_COLS: tuple[str, ...] = (
     "tp_child",
     "tp_px",
     "mkt_px",
+    "bar_px",
+    "bar_ts",
     "moved_flag",
     "buy_value",
     "holding_days",

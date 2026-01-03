@@ -727,6 +727,31 @@
         .column('profit_loss_lot:name')
         .data().toArray().reduce((a,b)=> a + (+b||0), 0);
       const openCnt = posTbl.data().length;
+      let liveDelta = 0;
+      let liveTsMs = Number.NEGATIVE_INFINITY;
+
+      posTbl.data().toArray().forEach(r => {
+        const qty = +r.qty || 0;
+        const mkt = +r.mkt_px;
+        const bar = Number.isFinite(+r.bar_px) ? +r.bar_px : mkt;
+        if (Number.isFinite(qty) && Number.isFinite(mkt) && Number.isFinite(bar)) {
+          liveDelta += qty * (mkt - bar);
+        }
+        const ts = r.bar_ts || r.updated_at;
+        if (ts) {
+          const ms = Date.parse(ts);
+          if (Number.isFinite(ms) && ms > liveTsMs) liveTsMs = ms;
+        }
+      });
+
+      const baseDep = Number(
+        pfHeader.intradayDeposit ?? pfHeader.dailyDeposit ?? pfHeader.baseDeposit
+      );
+      if (Number.isFinite(baseDep)) {
+        pfHeader.latestLiveDeposit = baseDep + liveDelta;
+        pfHeader.latestLiveTimestamp =
+          Number.isFinite(liveTsMs) ? new Date(liveTsMs).toISOString() : null;
+      }
 
       kpiTbl.rows().every(function () {
         const r = this.data();

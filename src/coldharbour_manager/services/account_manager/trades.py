@@ -483,6 +483,8 @@ async def _on_trade_update(mgr: "AccountManager", data: Any) -> None:
                 tp_child=None,
                 tp_px=None,
                 mkt_px=fill_price,
+                bar_px=None,
+                bar_ts=None,
                 moved_flag="—",
                 updated_at=now_ts,
             )
@@ -608,6 +610,8 @@ async def _on_trade_update(mgr: "AccountManager", data: Any) -> None:
             tp_child=None,
             tp_px=None,
             mkt_px=fill_price,
+            bar_px=None,
+            bar_ts=None,
             moved_flag="—",
             updated_at=now_ts,
         )

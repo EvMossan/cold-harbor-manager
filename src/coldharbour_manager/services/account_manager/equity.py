@@ -246,12 +246,18 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
             f"""
                 SELECT symbol, qty,
                        filled_at AT TIME ZONE 'UTC' AS filled_at,
-                       avg_fill AS basis
+                       COALESCE(avg_px_symbol, avg_fill) AS basis
                   FROM {mgr.tbl_live}
                  WHERE qty <> 0
                 """
         )
         open_df = pd.DataFrame(open_rows)
+        open_syms = set(
+            open_df.get("symbol", pd.Series(dtype=str))
+            .dropna()
+            .astype(str)
+            .str.upper()
+        )
 
         # 4. Fetch flows split into PnL vs other cash movements
         pnl_types = {
@@ -302,6 +308,7 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
         
         px_cols: dict[str, pd.Series] = {}
         ref_prices: dict[str, float] = {}
+        bar_by_symbol: dict[str, tuple[float, dt.datetime]] = {}
 
         if syms:
             for sym in syms:
@@ -370,10 +377,26 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                 bars = pd.DataFrame(bars_rows)
 
                 if not bars.empty:
-                    series = (
+                    bars = (
                         bars.assign(ts=pd.to_datetime(bars["ts"], utc=True))
                         .drop_duplicates("ts")
-                        .set_index("ts")["close"]
+                        .sort_values("ts")
+                    )
+                    last_bar = bars.iloc[-1]
+                    try:
+                        bar_close = float(last_bar["close"])
+                        bar_ts = pd.to_datetime(
+                            last_bar["ts"], utc=True
+                        ).to_pydatetime()
+                        bar_by_symbol[str(sym).upper()] = (
+                            bar_close,
+                            bar_ts,
+                        )
+                    except Exception:
+                        pass
+
+                    series = (
+                        bars.set_index("ts")["close"]
                         .reindex(idx)
                         .ffill()
                     )
@@ -386,6 +409,43 @@ async def _equity_intraday_backfill(mgr: "AccountManager") -> None:
                     px_cols[sym] = series
                 elif pre_px:
                     px_cols[sym] = pd.Series(pre_px, index=idx)
+                    try:
+                        bar_by_symbol[str(sym).upper()] = (
+                            float(pre_px),
+                            start_utc.to_pydatetime(),
+                        )
+                    except Exception:
+                        pass
+
+        # 5b. Update bar reference price for open positions (DB + in-memory)
+        if bar_by_symbol and open_syms:
+            params = []
+            for sym_key, bar in bar_by_symbol.items():
+                if sym_key not in open_syms:
+                    continue
+                px, ts = bar
+                params.append((px, ts, sym_key))
+            if params:
+                await mgr._db_executemany(
+                    f"""
+                        UPDATE {mgr.tbl_live}
+                           SET bar_px = $1,
+                               bar_ts = $2,
+                               updated_at = now()
+                         WHERE UPPER(symbol) = $3
+                    """,
+                    params,
+                )
+                for sym_key, bar in bar_by_symbol.items():
+                    if sym_key not in open_syms:
+                        continue
+                    px, ts = bar
+                    for pid in list(mgr.sym2pid.get(sym_key, set())):
+                        row = mgr.state.get(pid)
+                        if not row:
+                            continue
+                        row["bar_px"] = px
+                        row["bar_ts"] = ts
 
         # 6. Calculate PnL Delta Series
         delta_series = pd.Series(0.0, index=idx)

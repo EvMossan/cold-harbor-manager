@@ -238,6 +238,8 @@ async def _ensure_tables(
                 tp_child         text,
                 tp_px            real,
                 mkt_px           real,
+                bar_px           real,
+                bar_ts           timestamptz,
                 moved_flag       text DEFAULT '—',
                 buy_value        real,
                 holding_days     integer,
