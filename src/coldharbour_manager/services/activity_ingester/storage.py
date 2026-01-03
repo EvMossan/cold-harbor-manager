@@ -320,7 +320,8 @@ async def upsert_activities(
         sql = f"""
             INSERT INTO {t_activities} ({",".join(cols)})
             VALUES ({placeholders})
-            ON CONFLICT (execution_id) WHERE activity_type = 'FILL'
+            ON CONFLICT (execution_id)
+            WHERE activity_type = 'FILL' AND execution_id IS NOT NULL
             DO UPDATE SET {updates}
         """
         await repo.executemany(sql, fill_values)
