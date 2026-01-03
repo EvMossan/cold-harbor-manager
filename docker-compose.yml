@@ -102,7 +102,7 @@ services:
       - ./dags:/opt/airflow/dags
       # Updated path to auth passwords example (or actual file if renamed)
       # Note: Ensure the actual json file exists in config/ if you renamed it from example
-      - ./config/airflow_simple_auth_passwords.example.json:/opt/airflow/simple_auth_manager_passwords.json
+      - ./config/airflow_simple_auth_passwords.json:/opt/airflow/simple_auth_manager_passwords.json
       - ./src:/opt/airflow/src
       - ./logs:/opt/airflow/logs
     environment:

@@ -1,0 +1,5 @@
+{"timestamp":"2025-12-19T18:48:00.338518Z","level":"info","event":"DAG bundles loaded: dags-folder","logger":"airflow.dag_processing.bundles.manager.DagBundlesManager","filename":"manager.py","lineno":179}
+{"timestamp":"2025-12-19T18:48:00.338981Z","level":"info","event":"Filling up the DagBag from dags/breakeven_multi_account.py","logger":"airflow.models.dagbag.DagBag","filename":"dagbag.py","lineno":593}
+{"timestamp":"2025-12-19T18:48:00.444811Z","level":"info","event":"Starting Risk Manager cycle for: live (live)","logger":"BE_Manager_live","filename":"breakeven_multi_account.py","lineno":58}
+{"timestamp":"2025-12-19T18:48:00.472801Z","level":"info","event":"⇢ OrderManager initialised","logger":"BE_Manager","filename":"risks_manager.py","lineno":91}
+{"timestamp":"2025-12-19T18:48:00.472921Z","level":"info","event":"— Break-Even manager cycle start —","logger":"BE_Manager","filename":"risks_manager.py","lineno":879}

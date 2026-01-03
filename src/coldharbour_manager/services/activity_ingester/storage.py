@@ -103,6 +103,44 @@ async def ensure_schema_and_tables(
     """
     await repo.execute(ddl_activities)
 
+    # Normalize activity_type casing to keep partial indexes consistent.
+    await repo.execute(
+        f"""
+        UPDATE {t_activities}
+        SET activity_type = UPPER(activity_type)
+        WHERE activity_type IS NOT NULL
+          AND activity_type <> UPPER(activity_type);
+        """
+    )
+
+    # Deduplicate fills by execution_id, preferring REST rows over stream
+    # payloads when both exist.
+    await repo.execute(
+        f"""
+        WITH ranked AS (
+            SELECT
+                ctid,
+                ROW_NUMBER() OVER (
+                    PARTITION BY execution_id
+                    ORDER BY (raw_json ? 'event')::int ASC, ingested_at DESC
+                ) AS rn
+            FROM {t_activities}
+            WHERE activity_type = 'FILL' AND execution_id IS NOT NULL
+        )
+        DELETE FROM {t_activities}
+        WHERE ctid IN (SELECT ctid FROM ranked WHERE rn > 1);
+        """
+    )
+
+    # Ensure fills are unique per execution_id to prevent stream/REST doubles.
+    await repo.execute(
+        f"""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_{slug}_activities_exec
+        ON {t_activities}(execution_id)
+        WHERE activity_type = 'FILL' AND execution_id IS NOT NULL;
+        """
+    )
+
 
 async def ensure_history_meta_table(
     repo: AsyncAccountRepository,
@@ -222,7 +260,7 @@ async def upsert_activities(
     activities: List[Dict[str, Any]]
 ) -> int:
     """
-    Batch insert activities while ignoring duplicates.
+    Batch insert activities while deduplicating fills by execution_id.
     """
     if not activities:
         return 0
@@ -236,19 +274,56 @@ async def upsert_activities(
         "raw_json", "ingested_at"
     ]
 
-    values = []
-    for a in activities:
-        values.append(tuple(a.get(c) for c in cols))
+    def _extract_execution_id(activity_id: Any) -> Optional[str]:
+        if not activity_id:
+            return None
+        activity_id = str(activity_id)
+        if "::" not in activity_id:
+            return None
+        return activity_id.split("::", 1)[1]
+
+    fill_values: List[tuple[Any, ...]] = []
+    other_values: List[tuple[Any, ...]] = []
+
+    for raw in activities:
+        activity = dict(raw)
+        activity_type = str(activity.get("activity_type") or "").upper()
+        if activity_type:
+            activity["activity_type"] = activity_type
+
+        if activity_type == "FILL":
+            exec_id = activity.get("execution_id") or _extract_execution_id(
+                activity.get("id")
+            )
+            if exec_id:
+                activity["execution_id"] = exec_id
+                fill_values.append(tuple(activity.get(c) for c in cols))
+                continue
+
+        other_values.append(tuple(activity.get(c) for c in cols))
 
     placeholders = ",".join(f"${i+1}" for i in range(len(cols)))
+    total = 0
 
-    # ON CONFLICT DO NOTHING keeps the history append-only and skips
-    # Time::UUID duplicates.
-    sql = f"""
-        INSERT INTO {t_activities} ({",".join(cols)})
-        VALUES ({placeholders})
-        ON CONFLICT (id) DO NOTHING
-    """
+    if other_values:
+        sql = f"""
+            INSERT INTO {t_activities} ({",".join(cols)})
+            VALUES ({placeholders})
+            ON CONFLICT (id) DO NOTHING
+        """
+        await repo.executemany(sql, other_values)
+        total += len(other_values)
 
-    await repo.executemany(sql, values)
-    return len(values)
+    if fill_values:
+        update_cols = [c for c in cols if c != "id"]
+        updates = ",".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
+        sql = f"""
+            INSERT INTO {t_activities} ({",".join(cols)})
+            VALUES ({placeholders})
+            ON CONFLICT (execution_id) WHERE activity_type = 'FILL'
+            DO UPDATE SET {updates}
+        """
+        await repo.executemany(sql, fill_values)
+        total += len(fill_values)
+
+    return total

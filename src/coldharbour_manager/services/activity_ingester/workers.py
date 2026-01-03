@@ -112,6 +112,10 @@ def _df_to_activity_records(
             net_amount = _safe_value("amount")
 
         activity_type = str(_safe_value("activity_type") or "").upper()
+        activity_id = _safe_value("id")
+        execution_id = _safe_value("execution_id")
+        if not execution_id and activity_id and "::" in str(activity_id):
+            execution_id = str(activity_id).split("::", 1)[1]
         if net_amount is None and activity_type == "FILL":
             try:
                 qty = float(_safe_value("qty") or 0.0)
@@ -134,8 +138,8 @@ def _df_to_activity_records(
 
         records.append(
             {
-                "id": row.get("id"),
-                "activity_type": _safe_value("activity_type"),
+                "id": activity_id,
+                "activity_type": activity_type or None,
                 "transaction_time": transaction_time,
                 "symbol": _safe_value("symbol"),
                 "side": _safe_value("side"),
@@ -143,7 +147,7 @@ def _df_to_activity_records(
                 "price": _safe_value("price"),
                 "net_amount": net_amount,
                 "order_id": _safe_value("order_id"),
-                "execution_id": None,
+                "execution_id": execution_id,
                 "raw_json": _json_dumper(raw_row),
                 "ingested_at": ingest_time,
             }

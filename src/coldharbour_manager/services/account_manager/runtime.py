@@ -756,10 +756,18 @@ class AccountManager:
     # ──────────────────────────────────────────────────────────────────────
 
     async def _record_closed_trade_now(
-        self, row: Dict[str, Any], exit_type: str = "MANUAL"
+        self,
+        row: Dict[str, Any],
+        exit_type: str = "MANUAL",
+        exit_order_id: Optional[str] = None,
     ) -> None:
         """Delegate closed trade persistence to trades helpers."""
-        await trades._record_closed_trade_now(self, row, exit_type=exit_type)
+        await trades._record_closed_trade_now(
+            self,
+            row,
+            exit_type=exit_type,
+            exit_order_id=exit_order_id,
+        )
 
     # ──────────────────────────────────────────────────────────────────────
     #  Price listener (ZMQ ticks)

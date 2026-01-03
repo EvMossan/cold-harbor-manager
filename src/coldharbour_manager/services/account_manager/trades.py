@@ -217,24 +217,33 @@ async def _sync_closed_trades(mgr: "AccountManager") -> None:
         f"{c}=EXCLUDED.{c}" for c in update_cols
     )
 
-    await mgr._db_executemany(
-        f"""
-            INSERT INTO {mgr.tbl_closed} ({columns})
-            VALUES ({placeholders})
-            ON CONFLICT ({conflict_target}) DO UPDATE SET
-                {update_clause};
-            """,
-        values,
-    )
-    await mgr._db_execute(
-        "SELECT pg_notify($1, 'refresh');", mgr.closed_channel
-    )
+    repo = mgr.repo
+    assert repo is not None
+
+    async with repo.pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f"DELETE FROM {mgr.tbl_closed};")
+            await conn.executemany(
+                f"""
+                    INSERT INTO {mgr.tbl_closed} ({columns})
+                    VALUES ({placeholders})
+                    ON CONFLICT ({conflict_target}) DO UPDATE SET
+                        {update_clause};
+                    """,
+                values,
+            )
+            await conn.execute(
+                "SELECT pg_notify($1, 'refresh');", mgr.closed_channel
+            )
 
     mgr._closed_last_sync = _utcnow()
 
 
 async def _record_closed_trade_now(
-    mgr: "AccountManager", row: Dict[str, Any], exit_type: str = "MANUAL"
+    mgr: "AccountManager",
+    row: Dict[str, Any],
+    exit_type: str = "MANUAL",
+    exit_order_id: Optional[str] = None,
 ) -> None:
     """Persist a finished position into the closed table."""
     if not row:
@@ -261,7 +270,23 @@ async def _record_closed_trade_now(
     )
     duration = (exit_ts - entry_ts).total_seconds() if entry_ts else None
 
+    entry_lot_id = row.get("parent_id")
+    if entry_lot_id is None:
+        entry_lot_id = row.get("entry_lot_id")
+    if entry_lot_id is not None:
+        entry_lot_id = str(entry_lot_id)
+    if not entry_lot_id:
+        return
+
+    if exit_order_id is None:
+        exit_order_id = entry_lot_id
+    if exit_order_id is not None:
+        exit_order_id = str(exit_order_id)
+
     cols = (
+        "entry_lot_id",
+        "exit_order_id",
+        "exit_parent_id",
         "symbol",
         "side",
         "qty",
@@ -275,6 +300,9 @@ async def _record_closed_trade_now(
         "duration_sec",
     )
     vals = (
+        entry_lot_id,
+        exit_order_id,
+        None,
         symbol,
         side,
         qty_entry,
@@ -291,7 +319,7 @@ async def _record_closed_trade_now(
     placeholders = ", ".join(f"${i}" for i in range(1, len(cols) + 1))
     await mgr._db_execute(
         f"""
-            INSERT INTO {mgr.tbl_closed} ({','.join(cols)})
+            INSERT INTO {mgr.tbl_closed} ({",".join(cols)})
             VALUES ({placeholders})
             ON CONFLICT DO NOTHING;
             """,
@@ -665,7 +693,10 @@ async def _on_trade_update(mgr: "AccountManager", data: Any) -> None:
                 snapshot=row,
             )
             await _record_closed_trade_now(
-                mgr, row, exit_type=row.pop("_exit_type", "MANUAL")
+                mgr,
+                row,
+                exit_type=row.pop("_exit_type", "MANUAL"),
+                exit_order_id=oid,
             )
             await mgr._delete(parent, skip_closed=True)
         else:
@@ -710,7 +741,9 @@ async def _on_trade_update(mgr: "AccountManager", data: Any) -> None:
             await mgr._upsert(row, force_push=True)
 
             if _is_flat(row["qty"]):
-                await _record_closed_trade_now(mgr, row)
+                await _record_closed_trade_now(
+                    mgr, row, exit_order_id=oid
+                )
                 await mgr._delete(oid, skip_closed=True)
             return
 
